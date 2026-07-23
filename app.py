@@ -507,7 +507,7 @@ def korify(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=KOR_COLS)
 
 
-PERIOD_PRESETS = ["전체", "최근 1주", "최근 2주", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "직접 선택"]
+PERIOD_PRESETS = ["이번달", "전체", "최근 1주", "최근 2주", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "직접 선택"]
 PERIOD_DAYS = {
     "최근 1주": 7,
     "최근 2주": 14,
@@ -520,8 +520,14 @@ PERIOD_DAYS = {
 
 def period_filter(min_d: date, max_d: date, key: str):
     """Streamlit 기본 날짜범위 위젯의 영어 프리셋("Past Week" 등) 대신
-    한글 프리셋 선택 UI로 기간을 고른다."""
+    한글 프리셋 선택 UI로 기간을 고른다. 기본값은 '이번달' (1일 ~ 최신 데이터)."""
     preset = st.selectbox("기간 선택", PERIOD_PRESETS, index=0, key=f"{key}_preset")
+    if preset == "이번달":
+        month_start = date.today().replace(day=1)
+        start = max(min_d, month_start)
+        if start > max_d:
+            start = min_d
+        return start, max_d
     if preset == "전체":
         return min_d, max_d
     if preset in PERIOD_DAYS:
