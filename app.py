@@ -535,7 +535,7 @@ def main():
     with tab1:
         if not weekly.empty:
             st.subheader("🔎 기간 필터 (주간 기준)")
-            min_d, max_d = weekly["week_start"].min(), weekly["week_start"].max()
+            min_d, max_d = weekly["week_start"].min(), weekly["week_end"].max()
             date_range = st.date_input("기간", value=(min_d, max_d), min_value=min_d, max_value=max_d)
             start, end = date_range if isinstance(date_range, tuple) and len(date_range) == 2 else (min_d, max_d)
             fw = weekly[(weekly["week_start"] >= start) & (weekly["week_start"] <= end)]
