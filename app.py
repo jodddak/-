@@ -507,7 +507,15 @@ def korify(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=KOR_COLS)
 
 
-PERIOD_PRESETS = ["전체", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "직접 선택"]
+PERIOD_PRESETS = ["전체", "최근 1주", "최근 2주", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "직접 선택"]
+PERIOD_DAYS = {
+    "최근 1주": 7,
+    "최근 2주": 14,
+    "최근 1개월": 30,
+    "최근 3개월": 90,
+    "최근 6개월": 180,
+    "최근 1년": 365,
+}
 
 
 def period_filter(min_d: date, max_d: date, key: str):
@@ -516,14 +524,8 @@ def period_filter(min_d: date, max_d: date, key: str):
     preset = st.selectbox("기간 선택", PERIOD_PRESETS, index=0, key=f"{key}_preset")
     if preset == "전체":
         return min_d, max_d
-    if preset == "최근 1개월":
-        return max(min_d, max_d - timedelta(days=30)), max_d
-    if preset == "최근 3개월":
-        return max(min_d, max_d - timedelta(days=90)), max_d
-    if preset == "최근 6개월":
-        return max(min_d, max_d - timedelta(days=180)), max_d
-    if preset == "최근 1년":
-        return max(min_d, max_d - timedelta(days=365)), max_d
+    if preset in PERIOD_DAYS:
+        return max(min_d, max_d - timedelta(days=PERIOD_DAYS[preset])), max_d
     # 직접 선택
     date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
     if isinstance(date_range, tuple) and len(date_range) == 2:
