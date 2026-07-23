@@ -17,7 +17,7 @@ STCO 온라인팀 광고/마케팅 성과 대시보드
 
 import io
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -507,6 +507,30 @@ def korify(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=KOR_COLS)
 
 
+PERIOD_PRESETS = ["전체", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "직접 선택"]
+
+
+def period_filter(min_d: date, max_d: date, key: str):
+    """Streamlit 기본 날짜범위 위젯의 영어 프리셋("Past Week" 등) 대신
+    한글 프리셋 선택 UI로 기간을 고른다."""
+    preset = st.selectbox("기간 선택", PERIOD_PRESETS, index=0, key=f"{key}_preset")
+    if preset == "전체":
+        return min_d, max_d
+    if preset == "최근 1개월":
+        return max(min_d, max_d - timedelta(days=30)), max_d
+    if preset == "최근 3개월":
+        return max(min_d, max_d - timedelta(days=90)), max_d
+    if preset == "최근 6개월":
+        return max(min_d, max_d - timedelta(days=180)), max_d
+    if preset == "최근 1년":
+        return max(min_d, max_d - timedelta(days=365)), max_d
+    # 직접 선택
+    date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        return date_range
+    return min_d, max_d
+
+
 # ──────────────────────────────────────────────────────────────
 # 업로드 패널
 # ──────────────────────────────────────────────────────────────
@@ -577,8 +601,7 @@ def main():
         if not weekly.empty:
             st.subheader("🔎 기간 필터 (주간 기준)")
             min_d, max_d = weekly["week_start"].min(), weekly["week_end"].max()
-            date_range = st.date_input("기간", value=(min_d, max_d), min_value=min_d, max_value=max_d)
-            start, end = date_range if isinstance(date_range, tuple) and len(date_range) == 2 else (min_d, max_d)
+            start, end = period_filter(min_d, max_d, key="weekly")
             fw = weekly[(weekly["week_start"] >= start) & (weekly["week_start"] <= end)]
             fw = add_kpis(fw).sort_values("week_start")
 
@@ -617,8 +640,7 @@ def main():
             st.subheader("🔎 기간 필터 (월별 기준)")
             min_m = channels["report_month"].min()
             max_m = (pd.Timestamp(channels["report_month"].max()) + pd.offsets.MonthEnd(0)).date()
-            mrange = st.date_input("기간 ", value=(min_m, max_m), min_value=min_m, max_value=max_m, key="chan_range")
-            mstart, mend = mrange if isinstance(mrange, tuple) and len(mrange) == 2 else (min_m, max_m)
+            mstart, mend = period_filter(min_m, max_m, key="channel")
             fc = channels[(channels["report_month"] >= mstart) & (channels["report_month"] <= mend)]
 
             by_channel = (
