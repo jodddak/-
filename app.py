@@ -85,6 +85,10 @@ def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
     if df is None or df.empty:
         return 0
     df = df.copy()
+    # 같은 업로드 안에 동일 키(예: 같은 월+매체) 행이 중복되면 upsert 한 번의 요청 안에서
+    # 같은 행을 두 번 건드리게 되어 Postgres가 에러를 내므로, 저장 전에 미리 정리한다.
+    key_cols = [c.strip() for c in on_conflict.split(",")]
+    df = df.drop_duplicates(subset=key_cols, keep="last")
     df["source_file"] = source_file
     df["uploaded_at"] = datetime.utcnow().isoformat()
 
