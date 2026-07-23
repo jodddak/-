@@ -574,7 +574,8 @@ def main():
         if not channels.empty:
             channels["report_month"] = pd.to_datetime(channels["report_month"]).dt.date
             st.subheader("🔎 기간 필터 (월별 기준)")
-            min_m, max_m = channels["report_month"].min(), channels["report_month"].max()
+            min_m = channels["report_month"].min()
+            max_m = (pd.Timestamp(channels["report_month"].max()) + pd.offsets.MonthEnd(0)).date()
             mrange = st.date_input("기간 ", value=(min_m, max_m), min_value=min_m, max_value=max_m, key="chan_range")
             mstart, mend = mrange if isinstance(mrange, tuple) and len(mrange) == 2 else (min_m, max_m)
             fc = channels[(channels["report_month"] >= mstart) & (channels["report_month"] <= mend)]
