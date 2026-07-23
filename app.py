@@ -596,7 +596,7 @@ def main():
         if not df.empty and col in df.columns:
             df[col] = pd.to_datetime(df[col]).dt.date
 
-    tab1, tab2, tab3 = st.tabs(["종합 대시보드", "매체별 성과", "GA 유입경로"])
+    tab1, tab2, tab3, tab4 = st.tabs(["종합 대시보드", "매체별 성과", "GA 유입경로", "GA4 라이브 리포트"])
 
     # ── 종합 대시보드 ──────────────────────────────
     with tab1:
@@ -681,6 +681,34 @@ def main():
             st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(g)), file_name="ga_source.xlsx")
         else:
             st.info("GA 유입경로 데이터가 아직 없습니다.")
+
+    # ── GA4 라이브 리포트 (Looker Studio) ──────────────────
+    with tab4:
+        looker_view_url = (
+            "https://lookerstudio.google.com/u/0/reporting/"
+            "7177b0a5-7d7e-4f07-af76-17f2436b317e/page/p_bbwwb7lo4c"
+        )
+        looker_embed_url = (
+            "https://lookerstudio.google.com/embed/reporting/"
+            "7177b0a5-7d7e-4f07-af76-17f2436b317e/page/p_bbwwb7lo4c"
+        )
+        st.markdown("### 구글 애널리틱스(GA4) 라이브 리포트")
+        st.caption(
+            "대행사가 만든 리포트라 일반 공개(링크가 있는 모든 사용자)로 바꾸기 어려우면, "
+            "대시보드 안에 그대로 넣는(임베드) 대신 아래 버튼으로 본인 구글 계정 권한으로 새 창에서 열어 보세요."
+        )
+        st.link_button("📊 GA4 리포트 새 창에서 열기", looker_view_url, use_container_width=True)
+
+        with st.expander("대시보드 안에 직접 띄워보기 (권한 있으면 아래에 표시됨)"):
+            st.caption(
+                "대행사에게 Looker Studio에서 파일 > 삽입 보고서(Embed report)를 켜달라고 요청하면 "
+                "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
+            )
+            st.markdown(
+                f'<iframe src="{looker_embed_url}" width="100%" height="900" '
+                f'style="border:0" allowfullscreen></iframe>',
+                unsafe_allow_html=True,
+            )
 
 
 if __name__ == "__main__":
