@@ -466,6 +466,47 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+# 화면/엑셀에 표시할 때 쓰는 한글 컬럼명
+KOR_COLS = {
+    "channel": "매체",
+    "impressions": "노출수",
+    "clicks": "클릭수",
+    "cost_excl_vat": "광고비(VAT제외)",
+    "cost_incl_vat": "광고비(VAT포함)",
+    "signups": "회원가입",
+    "conversions": "전환수",
+    "revenue": "매출",
+    "ctr": "CTR(%)",
+    "cpc": "CPC",
+    "cpa": "CPA",
+    "cvr": "CVR(%)",
+    "roas": "ROAS(%)",
+    "aov": "객단가",
+    "ga_conversions": "GA-전환수",
+    "ga_revenue": "GA-매출",
+    "ga_roas": "GA-ROAS(%)",
+    "report_month": "월",
+    "week_start": "주 시작일",
+    "week_end": "주 종료일",
+    "label": "기간",
+    "as_of_month": "기준월",
+    "as_of_date": "기준일",
+    "source_medium": "소스/매체",
+    "users": "사용자",
+    "new_users": "신규방문자",
+    "sessions": "세션",
+    "bounce_rate": "이탈률(%)",
+    "pages_per_session": "세션당 페이지수",
+    "avg_session_duration": "평균 세션시간(초)",
+    "ecommerce_cvr": "전자상거래 전환율(%)",
+    "transactions": "거래수",
+}
+
+
+def korify(df: pd.DataFrame) -> pd.DataFrame:
+    return df.rename(columns=KOR_COLS)
+
+
 # ──────────────────────────────────────────────────────────────
 # 업로드 패널
 # ──────────────────────────────────────────────────────────────
@@ -555,8 +596,8 @@ def main():
             show_cols = ["label", "week_start", "week_end", "impressions", "clicks", "ctr", "cpc",
                          "cost_excl_vat", "cost_incl_vat", "signups", "conversions", "cvr", "cpa", "revenue", "roas", "aov"]
             show_cols = [c for c in show_cols if c in fw.columns]
-            st.dataframe(fw[show_cols], use_container_width=True)
-            st.download_button("⬇️ 엑셀 다운로드 (주간)", data=to_excel_bytes(fw[show_cols]), file_name="weekly_overview.xlsx")
+            st.dataframe(korify(fw[show_cols]), use_container_width=True)
+            st.download_button("⬇️ 엑셀 다운로드 (주간)", data=to_excel_bytes(korify(fw[show_cols])), file_name="weekly_overview.xlsx")
         else:
             st.info("주간 데이터가 아직 없습니다.")
 
@@ -590,8 +631,8 @@ def main():
 
             fig = px.bar(by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f")
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(by_channel, use_container_width=True)
-            st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(by_channel), file_name="channel_performance.xlsx")
+            st.dataframe(korify(by_channel), use_container_width=True)
+            st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(by_channel)), file_name="channel_performance.xlsx")
         else:
             st.info("매체별 데이터가 아직 없습니다.")
 
@@ -603,7 +644,7 @@ def main():
             st.caption(f"기준월: {latest_month}")
             cols = ["channel", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas", "ga_conversions", "ga_revenue", "ga_roas"]
             cols = [c for c in cols if c in snap_latest.columns]
-            st.dataframe(snap_latest[cols].sort_values("cost_incl_vat", ascending=False), use_container_width=True)
+            st.dataframe(korify(snap_latest[cols].sort_values("cost_incl_vat", ascending=False)), use_container_width=True)
 
     # ── GA 유입경로 ──────────────────────────────
     with tab3:
@@ -612,8 +653,8 @@ def main():
             latest = ga["as_of_date"].max()
             g = ga[ga["as_of_date"] == latest].sort_values("revenue", ascending=False)
             st.caption(f"기준일: {latest} (마지막 업로드 시점 스냅샷)")
-            st.dataframe(g, use_container_width=True)
-            st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(g), file_name="ga_source.xlsx")
+            st.dataframe(korify(g), use_container_width=True)
+            st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(g)), file_name="ga_source.xlsx")
         else:
             st.info("GA 유입경로 데이터가 아직 없습니다.")
 
