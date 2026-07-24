@@ -1143,7 +1143,7 @@ def main():
         if not wk.empty:
             wk["week_no"] = wk["label"].astype(str).str.replace(r"\s*\(.*\)\s*$", "", regex=True).str.strip()
             wk["week_range"] = wk.apply(lambda r: f"{r['week_start']:%Y-%m-%d}~{r['week_end']:%Y-%m-%d}", axis=1)
-        week_show_cols = ["week_no", "week_range", "impressions", "clicks", "ctr", "cpc",
+        week_show_cols = ["week_range", "week_no", "impressions", "clicks", "ctr", "cpc",
                            "cost_excl_vat", "cost_incl_vat", "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
         week_numeric_cols = [c for c in week_show_cols if c not in ("week_no", "week_range")]
         render_cumulative_table(
