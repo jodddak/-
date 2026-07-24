@@ -748,6 +748,7 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     """날짜범위 버튼(달력 아이콘 + 시작~종료일 + ◀/▶) 클릭 시 프리셋/직접선택 패널이 열리는
     기간 선택 UI. 반환값은 (start, end)."""
     start_key, end_key = f"{key}_drp_start", f"{key}_drp_end"
+    manual_key = f"{key}_drp_manual_mode"
     cal_key = f"{key}_drp_calendar"
 
     if start_key not in st.session_state:
@@ -767,8 +768,7 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
             if new_end >= min_d:
                 st.session_state[start_key] = max(min_d, new_start)
                 st.session_state[end_key] = new_end
-                if cal_key in st.session_state:
-                    del st.session_state[cal_key]
+                st.session_state[manual_key] = False
                 st.rerun()
     with col_next:
         if st.button("▶", key=f"{key}_drp_next", use_container_width=True):
@@ -778,43 +778,48 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
             if new_start <= max_d:
                 st.session_state[start_key] = new_start
                 st.session_state[end_key] = min(max_d, new_end)
+                st.session_state[manual_key] = False
+                st.rerun()
+    with col_main:
+        # 달력은 팝오버 "안"에 중첩하면 브라우저에서 안 뜨는 경우가 있어(팝오버 속 팝오버 충돌),
+        # 팝오버에는 프리셋만 두고 달력은 팝오버 밖(패널 아래)에 별도로 띄운다.
+        with st.popover(f"📅 {cur_start:%Y.%m.%d} → {cur_end:%Y.%m.%d}", use_container_width=True):
+            for i, p in enumerate(DATE_PRESETS):
+                if st.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
+                    s, e = _preset_to_range(p, min_d, max_d)
+                    st.session_state[start_key], st.session_state[end_key] = s, e
+                    st.session_state[manual_key] = False
+                    st.rerun()
+            st.markdown("---")
+            if st.button("🗓️ 직접 선택 (달력)", key=f"{key}_drp_manual_btn", use_container_width=True):
+                st.session_state[manual_key] = True
+                st.rerun()
+
+    if st.session_state.get(manual_key):
+        if cal_key not in st.session_state:
+            st.session_state[cal_key] = (cur_start, cur_end)
+        with st.container(border=True):
+            dr = st.date_input(
+                "직접 선택", min_value=min_d, max_value=max_d, key=cal_key,
+            )
+            if isinstance(dr, tuple) and len(dr) == 2:
+                pend_s, pend_e = dr
+            else:
+                pend_s, pend_e = cur_start, cur_end
+
+            bc1, bc2, _bspacer = st.columns([1, 1, 6])
+            if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
+                st.session_state[manual_key] = False
                 if cal_key in st.session_state:
                     del st.session_state[cal_key]
                 st.rerun()
-    with col_main:
-        with st.popover(f"📅 {cur_start:%Y.%m.%d} → {cur_end:%Y.%m.%d}", use_container_width=True):
-            # date_input은 key로 지정된 세션 상태를 직접 소유한다. 프리셋 버튼에서 값을 바꾸려면
-            # date_input을 호출하기 "전"에 같은 key(cal_key)로 세션 상태를 직접 써야 화면에 반영된다
-            # (value= 인자는 위젯이 이미 존재하면 무시되기 때문에 별도 변수로는 반영되지 않았던 버그 수정).
-            if cal_key not in st.session_state:
-                st.session_state[cal_key] = (cur_start, cur_end)
-
-            # 왼쪽: 프리셋 목록(세로 1열) / 오른쪽: 달력(직접 선택) + 취소·확인
-            preset_col, calendar_col = st.columns([1, 2])
-            with preset_col:
-                for i, p in enumerate(DATE_PRESETS):
-                    if st.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
-                        s, e = _preset_to_range(p, min_d, max_d)
-                        st.session_state[cal_key] = (s, e)
-                        st.rerun()
-
-            with calendar_col:
-                dr = st.date_input(
-                    "직접 선택", min_value=min_d, max_value=max_d, key=cal_key,
-                )
-                if isinstance(dr, tuple) and len(dr) == 2:
-                    pend_s, pend_e = dr
-                else:
-                    pend_s, pend_e = cur_start, cur_end
-
-                bc1, bc2 = st.columns(2)
-                if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
-                    st.session_state[cal_key] = (cur_start, cur_end)
-                    st.rerun()
-                if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
-                    st.session_state[start_key] = pend_s
-                    st.session_state[end_key] = pend_e
-                    st.rerun()
+            if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
+                st.session_state[start_key] = pend_s
+                st.session_state[end_key] = pend_e
+                st.session_state[manual_key] = False
+                if cal_key in st.session_state:
+                    del st.session_state[cal_key]
+                st.rerun()
 
     return st.session_state[start_key], st.session_state[end_key]
 
