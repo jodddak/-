@@ -26,137 +26,139 @@ import streamlit as st
 
 st.set_page_config(page_title="STCO 광고성과 대시보드", page_icon="📊", layout="wide")
 
-# ── Apple 디자인 톤 (SF Pro 스택 / #0071e3 primary / #f5f5f7 캔버스) ──
-APPLE_FONT_STACK = (
-    '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", '
+# ── 디자인 톤 (Toss / TDS Mobile: Toss Product Sans, #3182f6 primary, 흰 캔버스) ──
+THEME_FONT_STACK = (
+    '"Toss Product Sans", -apple-system, BlinkMacSystemFont, '
     '"Apple SD Gothic Neo", "Malgun Gothic", "Helvetica Neue", Arial, sans-serif'
 )
-APPLE_COLORS = {
-    "primary": "#0071e3",
-    "brand": "#000000",
-    "canvas": "#f5f5f7",
-    "surface": "#ffffff",
-    "foreground": "#1d1d1f",
-    "muted": "#6e6e73",
-    "secondary": "#515154",
-    "link": "#0066cc",
-    "border": "#e5e5e7",
+THEME_COLORS = {
+    "primary": "#3182f6",
+    "primary_hover": "#2272eb",
+    "canvas": "#ffffff",
+    "surface": "#f2f4f6",
+    "foreground": "#191f28",
+    "body": "#4e5968",
+    "muted": "#8b95a1",
+    "border": "#e5e8eb",
+    "on_primary": "#ffffff",
+    "weak_bg": "#e8f3ff",
+    "weak_fg": "#1b64da",
+    "danger": "#e42939",
 }
-px.defaults.color_discrete_sequence = ["#0071e3", "#1d1d1f", "#6e6e73", "#0066cc"]
+px.defaults.color_discrete_sequence = ["#3182f6", "#191f28", "#8b95a1", "#1b64da"]
 
 
-def apple_chart(fig):
-    """Plotly 차트에 Apple 톤(SF Pro, 화이트 배경, 옅은 그리드)을 적용."""
+def theme_chart(fig):
+    """Plotly 차트에 Toss 톤(Toss Product Sans, 화이트 배경, 옅은 그리드)을 적용."""
     fig.update_layout(
-        font_family=APPLE_FONT_STACK,
-        font_color=APPLE_COLORS["foreground"],
+        font_family=THEME_FONT_STACK,
+        font_color=THEME_COLORS["foreground"],
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
         title_font_size=17,
-        title_font_color=APPLE_COLORS["foreground"],
-        legend_title_font_color=APPLE_COLORS["muted"],
+        title_font_color=THEME_COLORS["foreground"],
+        legend_title_font_color=THEME_COLORS["muted"],
         margin=dict(l=10, r=10, t=50, b=10),
     )
-    fig.update_xaxes(gridcolor=APPLE_COLORS["canvas"], zerolinecolor=APPLE_COLORS["border"], linecolor=APPLE_COLORS["border"])
-    fig.update_yaxes(gridcolor=APPLE_COLORS["canvas"], zerolinecolor=APPLE_COLORS["border"], linecolor=APPLE_COLORS["border"])
+    fig.update_xaxes(gridcolor=THEME_COLORS["surface"], zerolinecolor=THEME_COLORS["border"], linecolor=THEME_COLORS["border"])
+    fig.update_yaxes(gridcolor=THEME_COLORS["surface"], zerolinecolor=THEME_COLORS["border"], linecolor=THEME_COLORS["border"])
     return fig
 
 
-def inject_apple_theme():
+def inject_theme():
     st.markdown(
         f"""
         <style>
         html, body, [class*="css"], .stApp, .stMarkdown, .stText {{
-            font-family: {APPLE_FONT_STACK} !important;
+            font-family: {THEME_FONT_STACK} !important;
         }}
         .stApp, [data-testid="stAppViewContainer"] {{
-            background-color: {APPLE_COLORS["canvas"]};
+            background-color: {THEME_COLORS["canvas"]};
         }}
         [data-testid="stHeader"] {{ background-color: transparent; }}
         .block-container {{ padding-top: 2rem; max-width: 1200px; }}
 
         [data-testid="stSidebar"] {{
-            background-color: {APPLE_COLORS["surface"]};
-            border-right: 1px solid {APPLE_COLORS["border"]};
+            background-color: {THEME_COLORS["surface"]};
+            border-right: 1px solid {THEME_COLORS["border"]};
         }}
 
         h1, h2, h3, h4 {{
-            color: {APPLE_COLORS["foreground"]} !important;
-            font-weight: 600 !important;
-            letter-spacing: -0.02em;
+            color: {THEME_COLORS["foreground"]} !important;
+            font-weight: 700 !important;
+            letter-spacing: -0.01em;
         }}
-        h1 {{ font-size: 32px !important; }}
-        h2 {{ font-size: 24px !important; }}
-        h3 {{ font-size: 19px !important; }}
-        h4 {{ font-size: 17px !important; }}
-        p, span, label, div {{ color: {APPLE_COLORS["foreground"]}; }}
+        h1 {{ font-size: 32px !important; font-weight: 700 !important; }}
+        h2 {{ font-size: 24px !important; font-weight: 600 !important; }}
+        h3 {{ font-size: 19px !important; font-weight: 600 !important; }}
+        h4 {{ font-size: 17px !important; font-weight: 600 !important; }}
+        p, span, label, div {{ color: {THEME_COLORS["body"]}; }}
         [data-testid="stCaptionContainer"], .stCaption, small {{
-            color: {APPLE_COLORS["muted"]} !important;
+            color: {THEME_COLORS["muted"]} !important;
         }}
 
         [data-testid="stMetric"] {{
-            background: {APPLE_COLORS["surface"]};
-            border: 1px solid {APPLE_COLORS["border"]};
-            border-radius: 18px;
+            background: {THEME_COLORS["canvas"]};
+            border: 1px solid {THEME_COLORS["border"]};
+            border-radius: 14px;
             padding: 16px 20px;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
         }}
-        [data-testid="stMetricLabel"] {{ color: {APPLE_COLORS["muted"]} !important; font-weight: 400 !important; }}
-        [data-testid="stMetricValue"] {{ color: {APPLE_COLORS["foreground"]} !important; font-weight: 600 !important; }}
+        [data-testid="stMetricLabel"] {{ color: {THEME_COLORS["muted"]} !important; font-weight: 400 !important; }}
+        [data-testid="stMetricValue"] {{ color: {THEME_COLORS["foreground"]} !important; font-weight: 700 !important; }}
 
         .stButton > button, .stDownloadButton > button, .stLinkButton > a {{
-            background-color: {APPLE_COLORS["primary"]} !important;
-            color: #ffffff !important;
+            background-color: {THEME_COLORS["primary"]} !important;
+            color: {THEME_COLORS["on_primary"]} !important;
             border: none !important;
-            border-radius: 980px !important;
-            padding: 8px 22px !important;
-            font-weight: 400 !important;
+            border-radius: 10px !important;
+            padding: 8px 20px !important;
+            font-weight: 600 !important;
             font-size: 15px !important;
             box-shadow: none !important;
             transition: background-color .15s ease;
         }}
         .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover {{
-            background-color: #0077ed !important;
-            color: #ffffff !important;
+            background-color: {THEME_COLORS["primary_hover"]} !important;
+            color: {THEME_COLORS["on_primary"]} !important;
         }}
         .stButton > button[kind="secondary"] {{
-            background-color: {APPLE_COLORS["surface"]} !important;
-            color: {APPLE_COLORS["link"]} !important;
-            border: 1px solid {APPLE_COLORS["link"]} !important;
+            background-color: {THEME_COLORS["weak_bg"]} !important;
+            color: {THEME_COLORS["weak_fg"]} !important;
+            border: none !important;
         }}
 
-        [data-testid="stTabs"] button {{ color: {APPLE_COLORS["muted"]}; font-weight: 500; }}
+        [data-testid="stTabs"] button {{ color: {THEME_COLORS["muted"]}; font-weight: 600; }}
         [data-testid="stTabs"] button[aria-selected="true"] {{
-            color: {APPLE_COLORS["primary"]} !important;
-            border-bottom-color: {APPLE_COLORS["primary"]} !important;
+            color: {THEME_COLORS["primary"]} !important;
+            border-bottom-color: {THEME_COLORS["primary"]} !important;
         }}
 
         [data-baseweb="select"] > div {{
             border-radius: 8px !important;
-            border-color: {APPLE_COLORS["border"]} !important;
+            border-color: {THEME_COLORS["border"]} !important;
         }}
         .stTextInput > div > div, .stDateInput > div > div {{ border-radius: 8px !important; }}
 
         [data-testid="stFileUploader"] section {{
-            border-radius: 12px;
-            border: 1px dashed #d2d2d7;
-            background: #fafafa;
+            border-radius: 10px;
+            border: 1px dashed {THEME_COLORS["border"]};
+            background: {THEME_COLORS["surface"]};
         }}
 
         [data-testid="stDataFrame"] {{
-            border-radius: 12px;
+            border-radius: 10px;
             overflow: hidden;
-            border: 1px solid {APPLE_COLORS["border"]};
+            border: 1px solid {THEME_COLORS["border"]};
         }}
 
-        hr {{ border-color: {APPLE_COLORS["border"]}; }}
+        hr {{ border-color: {THEME_COLORS["border"]}; }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-inject_apple_theme()
+inject_theme()
 
 TABLES = {
     "weekly_overview": "weekly_overview",
@@ -762,25 +764,25 @@ def render_html_table(table: pd.DataFrame):
     html = f"""
     <style>
     .stco-table-wrap {{
-        overflow-x:auto; border:1px solid #e5e5e7; border-radius:12px; background:#ffffff;
+        overflow-x:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px; background:{THEME_COLORS["canvas"]};
     }}
     .stco-table {{
         width:100%; border-collapse:collapse; font-size:14px;
-        font-family: {APPLE_FONT_STACK};
+        font-family: {THEME_FONT_STACK};
     }}
     .stco-table th {{
-        background:#f5f5f7; color:#6e6e73; font-weight:500; padding:8px 14px;
-        text-align:right; border-bottom:1px solid #e5e5e7; white-space:nowrap;
+        background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["muted"]}; font-weight:600; padding:8px 14px;
+        text-align:right; border-bottom:1px solid {THEME_COLORS["border"]}; white-space:nowrap;
     }}
-    .stco-table th:first-child {{ text-align:left; border-top-left-radius:12px; }}
-    .stco-table th:last-child {{ border-top-right-radius:12px; }}
+    .stco-table th:first-child {{ text-align:left; border-top-left-radius:10px; }}
+    .stco-table th:last-child {{ border-top-right-radius:10px; }}
     .stco-table td {{
-        padding:8px 14px; text-align:right; color:#1d1d1f;
-        border-bottom:1px solid #f0f0f2; white-space:nowrap;
+        padding:8px 14px; text-align:right; color:{THEME_COLORS["foreground"]};
+        border-bottom:1px solid {THEME_COLORS["border"]}; white-space:nowrap;
     }}
     .stco-table td:first-child {{ text-align:left; }}
     .stco-table tr:last-child td {{ border-bottom:none; }}
-    .stco-table tr:hover td {{ background:#fafafa; }}
+    .stco-table tr:hover td {{ background:{THEME_COLORS["surface"]}; }}
     </style>
     <div class="stco-table-wrap">
     <table class="stco-table">
@@ -1013,13 +1015,13 @@ def main():
                     title="주간 비용(VAT포함) vs 매출",
                     labels={"week_start": "주 시작일", "value": "금액(원)", "variable": "구분"},
                 )
-                st.plotly_chart(apple_chart(fig), use_container_width=True)
+                st.plotly_chart(theme_chart(fig), use_container_width=True)
             with c2:
                 fig2 = px.line(
                     fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)",
                     labels={"week_start": "주 시작일", "roas": "ROAS(%)"},
                 )
-                st.plotly_chart(apple_chart(fig2), use_container_width=True)
+                st.plotly_chart(theme_chart(fig2), use_container_width=True)
 
         else:
             st.info("주간 데이터가 아직 없습니다.")
@@ -1035,7 +1037,7 @@ def main():
                 labels={"report_month": "월", "value": "ROAS(%)", "variable": "기준"},
                 title="플랫폼 리포팅 ROAS vs GA 기준 ROAS",
             )
-            st.plotly_chart(apple_chart(fig3), use_container_width=True)
+            st.plotly_chart(theme_chart(fig3), use_container_width=True)
             st.caption("* GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
 
         # ── 누적 데이터 (월별 / 주간별 / 일자별) ──────────────────
@@ -1093,7 +1095,7 @@ def main():
                 by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
                 labels={"channel": "매체", "roas": "ROAS(%)"},
             )
-            st.plotly_chart(apple_chart(fig), use_container_width=True)
+            st.plotly_chart(theme_chart(fig), use_container_width=True)
             st.dataframe(korify(format_display(by_channel)), use_container_width=True, hide_index=True)
             st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx")
         else:
