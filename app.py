@@ -751,7 +751,8 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     cur_start = max(min_d, min(st.session_state[start_key], max_d))
     cur_end = min(max_d, max(st.session_state[end_key], min_d))
 
-    col_prev, col_main, col_next = st.columns([1, 10, 1])
+    # 버튼 폭을 좁게 고정 (전체 폭으로 늘어나지 않도록 좁은 컬럼 안에만 배치하고 나머지는 빈 컬럼으로 남긴다)
+    col_prev, col_main, col_next, _spacer = st.columns([1, 4, 1, 10])
     with col_prev:
         if st.button("◀", key=f"{key}_drp_prev", use_container_width=True):
             span = (cur_end - cur_start).days + 1
@@ -775,29 +776,30 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
             if pend_s_key not in st.session_state:
                 st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
 
-            pc1, pc2 = st.columns(2)
-            for i, p in enumerate(DATE_PRESETS):
-                target = pc1 if i % 2 == 0 else pc2
-                if target.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
-                    s, e = _preset_to_range(p, min_d, max_d)
-                    st.session_state[pend_s_key], st.session_state[pend_e_key] = s, e
+            # 왼쪽: 프리셋 목록(세로 1열) / 오른쪽: 달력(직접 선택) + 취소·확인
+            preset_col, calendar_col = st.columns([1, 2])
+            with preset_col:
+                for i, p in enumerate(DATE_PRESETS):
+                    if st.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
+                        s, e = _preset_to_range(p, min_d, max_d)
+                        st.session_state[pend_s_key], st.session_state[pend_e_key] = s, e
 
-            st.markdown("---")
-            dr = st.date_input(
-                "직접 선택", value=(st.session_state[pend_s_key], st.session_state[pend_e_key]),
-                min_value=min_d, max_value=max_d, key=f"{key}_drp_calendar",
-            )
-            if isinstance(dr, tuple) and len(dr) == 2:
-                st.session_state[pend_s_key], st.session_state[pend_e_key] = dr
+            with calendar_col:
+                dr = st.date_input(
+                    "직접 선택", value=(st.session_state[pend_s_key], st.session_state[pend_e_key]),
+                    min_value=min_d, max_value=max_d, key=f"{key}_drp_calendar",
+                )
+                if isinstance(dr, tuple) and len(dr) == 2:
+                    st.session_state[pend_s_key], st.session_state[pend_e_key] = dr
 
-            bc1, bc2 = st.columns(2)
-            if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
-                st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
-                st.rerun()
-            if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
-                st.session_state[start_key] = st.session_state[pend_s_key]
-                st.session_state[end_key] = st.session_state[pend_e_key]
-                st.rerun()
+                bc1, bc2 = st.columns(2)
+                if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
+                    st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
+                    st.rerun()
+                if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
+                    st.session_state[start_key] = st.session_state[pend_s_key]
+                    st.session_state[end_key] = st.session_state[pend_e_key]
+                    st.rerun()
 
     return st.session_state[start_key], st.session_state[end_key]
 
