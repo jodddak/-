@@ -574,17 +574,43 @@ def period_filter(min_d: date, max_d: date, key: str):
     return min_d, max_d
 
 
-PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 200]
+PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
+
+# 표시 포맷: 정수+콤마(돈/카운트), 소수점 2자리 %(CTR·CVR류), 소수점 0자리 %(ROAS류)
+MONEY_COLS = {
+    "impressions", "clicks", "signups", "conversions", "cost_excl_vat", "cost_incl_vat",
+    "cpc", "cpa", "revenue", "aov", "ga_conversions", "ga_revenue",
+    "users", "new_users", "sessions", "transactions",
+}
+PCT2_COLS = {"ctr", "cvr", "bounce_rate", "ecommerce_cvr"}
+PCT0_COLS = {"roas", "ga_roas"}
 
 
-def pct_change_row(df_sorted: pd.DataFrame, numeric_cols: list, label_col: str, label_text: str = "전기간 대비"):
-    """가장 최근 값 대비 그 이전 값의 증감율을 계산해 표 맨 아래에 붙일 한 줄을 만든다."""
-    if len(df_sorted) < 2:
+def format_display(df: pd.DataFrame) -> pd.DataFrame:
+    """화면/엑셀에 보여줄 때 쓰는 최종 포맷팅 (콤마, 소수점 자리수, 날짜 형식)."""
+    df = df.copy()
+    for c in df.columns:
+        if c == "report_month":
+            df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m")
+        elif c in ("week_start", "week_end", "report_date", "as_of_month", "as_of_date"):
+            df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m-%d")
+        elif c in MONEY_COLS:
+            df[c] = pd.to_numeric(df[c], errors="coerce").map(lambda v: f"{v:,.0f}" if pd.notna(v) else "")
+        elif c in PCT2_COLS:
+            df[c] = pd.to_numeric(df[c], errors="coerce").map(lambda v: f"{v:.2f}%" if pd.notna(v) else "")
+        elif c in PCT0_COLS:
+            df[c] = pd.to_numeric(df[c], errors="coerce").map(lambda v: f"{v:.0f}%" if pd.notna(v) else "")
+    return df
+
+
+def pct_change_row(d_full: pd.DataFrame, latest_pos: int, numeric_cols: list, label_col: str, label_text: str = "전기간 대비"):
+    """d_full(전체 정렬 데이터)에서 latest_pos 위치의 행과 바로 이전 행을 비교해 증감율 행을 만든다."""
+    if latest_pos <= 0 or latest_pos >= len(d_full):
         return None
-    latest, prev = df_sorted.iloc[-1], df_sorted.iloc[-2]
+    latest, prev = d_full.iloc[latest_pos], d_full.iloc[latest_pos - 1]
     row = {label_col: label_text}
     for c in numeric_cols:
-        if c not in df_sorted.columns:
+        if c not in d_full.columns:
             continue
         pv, lv = prev.get(c), latest.get(c)
         if pd.isna(pv) or pv in (0, None):
@@ -596,52 +622,115 @@ def pct_change_row(df_sorted: pd.DataFrame, numeric_cols: list, label_col: str, 
     return row
 
 
+def build_year_options(date_series: pd.Series):
+    years = sorted({d.year for d in pd.to_datetime(date_series).dropna()})
+    return years
+
+
+def render_pager(total_pages: int, key: str) -> int:
+    """« 1 2 3 » 형태의 페이지 버튼. 처음 볼 땐 최신 데이터가 있는 마지막 페이지부터 보여준다."""
+    state_key = f"{key}_pagenum"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = total_pages
+    cur = min(max(st.session_state[state_key], 1), total_pages)
+
+    window = 5
+    start_p = max(1, cur - window // 2)
+    end_p = min(total_pages, start_p + window - 1)
+    start_p = max(1, end_p - window + 1)
+
+    spacer, pager_area = st.columns([3, 4])
+    with pager_area:
+        n_buttons = end_p - start_p + 3
+        btn_cols = st.columns(n_buttons)
+        if btn_cols[0].button("«", key=f"{key}_prev", disabled=cur <= 1, use_container_width=True):
+            cur = max(1, cur - 1)
+        for i, p in enumerate(range(start_p, end_p + 1)):
+            if btn_cols[i + 1].button(
+                str(p), key=f"{key}_p{p}", type=("primary" if p == cur else "secondary"), use_container_width=True
+            ):
+                cur = p
+        if btn_cols[-1].button("»", key=f"{key}_next", disabled=cur >= total_pages, use_container_width=True):
+            cur = min(total_pages, cur + 1)
+    st.session_state[state_key] = cur
+    return cur
+
+
 def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, numeric_cols: list,
-                             default_n: int, title: str, key: str, month_default: bool = False):
-    """월별/주간/일자별 누적 표. 기본은 최근 N개(또는 이번 달)만 보여주고,
-    '이전 데이터 더 보기'를 켜면 10/30/50/100/200개 단위 페이지네이션으로 전체를 볼 수 있다."""
+                             title: str, key: str, mode: str):
+    """월별/주간/일자별 누적 표.
+    mode: 'month' → 기본값 당해년도(1월~최신월) / 'week' → 기본값 최근 5주 / 'day' → 기본값 이번달
+    프리셋: (week·day는) 기본, 연도별, 전체, 직접선택
+    """
     st.markdown(f"#### {title}")
     if df is None or df.empty:
         st.caption("데이터가 아직 없습니다.")
         return
 
     d = df.sort_values(date_col).reset_index(drop=True)
-    total = len(d)
-    more = st.checkbox(f"이전 데이터 더 보기 (전체 {total}건)", key=f"{key}_more")
+    d[date_col] = pd.to_datetime(d[date_col])
+    years = build_year_options(d[date_col])
+    year_labels = [f"{y}년" for y in years]
 
-    if not more:
-        if month_default:
-            cur_month = date.today().replace(day=1)
-            view = d[pd.to_datetime(d[date_col]) >= pd.Timestamp(cur_month)]
-            if view.empty:
-                view = d.tail(default_n)
-        else:
-            view = d.tail(default_n)
-        show_change_row = True
+    if mode == "month":
+        options = year_labels + ["전체", "직접선택"]
+        this_year = date.today().year
+        default_label = f"{this_year}년" if this_year in years else (year_labels[-1] if year_labels else "전체")
     else:
-        page_size = st.selectbox("페이지당 표시", PAGE_SIZE_OPTIONS, index=2, key=f"{key}_pagesize")
-        max_page = max(1, -(-total // page_size))
-        page = st.number_input(
-            f"페이지 (1~{max_page}, 클수록 최신)", min_value=1, max_value=max_page, value=max_page, step=1, key=f"{key}_page"
-        )
+        options = ["기본"] + year_labels + ["전체", "직접선택"]
+        default_label = "기본"
+
+    default_idx = options.index(default_label) if default_label in options else 0
+    preset = st.selectbox("기간", options, index=default_idx, key=f"{key}_preset")
+
+    need_pagination = True
+    if preset == "기본":
+        if mode == "week":
+            view_all = d.tail(5)
+        else:  # day
+            cur_month = pd.Timestamp(date.today().replace(day=1))
+            view_all = d[d[date_col] >= cur_month]
+            if view_all.empty:
+                view_all = d.tail(31)
+        need_pagination = False
+    elif preset == "전체":
+        view_all = d
+    elif preset == "직접선택":
+        min_d, max_d = d[date_col].min().date(), d[date_col].max().date()
+        date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
+        start, end = date_range if isinstance(date_range, tuple) and len(date_range) == 2 else (min_d, max_d)
+        view_all = d[(d[date_col].dt.date >= start) & (d[date_col].dt.date <= end)]
+    else:  # "YYYY년"
+        y = int(preset.replace("년", ""))
+        view_all = d[d[date_col].dt.year == y]
+
+    total = len(view_all)
+    if need_pagination and total > PAGE_SIZE_OPTIONS[0]:
+        page_size = st.selectbox("페이지당 표시", PAGE_SIZE_OPTIONS, index=1, key=f"{key}_{preset}_pagesize")
+        total_pages = max(1, -(-total // page_size))
+        page = render_pager(total_pages, key=f"{key}_{preset}") if total_pages > 1 else 1
         start_i, end_i = (page - 1) * page_size, page * page_size
-        view = d.iloc[start_i:end_i]
-        show_change_row = page == max_page
+        view = view_all.iloc[start_i:end_i]
+        show_change_row = page == total_pages
+    else:
+        view = view_all
+        show_change_row = True
 
     display_cols = [c for c in show_cols if c in view.columns]
-    table = view[display_cols].copy()
+    table = format_display(view[display_cols])  # 먼저 숫자/날짜 포맷 적용 (증감율 행은 이미 문자열이라 따로 붙임)
 
-    if show_change_row:
-        change_row = pct_change_row(d, numeric_cols, display_cols[0])
+    if show_change_row and len(view):
+        latest_pos = view.index[-1]
+        change_row = pct_change_row(d, latest_pos, numeric_cols, display_cols[0])
         if change_row:
             table = pd.concat([table, pd.DataFrame([change_row])], ignore_index=True)
 
     st.dataframe(korify(table), use_container_width=True)
     st.download_button(
         f"⬇️ 엑셀 다운로드 ({title})",
-        data=to_excel_bytes(korify(view[display_cols])),
+        data=to_excel_bytes(korify(format_display(view[display_cols]))),
         file_name=f"{key}.xlsx",
-        key=f"{key}_dl",
+        key=f"{key}_{preset}_dl",
     )
 
 
@@ -756,7 +845,7 @@ def main():
         render_cumulative_table(
             add_kpis(monthly) if not monthly.empty else monthly,
             date_col="report_month", show_cols=month_show_cols, numeric_cols=month_numeric_cols,
-            default_n=12, title="1) 월별 누적 (최근 12개월 기본)", key="monthly_cum",
+            title="1) 월별 누적", key="monthly_cum", mode="month",
         )
 
         week_show_cols = ["label", "week_start", "week_end", "impressions", "clicks", "ctr", "cpc",
@@ -765,7 +854,7 @@ def main():
         render_cumulative_table(
             add_kpis(weekly) if not weekly.empty else weekly,
             date_col="week_start", show_cols=week_show_cols, numeric_cols=week_numeric_cols,
-            default_n=5, title="2) 주간별 누적 (최근 5주 기본)", key="weekly_cum",
+            title="2) 주간별 누적", key="weekly_cum", mode="week",
         )
 
         day_show_cols = ["report_date", "impressions", "clicks", "ctr", "cpc", "cost_excl_vat", "cost_incl_vat",
@@ -774,7 +863,7 @@ def main():
         render_cumulative_table(
             add_kpis(daily) if not daily.empty else daily,
             date_col="report_date", show_cols=day_show_cols, numeric_cols=day_numeric_cols,
-            default_n=31, title="3) 일자별 누적 (이번 달 기본)", key="daily_cum", month_default=True,
+            title="3) 일자별 누적", key="daily_cum", mode="day",
         )
 
     # ── 매체별 성과 ──────────────────────────────
@@ -797,8 +886,8 @@ def main():
 
             fig = px.bar(by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f")
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(korify(by_channel), use_container_width=True)
-            st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(by_channel)), file_name="channel_performance.xlsx")
+            st.dataframe(korify(format_display(by_channel)), use_container_width=True)
+            st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx")
         else:
             st.info("매체별 데이터가 아직 없습니다.")
 
@@ -810,7 +899,7 @@ def main():
             st.caption(f"기준월: {latest_month}")
             cols = ["channel", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas", "ga_conversions", "ga_revenue", "ga_roas"]
             cols = [c for c in cols if c in snap_latest.columns]
-            st.dataframe(korify(snap_latest[cols].sort_values("cost_incl_vat", ascending=False)), use_container_width=True)
+            st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True)
 
     # ── GA 유입경로 ──────────────────────────────
     with tab3:
@@ -819,8 +908,8 @@ def main():
             latest = ga["as_of_date"].max()
             g = ga[ga["as_of_date"] == latest].sort_values("revenue", ascending=False)
             st.caption(f"기준일: {latest} (마지막 업로드 시점 스냅샷)")
-            st.dataframe(korify(g), use_container_width=True)
-            st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(g)), file_name="ga_source.xlsx")
+            st.dataframe(korify(format_display(g)), use_container_width=True)
+            st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(format_display(g))), file_name="ga_source.xlsx")
         else:
             st.info("GA 유입경로 데이터가 아직 없습니다.")
 
