@@ -603,6 +603,23 @@ def format_display(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def style_change_row(table: pd.DataFrame, has_change_row: bool):
+    """맨 아래 증감율 행에서 ▲(상승)는 빨간색, ▼(하락)는 파란색 글씨로 표시."""
+    if not has_change_row or table.empty:
+        return table
+
+    def _color(val):
+        if isinstance(val, str):
+            if val.startswith("▲"):
+                return "color: red"
+            if val.startswith("▼"):
+                return "color: blue"
+        return ""
+
+    last_idx = table.index[-1]
+    return table.style.applymap(_color, subset=pd.IndexSlice[[last_idx], :])
+
+
 def pct_change_row(d_full: pd.DataFrame, latest_pos: int, numeric_cols: list, label_col: str, label_text: str = "전기간 대비"):
     """d_full(전체 정렬 데이터)에서 latest_pos 위치의 행과 바로 이전 행을 비교해 증감율 행을 만든다."""
     if latest_pos <= 0 or latest_pos >= len(d_full):
@@ -719,13 +736,16 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
     display_cols = [c for c in show_cols if c in view.columns]
     table = format_display(view[display_cols])  # 먼저 숫자/날짜 포맷 적용 (증감율 행은 이미 문자열이라 따로 붙임)
 
+    change_label = {"month": "전월 대비", "week": "전주 대비", "day": "전일 대비"}.get(mode, "전기간 대비")
+    has_change_row = False
     if show_change_row and len(view):
         latest_pos = view.index[-1]
-        change_row = pct_change_row(d, latest_pos, numeric_cols, display_cols[0])
+        change_row = pct_change_row(d, latest_pos, numeric_cols, display_cols[0], label_text=change_label)
         if change_row:
             table = pd.concat([table, pd.DataFrame([change_row])], ignore_index=True)
+            has_change_row = True
 
-    st.dataframe(korify(table), use_container_width=True)
+    st.dataframe(style_change_row(korify(table), has_change_row), use_container_width=True, hide_index=True)
     st.download_button(
         f"⬇️ 엑셀 다운로드 ({title})",
         data=to_excel_bytes(korify(format_display(view[display_cols]))),
@@ -815,10 +835,18 @@ def main():
             st.markdown("### 주간 추이")
             c1, c2 = st.columns(2)
             with c1:
-                fig = px.bar(fw, x="week_start", y=["cost_incl_vat", "revenue"], barmode="group", title="주간 비용(VAT포함) vs 매출")
+                chart_df = fw.rename(columns={"cost_incl_vat": "광고비(VAT포함)", "revenue": "매출"})
+                fig = px.bar(
+                    chart_df, x="week_start", y=["광고비(VAT포함)", "매출"], barmode="group",
+                    title="주간 비용(VAT포함) vs 매출",
+                    labels={"week_start": "주 시작일", "value": "금액(원)", "variable": "구분"},
+                )
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
-                fig2 = px.line(fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)")
+                fig2 = px.line(
+                    fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)",
+                    labels={"week_start": "주 시작일", "roas": "ROAS(%)"},
+                )
                 st.plotly_chart(fig2, use_container_width=True)
 
         else:
@@ -827,9 +855,14 @@ def main():
         if not monthly.empty:
             st.markdown("---")
             st.markdown("### 월별 GA-ROAS vs 플랫폼 ROAS")
-            fm_chart = add_kpis(monthly).sort_values("report_month")
-            fig3 = px.line(fm_chart, x="report_month", y=["roas", "ga_roas"], markers=True,
-                            labels={"value": "%", "variable": "기준"}, title="플랫폼 리포팅 ROAS vs GA 기준 ROAS")
+            fm_chart = add_kpis(monthly).sort_values("report_month").rename(
+                columns={"roas": "플랫폼 ROAS", "ga_roas": "GA ROAS"}
+            )
+            fig3 = px.line(
+                fm_chart, x="report_month", y=["플랫폼 ROAS", "GA ROAS"], markers=True,
+                labels={"report_month": "월", "value": "ROAS(%)", "variable": "기준"},
+                title="플랫폼 리포팅 ROAS vs GA 기준 ROAS",
+            )
             st.plotly_chart(fig3, use_container_width=True)
             st.caption("* GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
 
@@ -884,9 +917,12 @@ def main():
             )
             by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
 
-            fig = px.bar(by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f")
+            fig = px.bar(
+                by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
+                labels={"channel": "매체", "roas": "ROAS(%)"},
+            )
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(korify(format_display(by_channel)), use_container_width=True)
+            st.dataframe(korify(format_display(by_channel)), use_container_width=True, hide_index=True)
             st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx")
         else:
             st.info("매체별 데이터가 아직 없습니다.")
@@ -899,7 +935,7 @@ def main():
             st.caption(f"기준월: {latest_month}")
             cols = ["channel", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas", "ga_conversions", "ga_revenue", "ga_roas"]
             cols = [c for c in cols if c in snap_latest.columns]
-            st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True)
+            st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True, hide_index=True)
 
     # ── GA 유입경로 ──────────────────────────────
     with tab3:
@@ -908,7 +944,7 @@ def main():
             latest = ga["as_of_date"].max()
             g = ga[ga["as_of_date"] == latest].sort_values("revenue", ascending=False)
             st.caption(f"기준일: {latest} (마지막 업로드 시점 스냅샷)")
-            st.dataframe(korify(format_display(g)), use_container_width=True)
+            st.dataframe(korify(format_display(g)), use_container_width=True, hide_index=True)
             st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(format_display(g))), file_name="ga_source.xlsx")
         else:
             st.info("GA 유입경로 데이터가 아직 없습니다.")
