@@ -133,15 +133,19 @@ def inject_theme():
             border-bottom-color: {THEME_COLORS["primary"]} !important;
         }}
 
+        [data-testid="stPopover"] {{ width: fit-content !important; }}
+        [data-testid="stPopover"] > div {{ width: fit-content !important; }}
         [data-testid="stPopover"] > div > button {{
             background-color: {THEME_COLORS["canvas"]} !important;
             color: {THEME_COLORS["foreground"]} !important;
             border: 1px solid {THEME_COLORS["border"]} !important;
             border-radius: 8px !important;
             font-weight: 500 !important;
-            padding: 4px 10px !important;
-            font-size: 12.5px !important;
+            padding: 3px 8px !important;
+            font-size: 12px !important;
             white-space: nowrap !important;
+            min-width: 0 !important;
+            width: fit-content !important;
         }}
         [data-testid="stPopover"] > div > button:hover {{
             background-color: {THEME_COLORS["surface"]} !important;
@@ -749,19 +753,24 @@ DATE_PERIOD_OPTIONS = DATE_PRESETS + ["전체", "직접선택"]
 
 def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이번달"):
     """날짜 프리셋 버튼 목록(누적 표의 preset_button_picker와 동일한 방식) + 직접선택 달력.
-    반환값은 (start, end)."""
+    버튼 아래에 실제로 적용된 날짜범위를 항상 캡션으로 보여준다. 반환값은 (start, end)."""
     preset = preset_button_picker(DATE_PERIOD_OPTIONS, key=f"{key}_dateperiod", default=default_preset)
 
     if preset == "전체":
-        return min_d, max_d
-    if preset == "직접선택":
+        start, end = min_d, max_d
+    elif preset == "직접선택":
         date_range = st.date_input(
             "기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual",
         )
         if isinstance(date_range, tuple) and len(date_range) == 2:
-            return date_range
-        return min_d, max_d
-    return _preset_to_range(preset, min_d, max_d)
+            start, end = date_range
+        else:
+            start, end = min_d, max_d
+    else:
+        start, end = _preset_to_range(preset, min_d, max_d)
+
+    st.caption(f"📆 {start:%Y-%m-%d} ~ {end:%Y-%m-%d}")
+    return start, end
 
 
 def preset_button_picker(options: list, key: str, default: str, label_prefix: str = "📅"):
