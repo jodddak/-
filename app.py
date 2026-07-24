@@ -139,6 +139,9 @@ def inject_theme():
             border: 1px solid {THEME_COLORS["border"]} !important;
             border-radius: 8px !important;
             font-weight: 500 !important;
+            padding: 4px 10px !important;
+            font-size: 12.5px !important;
+            white-space: nowrap !important;
         }}
         [data-testid="stPopover"] > div > button:hover {{
             background-color: {THEME_COLORS["surface"]} !important;
@@ -148,6 +151,13 @@ def inject_theme():
         [data-testid="stPopoverBody"] {{
             border-radius: 12px;
             border: 1px solid {THEME_COLORS["border"]};
+            overflow: visible !important;
+        }}
+        [data-testid="stPopoverBody"] * {{
+            overflow: visible;
+        }}
+        div[data-baseweb="popover"], div[data-baseweb="calendar"] {{
+            z-index: 999999 !important;
         }}
 
         [data-baseweb="select"] > div {{
@@ -752,7 +762,7 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     cur_end = min(max_d, max(st.session_state[end_key], min_d))
 
     # 버튼 폭을 좁게 고정 (전체 폭으로 늘어나지 않도록 좁은 컬럼 안에만 배치하고 나머지는 빈 컬럼으로 남긴다)
-    col_prev, col_main, col_next, _spacer = st.columns([1, 4, 1, 10])
+    col_prev, col_main, col_next, _spacer = st.columns([1, 2, 1, 12])
     with col_prev:
         if st.button("◀", key=f"{key}_drp_prev", use_container_width=True):
             span = (cur_end - cur_start).days + 1
