@@ -603,21 +603,48 @@ def format_display(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def style_change_row(table: pd.DataFrame, has_change_row: bool):
-    """맨 아래 증감율 행에서 ▲(상승)는 빨간색, ▼(하락)는 파란색 글씨로 표시."""
-    if not has_change_row or table.empty:
-        return table
+def render_html_table(table: pd.DataFrame):
+    """pandas Styler(jinja2 의존) 없이 순수 HTML로 표를 그린다.
+    ▲(상승)는 빨간색, ▼(하락)는 파란색 글씨로 표시하고, 인덱스는 표시하지 않는다."""
+    if table.empty:
+        st.caption("데이터가 아직 없습니다.")
+        return
 
-    def _color(val):
-        if isinstance(val, str):
-            if val.startswith("▲"):
-                return "color: red"
-            if val.startswith("▼"):
-                return "color: blue"
-        return ""
+    cols = list(table.columns)
+    thead = "".join(f"<th>{c}</th>" for c in cols)
 
-    last_idx = table.index[-1]
-    return table.style.applymap(_color, subset=pd.IndexSlice[[last_idx], :])
+    row_htmls = []
+    for _, row in table.iterrows():
+        cells = []
+        for c in cols:
+            val = row[c]
+            text = "" if pd.isna(val) else str(val)
+            style = ""
+            if text.startswith("▲"):
+                style = "color:#d93025;"
+            elif text.startswith("▼"):
+                style = "color:#1a73e8;"
+            cells.append(f'<td style="{style}">{text}</td>')
+        row_htmls.append(f"<tr>{''.join(cells)}</tr>")
+
+    html = f"""
+    <style>
+    .stco-table-wrap {{ overflow-x:auto; border:1px solid #e6e6e6; border-radius:6px; }}
+    .stco-table {{ width:100%; border-collapse:collapse; font-size:14px; }}
+    .stco-table th {{ background:#f0f2f6; padding:6px 12px; text-align:right; border-bottom:2px solid #d0d3d9; white-space:nowrap; }}
+    .stco-table th:first-child {{ text-align:left; }}
+    .stco-table td {{ padding:6px 12px; text-align:right; border-bottom:1px solid #eef0f3; white-space:nowrap; }}
+    .stco-table td:first-child {{ text-align:left; }}
+    .stco-table tr:last-child td {{ border-bottom:none; }}
+    </style>
+    <div class="stco-table-wrap">
+    <table class="stco-table">
+      <thead><tr>{thead}</tr></thead>
+      <tbody>{''.join(row_htmls)}</tbody>
+    </table>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def pct_change_row(d_full: pd.DataFrame, latest_pos: int, numeric_cols: list, label_col: str, label_text: str = "전기간 대비"):
@@ -745,7 +772,7 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
             table = pd.concat([table, pd.DataFrame([change_row])], ignore_index=True)
             has_change_row = True
 
-    st.dataframe(style_change_row(korify(table), has_change_row), use_container_width=True, hide_index=True)
+    render_html_table(korify(table))
     st.download_button(
         f"⬇️ 엑셀 다운로드 ({title})",
         data=to_excel_bytes(korify(format_display(view[display_cols]))),
