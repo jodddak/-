@@ -29,6 +29,7 @@ st.set_page_config(page_title="STCO 광고성과 대시보드", page_icon="📊"
 TABLES = {
     "weekly_overview": "weekly_overview",
     "monthly_overview": "monthly_overview",
+    "daily_overview": "daily_overview",
     "channel_monthly": "channel_monthly",
     "channel_snapshot": "channel_snapshot",
     "ga_source": "ga_source",
@@ -295,6 +296,36 @@ def parse_weekly(raw: pd.DataFrame, bounds, today: date):
     return out.reset_index(drop=True)
 
 
+def parse_daily(raw: pd.DataFrame, bounds, today: date):
+    """'3) 통합 일자별' 표를 파싱한다. 날짜 컬럼명은 '일자', 바로 옆에 '요일' 컬럼이 있다."""
+    if "daily" not in bounds:
+        return pd.DataFrame()
+    data, date_idx = section_dataframe(raw, *bounds["daily"], date_tokens=("일자", "기간", "월별"))
+    if data is None or data.empty:
+        return pd.DataFrame()
+    m = metric_cols(list(data.columns))
+    out = pd.DataFrame()
+    out["report_date"] = pd.to_datetime(data.iloc[:, date_idx], errors="coerce")
+    out = out[out["report_date"].notna()]
+    data = data.loc[out.index]
+    out["impressions"] = numcol(data, m["impr"])
+    out["clicks"] = numcol(data, m["clicks"])
+    out["cost_excl_vat"] = numcol(data, m["cost_ex"])
+    out["cost_incl_vat"] = numcol(data, m["cost_in"])
+    out["signups"] = numcol(data, m["signup"])
+    out["conversions"] = numcol(data, m["conv"])
+    out["revenue"] = numcol(data, m["rev"])
+    out["report_date"] = out["report_date"].dt.date
+    out = out[out["report_date"] <= today]
+    out = out.sort_values("report_date").reset_index(drop=True)
+    # 아직 보고되지 않은(전부 0인) 말미 날짜는 잘라낸다 (리포트 템플릿의 미래 placeholder 행)
+    metric_sum = out[["impressions", "clicks", "cost_excl_vat", "cost_incl_vat", "conversions", "revenue"]].sum(axis=1)
+    nonzero_idx = metric_sum[metric_sum > 0].index
+    if len(nonzero_idx):
+        out = out.loc[: nonzero_idx.max()]
+    return out.reset_index(drop=True)
+
+
 def parse_channel_snapshot(raw: pd.DataFrame, bounds, monthly_df: pd.DataFrame):
     if "channel_snap" not in bounds:
         return pd.DataFrame()
@@ -402,6 +433,7 @@ def parse_workbook(file, today: date):
     result = {
         "weekly": pd.DataFrame(),
         "monthly": pd.DataFrame(),
+        "daily": pd.DataFrame(),
         "channel_snapshot": pd.DataFrame(),
         "channels": pd.DataFrame(),
         "ga": pd.DataFrame(),
@@ -413,6 +445,7 @@ def parse_workbook(file, today: date):
         bounds = find_sections(raw)
         result["monthly"] = parse_monthly(raw, bounds, today)
         result["weekly"] = parse_weekly(raw, bounds, today)
+        result["daily"] = parse_daily(raw, bounds, today)
         result["channel_snapshot"] = parse_channel_snapshot(raw, bounds, result["monthly"])
 
     chan_frames = []
@@ -486,6 +519,8 @@ KOR_COLS = {
     "ga_revenue": "GA-매출",
     "ga_roas": "GA-ROAS(%)",
     "report_month": "월",
+    "report_date": "일자",
+    "weekday": "요일",
     "week_start": "주 시작일",
     "week_end": "주 종료일",
     "label": "기간",
@@ -539,6 +574,77 @@ def period_filter(min_d: date, max_d: date, key: str):
     return min_d, max_d
 
 
+PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 200]
+
+
+def pct_change_row(df_sorted: pd.DataFrame, numeric_cols: list, label_col: str, label_text: str = "전기간 대비"):
+    """가장 최근 값 대비 그 이전 값의 증감율을 계산해 표 맨 아래에 붙일 한 줄을 만든다."""
+    if len(df_sorted) < 2:
+        return None
+    latest, prev = df_sorted.iloc[-1], df_sorted.iloc[-2]
+    row = {label_col: label_text}
+    for c in numeric_cols:
+        if c not in df_sorted.columns:
+            continue
+        pv, lv = prev.get(c), latest.get(c)
+        if pd.isna(pv) or pv in (0, None):
+            row[c] = "-"
+            continue
+        change = (lv - pv) / abs(pv) * 100
+        arrow = "▲" if change >= 0 else "▼"
+        row[c] = f"{arrow}{change:+.1f}%"
+    return row
+
+
+def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, numeric_cols: list,
+                             default_n: int, title: str, key: str, month_default: bool = False):
+    """월별/주간/일자별 누적 표. 기본은 최근 N개(또는 이번 달)만 보여주고,
+    '이전 데이터 더 보기'를 켜면 10/30/50/100/200개 단위 페이지네이션으로 전체를 볼 수 있다."""
+    st.markdown(f"#### {title}")
+    if df is None or df.empty:
+        st.caption("데이터가 아직 없습니다.")
+        return
+
+    d = df.sort_values(date_col).reset_index(drop=True)
+    total = len(d)
+    more = st.checkbox(f"이전 데이터 더 보기 (전체 {total}건)", key=f"{key}_more")
+
+    if not more:
+        if month_default:
+            cur_month = date.today().replace(day=1)
+            view = d[pd.to_datetime(d[date_col]) >= pd.Timestamp(cur_month)]
+            if view.empty:
+                view = d.tail(default_n)
+        else:
+            view = d.tail(default_n)
+        show_change_row = True
+    else:
+        page_size = st.selectbox("페이지당 표시", PAGE_SIZE_OPTIONS, index=2, key=f"{key}_pagesize")
+        max_page = max(1, -(-total // page_size))
+        page = st.number_input(
+            f"페이지 (1~{max_page}, 클수록 최신)", min_value=1, max_value=max_page, value=max_page, step=1, key=f"{key}_page"
+        )
+        start_i, end_i = (page - 1) * page_size, page * page_size
+        view = d.iloc[start_i:end_i]
+        show_change_row = page == max_page
+
+    display_cols = [c for c in show_cols if c in view.columns]
+    table = view[display_cols].copy()
+
+    if show_change_row:
+        change_row = pct_change_row(d, numeric_cols, display_cols[0])
+        if change_row:
+            table = pd.concat([table, pd.DataFrame([change_row])], ignore_index=True)
+
+    st.dataframe(korify(table), use_container_width=True)
+    st.download_button(
+        f"⬇️ 엑셀 다운로드 ({title})",
+        data=to_excel_bytes(korify(view[display_cols])),
+        file_name=f"{key}.xlsx",
+        key=f"{key}_dl",
+    )
+
+
 # ──────────────────────────────────────────────────────────────
 # 업로드 패널
 # ──────────────────────────────────────────────────────────────
@@ -555,6 +661,7 @@ def render_upload_panel():
             result = parse_workbook(file, today)
             st.write(f"📅 월별 통합데이터: {len(result['monthly'])}개월")
             st.write(f"📆 통합 주간별: {len(result['weekly'])}주")
+            st.write(f"🗓️ 통합 일자별: {len(result['daily'])}일")
             st.write(f"🏷️ 당월 매체별 스냅샷: {len(result['channel_snapshot'])}개 매체")
             st.write(f"📊 매체별 시트 인식: {len(result['channel_sheets_parsed'])}/{len(result['channel_sheets_found'])}개")
             st.write(f"🔎 GA 유입경로: {len(result['ga'])}건")
@@ -569,8 +676,9 @@ def render_upload_panel():
             n3 = save_table("channel_monthly", result["channels"], "report_month,channel", file.name)
             n4 = save_table("channel_snapshot", result["channel_snapshot"], "as_of_month,channel", file.name)
             n5 = save_table("ga_source", result["ga"], "as_of_date,source_medium", file.name)
+            n6 = save_table("daily_overview", result["daily"], "report_date", file.name)
             st.cache_data.clear()
-            st.sidebar.success(f"저장 완료! 주간 {n1} · 월별 {n2} · 매체(월) {n3} · 매체(당월) {n4} · GA {n5}건")
+            st.sidebar.success(f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · GA {n5}건")
             st.rerun()
 
     st.sidebar.markdown("---")
@@ -590,6 +698,7 @@ def main():
 
     weekly = load_table("weekly_overview")
     monthly = load_table("monthly_overview")
+    daily = load_table("daily_overview")
     channels = load_table("channel_monthly")
     snapshot = load_table("channel_snapshot")
     ga = load_table("ga_source")
@@ -598,7 +707,7 @@ def main():
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
         return
 
-    for df, col in [(weekly, "week_start"), (weekly, "week_end"), (monthly, "report_month")]:
+    for df, col in [(weekly, "week_start"), (weekly, "week_end"), (monthly, "report_month"), (daily, "report_date")]:
         if not df.empty and col in df.columns:
             df[col] = pd.to_datetime(df[col]).dt.date
 
@@ -623,23 +732,50 @@ def main():
                 fig2 = px.line(fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)")
                 st.plotly_chart(fig2, use_container_width=True)
 
-            st.markdown("### 주간 상세표")
-            show_cols = ["label", "week_start", "week_end", "impressions", "clicks", "ctr", "cpc",
-                         "cost_excl_vat", "cost_incl_vat", "signups", "conversions", "cvr", "cpa", "revenue", "roas", "aov"]
-            show_cols = [c for c in show_cols if c in fw.columns]
-            st.dataframe(korify(fw[show_cols]), use_container_width=True)
-            st.download_button("⬇️ 엑셀 다운로드 (주간)", data=to_excel_bytes(korify(fw[show_cols])), file_name="weekly_overview.xlsx")
         else:
             st.info("주간 데이터가 아직 없습니다.")
 
         if not monthly.empty:
             st.markdown("---")
             st.markdown("### 월별 GA-ROAS vs 플랫폼 ROAS")
-            fm = add_kpis(monthly).sort_values("report_month")
-            fig3 = px.line(fm, x="report_month", y=["roas", "ga_roas"], markers=True,
+            fm_chart = add_kpis(monthly).sort_values("report_month")
+            fig3 = px.line(fm_chart, x="report_month", y=["roas", "ga_roas"], markers=True,
                             labels={"value": "%", "variable": "기준"}, title="플랫폼 리포팅 ROAS vs GA 기준 ROAS")
             st.plotly_chart(fig3, use_container_width=True)
             st.caption("* GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
+
+        # ── 누적 데이터 (월별 / 주간별 / 일자별) ──────────────────
+        st.markdown("---")
+        st.markdown("## 📚 누적 데이터")
+        st.caption("기본은 최근 데이터만 보여주고, '이전 데이터 더 보기'를 켜면 10/30/50/100/200개 단위로 넘겨볼 수 있어요.")
+
+        month_show_cols = ["report_month", "impressions", "clicks", "ctr", "cpc", "cost_excl_vat", "cost_incl_vat",
+                            "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov",
+                            "ga_conversions", "ga_revenue", "ga_roas"]
+        month_numeric_cols = [c for c in month_show_cols if c != "report_month"]
+        render_cumulative_table(
+            add_kpis(monthly) if not monthly.empty else monthly,
+            date_col="report_month", show_cols=month_show_cols, numeric_cols=month_numeric_cols,
+            default_n=12, title="1) 월별 누적 (최근 12개월 기본)", key="monthly_cum",
+        )
+
+        week_show_cols = ["label", "week_start", "week_end", "impressions", "clicks", "ctr", "cpc",
+                           "cost_excl_vat", "cost_incl_vat", "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
+        week_numeric_cols = [c for c in week_show_cols if c not in ("label", "week_start", "week_end")]
+        render_cumulative_table(
+            add_kpis(weekly) if not weekly.empty else weekly,
+            date_col="week_start", show_cols=week_show_cols, numeric_cols=week_numeric_cols,
+            default_n=5, title="2) 주간별 누적 (최근 5주 기본)", key="weekly_cum",
+        )
+
+        day_show_cols = ["report_date", "impressions", "clicks", "ctr", "cpc", "cost_excl_vat", "cost_incl_vat",
+                          "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
+        day_numeric_cols = [c for c in day_show_cols if c != "report_date"]
+        render_cumulative_table(
+            add_kpis(daily) if not daily.empty else daily,
+            date_col="report_date", show_cols=day_show_cols, numeric_cols=day_numeric_cols,
+            default_n=31, title="3) 일자별 누적 (이번 달 기본)", key="daily_cum", month_default=True,
+        )
 
     # ── 매체별 성과 ──────────────────────────────
     with tab2:
