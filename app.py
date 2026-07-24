@@ -759,9 +759,11 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     if preset == "전체":
         start, end = min_d, max_d
     elif preset == "직접선택":
-        date_range = st.date_input(
-            "기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual",
-        )
+        narrow_col, _spacer = st.columns([3, 9])
+        with narrow_col:
+            date_range = st.date_input(
+                "기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual",
+            )
         if isinstance(date_range, tuple) and len(date_range) == 2:
             start, end = date_range
         else:
@@ -1043,7 +1045,9 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
         view_all = d
     elif preset == "직접선택":
         min_d, max_d = d[date_col].min().date(), d[date_col].max().date()
-        date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
+        narrow_col, _spacer = st.columns([3, 9])
+        with narrow_col:
+            date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
         start, end = date_range if isinstance(date_range, tuple) and len(date_range) == 2 else (min_d, max_d)
         view_all = d[(d[date_col].dt.date >= start) & (d[date_col].dt.date <= end)]
     else:  # "YYYY년"
@@ -1052,7 +1056,9 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
 
     total = len(view_all)
     if need_pagination and total > PAGE_SIZE_OPTIONS[0]:
-        page_size = st.selectbox("페이지당 표시", PAGE_SIZE_OPTIONS, index=1, key=f"{key}_{preset}_pagesize")
+        narrow_ps_col, _ps_spacer = st.columns([2, 10])
+        with narrow_ps_col:
+            page_size = st.selectbox("페이지당 표시", PAGE_SIZE_OPTIONS, index=1, key=f"{key}_{preset}_pagesize")
         total_pages = max(1, -(-total // page_size))
         page = render_pager(total_pages, key=f"{key}_{preset}") if total_pages > 1 else 1
         start_i, end_i = (page - 1) * page_size, page * page_size
