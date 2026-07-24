@@ -749,6 +749,7 @@ def render_html_table(table: pd.DataFrame):
 
     row_htmls = []
     for _, row in table.iterrows():
+        is_total = str(row[cols[0]]).strip() == "TOTAL"
         cells = []
         for c in cols:
             val = row[c]
@@ -759,7 +760,8 @@ def render_html_table(table: pd.DataFrame):
             elif text.startswith("▼"):
                 style = "color:#1a73e8;"
             cells.append(f'<td style="{style}">{text}</td>')
-        row_htmls.append(f"<tr>{''.join(cells)}</tr>")
+        row_class = ' class="stco-total-row"' if is_total else ""
+        row_htmls.append(f"<tr{row_class}>{''.join(cells)}</tr>")
 
     html = f"""
     <style>
@@ -783,6 +785,11 @@ def render_html_table(table: pd.DataFrame):
     .stco-table td:first-child {{ text-align:left; }}
     .stco-table tr:last-child td {{ border-bottom:none; }}
     .stco-table tr:hover td {{ background:{THEME_COLORS["surface"]}; }}
+    .stco-table tr.stco-total-row td {{
+        background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["foreground"]};
+        font-weight:700; border-top:2px solid {THEME_COLORS["border"]};
+    }}
+    .stco-table tr.stco-total-row:hover td {{ background:{THEME_COLORS["surface"]}; }}
     </style>
     <div class="stco-table-wrap">
     <table class="stco-table">
@@ -1158,7 +1165,7 @@ def main():
             bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
             if bc_total:
                 bc_table = pd.concat([bc_table, pd.DataFrame([bc_total])], ignore_index=True)
-            st.dataframe(korify(bc_table), use_container_width=True, hide_index=True)
+            render_html_table(korify(bc_table))
             st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx")
         else:
             st.info("매체별 데이터가 아직 없습니다.")
