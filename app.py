@@ -813,6 +813,52 @@ def pct_change_row(d_full: pd.DataFrame, latest_pos: int, numeric_cols: list, la
     return row
 
 
+def build_total_row(view_raw: pd.DataFrame, display_cols: list, label_col: str, label_text: str = "TOTAL"):
+    """현재 화면에 표시 중인 원본(raw) 행들을 합산해 TOTAL 행을 만든다.
+    노출/클릭/비용/전환/매출 등은 단순 합산하고, CTR·CPC·CPA·CVR·ROAS·객단가·GA-ROAS 같은
+    비율/단가 지표는 합산된 값 기준으로 다시 계산한다 (개별 행 비율의 평균이 아님)."""
+    if view_raw is None or view_raw.empty:
+        return None
+
+    def s(col):
+        return pd.to_numeric(view_raw[col], errors="coerce").sum() if col in view_raw.columns else 0
+
+    imp, clk = s("impressions"), s("clicks")
+    cost_ex, cost_in = s("cost_excl_vat"), s("cost_incl_vat")
+    signups, conv, revenue = s("signups"), s("conversions"), s("revenue")
+    ga_conv, ga_rev = s("ga_conversions"), s("ga_revenue")
+
+    raw = {
+        "impressions": imp, "clicks": clk, "cost_excl_vat": cost_ex, "cost_incl_vat": cost_in,
+        "signups": signups, "conversions": conv, "revenue": revenue,
+        "ga_conversions": ga_conv, "ga_revenue": ga_rev,
+        "ctr": (clk / imp * 100) if imp else 0,
+        "cpc": (cost_in / clk) if clk else 0,
+        "cpa": (cost_ex / conv) if conv else 0,
+        "cvr": (conv / clk * 100) if clk else 0,
+        "roas": (revenue / cost_in * 100) if cost_in else 0,
+        "aov": (revenue / conv) if conv else 0,
+        "ga_roas": (ga_rev / cost_in * 100) if cost_in else 0,
+    }
+    row = {label_col: label_text}
+    for c in display_cols:
+        if c == label_col:
+            continue
+        if c not in raw:
+            row[c] = ""
+            continue
+        v = raw[c]
+        if c in MONEY_COLS:
+            row[c] = f"{v:,.0f}"
+        elif c in PCT2_COLS:
+            row[c] = f"{v:.2f}%"
+        elif c in PCT0_COLS:
+            row[c] = f"{v:.0f}%"
+        else:
+            row[c] = v
+    return row
+
+
 def build_year_options(date_series: pd.Series):
     years = sorted({d.year for d in pd.to_datetime(date_series).dropna()})
     return years
@@ -918,6 +964,10 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
         if change_row:
             table = pd.concat([table, pd.DataFrame([change_row])], ignore_index=True)
             has_change_row = True
+
+    total_row = build_total_row(view[display_cols], display_cols, display_cols[0], label_text="TOTAL")
+    if total_row:
+        table = pd.concat([table, pd.DataFrame([total_row])], ignore_index=True)
 
     render_html_table(korify(table))
     st.download_button(
@@ -1102,7 +1152,13 @@ def main():
                 labels={"channel": "매체", "roas": "ROAS(%)"},
             )
             st.plotly_chart(theme_chart(fig), use_container_width=True)
-            st.dataframe(korify(format_display(by_channel)), use_container_width=True, hide_index=True)
+
+            bc_cols = list(by_channel.columns)
+            bc_table = format_display(by_channel[bc_cols])
+            bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
+            if bc_total:
+                bc_table = pd.concat([bc_table, pd.DataFrame([bc_total])], ignore_index=True)
+            st.dataframe(korify(bc_table), use_container_width=True, hide_index=True)
             st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx")
         else:
             st.info("매체별 데이터가 아직 없습니다.")
