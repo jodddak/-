@@ -1015,6 +1015,12 @@ def main():
                     title="주간 비용(VAT포함) vs 매출",
                     labels={"week_start": "주 시작일", "value": "금액(원)", "variable": "구분"},
                 )
+                fig.update_yaxes(tickformat=",.0f")
+                fig.for_each_trace(
+                    lambda t: t.update(
+                        hovertemplate=f"구분={t.name}<br>주 시작일=%{{x}}<br>금액(원)=%{{y:,.0f}}원<extra></extra>"
+                    )
+                )
                 st.plotly_chart(theme_chart(fig), use_container_width=True)
             with c2:
                 fig2 = px.line(
