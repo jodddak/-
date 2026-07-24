@@ -133,6 +133,23 @@ def inject_theme():
             border-bottom-color: {THEME_COLORS["primary"]} !important;
         }}
 
+        [data-testid="stPopover"] > div > button {{
+            background-color: {THEME_COLORS["canvas"]} !important;
+            color: {THEME_COLORS["foreground"]} !important;
+            border: 1px solid {THEME_COLORS["border"]} !important;
+            border-radius: 8px !important;
+            font-weight: 500 !important;
+        }}
+        [data-testid="stPopover"] > div > button:hover {{
+            background-color: {THEME_COLORS["surface"]} !important;
+            color: {THEME_COLORS["foreground"]} !important;
+            border-color: {THEME_COLORS["primary"]} !important;
+        }}
+        [data-testid="stPopoverBody"] {{
+            border-radius: 12px;
+            border: 1px solid {THEME_COLORS["border"]};
+        }}
+
         [data-baseweb="select"] > div {{
             border-radius: 8px !important;
             border-color: {THEME_COLORS["border"]} !important;
@@ -678,36 +695,130 @@ def korify(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=KOR_COLS)
 
 
-PERIOD_PRESETS = ["이번달", "전체", "최근 1주", "최근 2주", "최근 1개월", "최근 3개월", "최근 6개월", "최근 1년", "직접 선택"]
-PERIOD_DAYS = {
-    "최근 1주": 7,
-    "최근 2주": 14,
-    "최근 1개월": 30,
-    "최근 3개월": 90,
-    "최근 6개월": 180,
-    "최근 1년": 365,
-}
+DATE_PRESETS = [
+    "오늘", "어제", "이번주", "지난주",
+    "최근 7일(오늘 포함)", "최근 7일(오늘 제외)",
+    "이번달", "지난달",
+    "최근 30일(오늘 포함)", "최근 30일(오늘 제외)",
+]
 
 
-def period_filter(min_d: date, max_d: date, key: str):
-    """Streamlit 기본 날짜범위 위젯의 영어 프리셋("Past Week" 등) 대신
-    한글 프리셋 선택 UI로 기간을 고른다. 기본값은 '이번달' (1일 ~ 최신 데이터)."""
-    preset = st.selectbox("기간 선택", PERIOD_PRESETS, index=0, key=f"{key}_preset")
-    if preset == "이번달":
-        month_start = date.today().replace(day=1)
-        start = max(min_d, month_start)
-        if start > max_d:
-            start = min_d
-        return start, max_d
-    if preset == "전체":
-        return min_d, max_d
-    if preset in PERIOD_DAYS:
-        return max(min_d, max_d - timedelta(days=PERIOD_DAYS[preset])), max_d
-    # 직접 선택
-    date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        return date_range
-    return min_d, max_d
+def _preset_to_range(name: str, min_d: date, max_d: date):
+    """프리셋 이름 → (start, end). '오늘' 기준일은 실제 오늘 날짜이되, 데이터 범위 밖이면 잘라낸다."""
+    today = date.today()
+    if name == "오늘":
+        s, e = today, today
+    elif name == "어제":
+        s = e = today - timedelta(days=1)
+    elif name == "이번주":
+        s, e = today - timedelta(days=today.weekday()), today
+    elif name == "지난주":
+        this_mon = today - timedelta(days=today.weekday())
+        s = this_mon - timedelta(days=7)
+        e = s + timedelta(days=6)
+    elif name == "최근 7일(오늘 포함)":
+        s, e = today - timedelta(days=6), today
+    elif name == "최근 7일(오늘 제외)":
+        s, e = today - timedelta(days=7), today - timedelta(days=1)
+    elif name == "이번달":
+        s, e = today.replace(day=1), today
+    elif name == "지난달":
+        last_prev = today.replace(day=1) - timedelta(days=1)
+        s, e = last_prev.replace(day=1), last_prev
+    elif name == "최근 30일(오늘 포함)":
+        s, e = today - timedelta(days=29), today
+    elif name == "최근 30일(오늘 제외)":
+        s, e = today - timedelta(days=30), today - timedelta(days=1)
+    else:
+        s, e = min_d, max_d
+    s = max(min_d, min(s, max_d))
+    e = min(max_d, max(e, min_d))
+    if s > e:
+        s = e
+    return s, e
+
+
+def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이번달"):
+    """날짜범위 버튼(달력 아이콘 + 시작~종료일 + ◀/▶) 클릭 시 프리셋/직접선택 패널이 열리는
+    기간 선택 UI. 반환값은 (start, end)."""
+    start_key, end_key = f"{key}_drp_start", f"{key}_drp_end"
+    pend_s_key, pend_e_key = f"{key}_drp_pend_start", f"{key}_drp_pend_end"
+
+    if start_key not in st.session_state:
+        s, e = _preset_to_range(default_preset, min_d, max_d)
+        st.session_state[start_key], st.session_state[end_key] = s, e
+
+    cur_start = max(min_d, min(st.session_state[start_key], max_d))
+    cur_end = min(max_d, max(st.session_state[end_key], min_d))
+
+    col_prev, col_main, col_next = st.columns([1, 10, 1])
+    with col_prev:
+        if st.button("◀", key=f"{key}_drp_prev", use_container_width=True):
+            span = (cur_end - cur_start).days + 1
+            new_end = cur_start - timedelta(days=1)
+            new_start = new_end - timedelta(days=span - 1)
+            if new_end >= min_d:
+                st.session_state[start_key] = max(min_d, new_start)
+                st.session_state[end_key] = new_end
+                st.rerun()
+    with col_next:
+        if st.button("▶", key=f"{key}_drp_next", use_container_width=True):
+            span = (cur_end - cur_start).days + 1
+            new_start = cur_end + timedelta(days=1)
+            new_end = new_start + timedelta(days=span - 1)
+            if new_start <= max_d:
+                st.session_state[start_key] = new_start
+                st.session_state[end_key] = min(max_d, new_end)
+                st.rerun()
+    with col_main:
+        with st.popover(f"📅 {cur_start:%Y.%m.%d} → {cur_end:%Y.%m.%d}", use_container_width=True):
+            if pend_s_key not in st.session_state:
+                st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
+
+            pc1, pc2 = st.columns(2)
+            for i, p in enumerate(DATE_PRESETS):
+                target = pc1 if i % 2 == 0 else pc2
+                if target.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
+                    s, e = _preset_to_range(p, min_d, max_d)
+                    st.session_state[pend_s_key], st.session_state[pend_e_key] = s, e
+
+            st.markdown("---")
+            dr = st.date_input(
+                "직접 선택", value=(st.session_state[pend_s_key], st.session_state[pend_e_key]),
+                min_value=min_d, max_value=max_d, key=f"{key}_drp_calendar",
+            )
+            if isinstance(dr, tuple) and len(dr) == 2:
+                st.session_state[pend_s_key], st.session_state[pend_e_key] = dr
+
+            bc1, bc2 = st.columns(2)
+            if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
+                st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
+                st.rerun()
+            if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
+                st.session_state[start_key] = st.session_state[pend_s_key]
+                st.session_state[end_key] = st.session_state[pend_e_key]
+                st.rerun()
+
+    return st.session_state[start_key], st.session_state[end_key]
+
+
+def preset_button_picker(options: list, key: str, default: str, label_prefix: str = "📅"):
+    """연도/기간 프리셋을 달력 버튼 + 팝오버 패널 방식으로 고르는 UI (누적 표용).
+    st.selectbox 대신 목업과 같은 '버튼 → 패널' 스타일을 쓰되, 옵션 내용은 그대로(연도 단위) 유지."""
+    sel_key = f"{key}_preset_sel"
+    if sel_key not in st.session_state or st.session_state[sel_key] not in options:
+        st.session_state[sel_key] = default if default in options else options[0]
+
+    current = st.session_state[sel_key]
+    with st.popover(f"{label_prefix} {current}", use_container_width=False):
+        cols = st.columns(2)
+        for i, opt in enumerate(options):
+            c = cols[i % 2]
+            btn_type = "primary" if opt == current else "secondary"
+            if c.button(opt, key=f"{key}_preset_opt_{i}", use_container_width=True, type=btn_type):
+                st.session_state[sel_key] = opt
+                st.rerun()
+    return st.session_state[sel_key]
 
 
 PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
@@ -945,8 +1056,7 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
         options = ["기본"] + year_labels + ["전체", "직접선택"]
         default_label = "기본"
 
-    default_idx = options.index(default_label) if default_label in options else 0
-    preset = st.selectbox("기간", options, index=default_idx, key=f"{key}_preset")
+    preset = preset_button_picker(options, key=f"{key}_periodpicker", default=default_label)
 
     need_pagination = True
     if preset == "기본":
@@ -1209,11 +1319,18 @@ def main():
     with tab3:
         if not ga.empty:
             ga["as_of_date"] = pd.to_datetime(ga["as_of_date"]).dt.date
-            latest = ga["as_of_date"].max()
-            g = ga[ga["as_of_date"] == latest].sort_values("revenue", ascending=False)
-            st.caption(f"기준일: {latest} (마지막 업로드 시점 스냅샷)")
-            st.dataframe(korify(format_display(g)), use_container_width=True, hide_index=True)
-            st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(format_display(g))), file_name="ga_source.xlsx")
+            st.subheader("🔎 기간 필터")
+            min_g, max_g = ga["as_of_date"].min(), ga["as_of_date"].max()
+            gstart, gend = period_filter(min_g, max_g, key="ga")
+            g_in_range = ga[(ga["as_of_date"] >= gstart) & (ga["as_of_date"] <= gend)]
+            if g_in_range.empty:
+                st.info("선택한 기간에 해당하는 GA 스냅샷이 없습니다.")
+            else:
+                latest = g_in_range["as_of_date"].max()
+                g = g_in_range[g_in_range["as_of_date"] == latest].sort_values("revenue", ascending=False)
+                st.caption(f"기준일: {latest} (선택 기간 내 가장 최신 업로드 스냅샷)")
+                st.dataframe(korify(format_display(g)), use_container_width=True, hide_index=True)
+                st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(format_display(g))), file_name="ga_source.xlsx")
         else:
             st.info("GA 유입경로 데이터가 아직 없습니다.")
 
