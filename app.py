@@ -744,78 +744,24 @@ def _preset_to_range(name: str, min_d: date, max_d: date):
     return s, e
 
 
+DATE_PERIOD_OPTIONS = DATE_PRESETS + ["전체", "직접선택"]
+
+
 def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이번달"):
-    """날짜범위 버튼(달력 아이콘 + 시작~종료일 + ◀/▶) 클릭 시 프리셋/직접선택 패널이 열리는
-    기간 선택 UI. 반환값은 (start, end)."""
-    start_key, end_key = f"{key}_drp_start", f"{key}_drp_end"
-    cal_key = f"{key}_drp_calendar"
+    """날짜 프리셋 버튼 목록(누적 표의 preset_button_picker와 동일한 방식) + 직접선택 달력.
+    반환값은 (start, end)."""
+    preset = preset_button_picker(DATE_PERIOD_OPTIONS, key=f"{key}_dateperiod", default=default_preset)
 
-    if start_key not in st.session_state:
-        s, e = _preset_to_range(default_preset, min_d, max_d)
-        st.session_state[start_key], st.session_state[end_key] = s, e
-
-    cur_start = max(min_d, min(st.session_state[start_key], max_d))
-    cur_end = min(max_d, max(st.session_state[end_key], min_d))
-
-    # 버튼 폭을 좁게 고정 (전체 폭으로 늘어나지 않도록 좁은 컬럼 안에만 배치하고 나머지는 빈 컬럼으로 남긴다)
-    col_prev, col_main, col_next, _spacer = st.columns([1, 2, 1, 12])
-    with col_prev:
-        if st.button("◀", key=f"{key}_drp_prev", use_container_width=True):
-            span = (cur_end - cur_start).days + 1
-            new_end = cur_start - timedelta(days=1)
-            new_start = new_end - timedelta(days=span - 1)
-            if new_end >= min_d:
-                st.session_state[start_key] = max(min_d, new_start)
-                st.session_state[end_key] = new_end
-                if cal_key in st.session_state:
-                    del st.session_state[cal_key]
-                st.rerun()
-    with col_next:
-        if st.button("▶", key=f"{key}_drp_next", use_container_width=True):
-            span = (cur_end - cur_start).days + 1
-            new_start = cur_end + timedelta(days=1)
-            new_end = new_start + timedelta(days=span - 1)
-            if new_start <= max_d:
-                st.session_state[start_key] = new_start
-                st.session_state[end_key] = min(max_d, new_end)
-                if cal_key in st.session_state:
-                    del st.session_state[cal_key]
-                st.rerun()
-    with col_main:
-        with st.popover(f"📅 {cur_start:%Y.%m.%d} → {cur_end:%Y.%m.%d}", use_container_width=True):
-            # date_input은 key로 지정된 세션 상태를 직접 소유한다. 프리셋 버튼에서 값을 바꾸려면
-            # date_input을 호출하기 "전"에 같은 key(cal_key)로 세션 상태를 직접 써야 화면에 반영된다.
-            if cal_key not in st.session_state:
-                st.session_state[cal_key] = (cur_start, cur_end)
-
-            # 왼쪽: 프리셋 목록(세로 1열) / 오른쪽: 달력(직접 선택) + 취소·확인
-            preset_col, calendar_col = st.columns([1, 2])
-            with preset_col:
-                for i, p in enumerate(DATE_PRESETS):
-                    if st.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
-                        s, e = _preset_to_range(p, min_d, max_d)
-                        st.session_state[cal_key] = (s, e)
-                        st.rerun()
-
-            with calendar_col:
-                dr = st.date_input(
-                    "직접 선택", min_value=min_d, max_value=max_d, key=cal_key,
-                )
-                if isinstance(dr, tuple) and len(dr) == 2:
-                    pend_s, pend_e = dr
-                else:
-                    pend_s, pend_e = cur_start, cur_end
-
-                bc1, bc2 = st.columns(2)
-                if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
-                    st.session_state[cal_key] = (cur_start, cur_end)
-                    st.rerun()
-                if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
-                    st.session_state[start_key] = pend_s
-                    st.session_state[end_key] = pend_e
-                    st.rerun()
-
-    return st.session_state[start_key], st.session_state[end_key]
+    if preset == "전체":
+        return min_d, max_d
+    if preset == "직접선택":
+        date_range = st.date_input(
+            "기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual",
+        )
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            return date_range
+        return min_d, max_d
+    return _preset_to_range(preset, min_d, max_d)
 
 
 def preset_button_picker(options: list, key: str, default: str, label_prefix: str = "📅"):
