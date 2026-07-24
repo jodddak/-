@@ -76,7 +76,7 @@ def inject_theme():
             background-color: {THEME_COLORS["canvas"]};
         }}
         [data-testid="stHeader"] {{ background-color: transparent; }}
-        .block-container {{ padding-top: 2rem; max-width: 1200px; }}
+        .block-container {{ padding-top: 2rem; padding-left: 3rem; padding-right: 3rem; max-width: 100%; }}
 
         [data-testid="stSidebar"] {{
             background-color: {THEME_COLORS["surface"]};
