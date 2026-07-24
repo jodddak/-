@@ -151,12 +151,8 @@ def inject_theme():
         [data-testid="stPopoverBody"] {{
             border-radius: 12px;
             border: 1px solid {THEME_COLORS["border"]};
-            overflow: visible !important;
         }}
-        [data-testid="stPopoverBody"] * {{
-            overflow: visible;
-        }}
-        div[data-baseweb="popover"], div[data-baseweb="calendar"] {{
+        div[data-baseweb="popover"] {{
             z-index: 999999 !important;
         }}
 
@@ -752,7 +748,7 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     """날짜범위 버튼(달력 아이콘 + 시작~종료일 + ◀/▶) 클릭 시 프리셋/직접선택 패널이 열리는
     기간 선택 UI. 반환값은 (start, end)."""
     start_key, end_key = f"{key}_drp_start", f"{key}_drp_end"
-    pend_s_key, pend_e_key = f"{key}_drp_pend_start", f"{key}_drp_pend_end"
+    cal_key = f"{key}_drp_calendar"
 
     if start_key not in st.session_state:
         s, e = _preset_to_range(default_preset, min_d, max_d)
@@ -771,6 +767,8 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
             if new_end >= min_d:
                 st.session_state[start_key] = max(min_d, new_start)
                 st.session_state[end_key] = new_end
+                if cal_key in st.session_state:
+                    del st.session_state[cal_key]
                 st.rerun()
     with col_next:
         if st.button("▶", key=f"{key}_drp_next", use_container_width=True):
@@ -780,11 +778,16 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
             if new_start <= max_d:
                 st.session_state[start_key] = new_start
                 st.session_state[end_key] = min(max_d, new_end)
+                if cal_key in st.session_state:
+                    del st.session_state[cal_key]
                 st.rerun()
     with col_main:
         with st.popover(f"📅 {cur_start:%Y.%m.%d} → {cur_end:%Y.%m.%d}", use_container_width=True):
-            if pend_s_key not in st.session_state:
-                st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
+            # date_input은 key로 지정된 세션 상태를 직접 소유한다. 프리셋 버튼에서 값을 바꾸려면
+            # date_input을 호출하기 "전"에 같은 key(cal_key)로 세션 상태를 직접 써야 화면에 반영된다
+            # (value= 인자는 위젯이 이미 존재하면 무시되기 때문에 별도 변수로는 반영되지 않았던 버그 수정).
+            if cal_key not in st.session_state:
+                st.session_state[cal_key] = (cur_start, cur_end)
 
             # 왼쪽: 프리셋 목록(세로 1열) / 오른쪽: 달력(직접 선택) + 취소·확인
             preset_col, calendar_col = st.columns([1, 2])
@@ -792,23 +795,25 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
                 for i, p in enumerate(DATE_PRESETS):
                     if st.button(p, key=f"{key}_drp_preset_{i}", use_container_width=True):
                         s, e = _preset_to_range(p, min_d, max_d)
-                        st.session_state[pend_s_key], st.session_state[pend_e_key] = s, e
+                        st.session_state[cal_key] = (s, e)
+                        st.rerun()
 
             with calendar_col:
                 dr = st.date_input(
-                    "직접 선택", value=(st.session_state[pend_s_key], st.session_state[pend_e_key]),
-                    min_value=min_d, max_value=max_d, key=f"{key}_drp_calendar",
+                    "직접 선택", min_value=min_d, max_value=max_d, key=cal_key,
                 )
                 if isinstance(dr, tuple) and len(dr) == 2:
-                    st.session_state[pend_s_key], st.session_state[pend_e_key] = dr
+                    pend_s, pend_e = dr
+                else:
+                    pend_s, pend_e = cur_start, cur_end
 
                 bc1, bc2 = st.columns(2)
                 if bc1.button("취소", key=f"{key}_drp_cancel", use_container_width=True):
-                    st.session_state[pend_s_key], st.session_state[pend_e_key] = cur_start, cur_end
+                    st.session_state[cal_key] = (cur_start, cur_end)
                     st.rerun()
                 if bc2.button("확인", key=f"{key}_drp_confirm", type="primary", use_container_width=True):
-                    st.session_state[start_key] = st.session_state[pend_s_key]
-                    st.session_state[end_key] = st.session_state[pend_e_key]
+                    st.session_state[start_key] = pend_s
+                    st.session_state[end_key] = pend_e
                     st.rerun()
 
     return st.session_state[start_key], st.session_state[end_key]
