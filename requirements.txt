@@ -5,4 +5,3 @@ openpyxl>=3.1
 plotly>=5.22
 supabase>=2.7
 python-dateutil>=2.9
-jinja2>=3.1
