@@ -26,10 +26,10 @@ import streamlit as st
 
 st.set_page_config(page_title="STCO 광고성과 대시보드", page_icon="📊", layout="wide")
 
-# ── 디자인 톤 (Toss / TDS Mobile: Toss Product Sans, #3182f6 primary, 흰 캔버스) ──
+# ── 디자인 톤 (색상/버튼/표는 Toss(TDS Mobile) 스타일, 폰트는 당근마켓 SEED 시스템폰트 스택) ──
 THEME_FONT_STACK = (
-    '"Toss Product Sans", -apple-system, BlinkMacSystemFont, '
-    '"Apple SD Gothic Neo", "Malgun Gothic", "Helvetica Neue", Arial, sans-serif'
+    "-apple-system, BlinkMacSystemFont, \"Pretendard Variable\", Pretendard, "
+    "\"Apple SD Gothic Neo\", \"Malgun Gothic\", system-ui, sans-serif"
 )
 THEME_COLORS = {
     "primary": "#3182f6",
@@ -49,7 +49,7 @@ px.defaults.color_discrete_sequence = ["#3182f6", "#191f28", "#8b95a1", "#1b64da
 
 
 def theme_chart(fig):
-    """Plotly 차트에 Toss 톤(Toss Product Sans, 화이트 배경, 옅은 그리드)을 적용."""
+    """Plotly 차트에 테마 톤(시스템 폰트, 화이트 배경, 옅은 그리드)을 적용."""
     fig.update_layout(
         font_family=THEME_FONT_STACK,
         font_color=THEME_COLORS["foreground"],
