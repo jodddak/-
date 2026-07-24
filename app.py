@@ -658,6 +658,8 @@ KOR_COLS = {
     "week_start": "주 시작일",
     "week_end": "주 종료일",
     "label": "기간",
+    "week_no": "주차",
+    "week_range": "기간(월~일)",
     "as_of_month": "기준월",
     "as_of_date": "기준일",
     "source_medium": "소스/매체",
@@ -749,17 +751,36 @@ def render_html_table(table: pd.DataFrame):
 
     row_htmls = []
     for _, row in table.iterrows():
-        is_total = str(row[cols[0]]).strip() == "TOTAL"
+        first_text = str(row[cols[0]]).strip()
+        is_total = first_text == "TOTAL"
+        is_label_row = is_total or first_text.endswith("대비")
+        # TOTAL/증감 행에서 앞의 두 컬럼이 라벨용(둘 다 텍스트)이고 두 번째 칸이 비어있으면
+        # 두 칸을 하나로 합쳐서(colspan) 가운데 정렬로 보여준다 (예: 주차 + 기간 컬럼).
+        merge_first_two = False
+        if is_label_row and len(cols) > 1:
+            second_val = row[cols[1]]
+            second_text = "" if pd.isna(second_val) else str(second_val).strip()
+            merge_first_two = second_text == ""
+
         cells = []
-        for c in cols:
+        skip_next = False
+        for i, c in enumerate(cols):
+            if skip_next:
+                skip_next = False
+                continue
             val = row[c]
             text = "" if pd.isna(val) else str(val)
             style = ""
+            colspan = ""
+            if merge_first_two and i == 0:
+                colspan = ' colspan="2"'
+                style = "text-align:center;"
+                skip_next = True
             if text.startswith("▲"):
-                style = "color:#d93025;"
+                style += "color:#d93025;"
             elif text.startswith("▼"):
-                style = "color:#1a73e8;"
-            cells.append(f'<td style="{style}">{text}</td>')
+                style += "color:#1a73e8;"
+            cells.append(f'<td{colspan} style="{style}">{text}</td>')
         row_class = ' class="stco-total-row"' if is_total else ""
         row_htmls.append(f"<tr{row_class}>{''.join(cells)}</tr>")
 
@@ -1118,11 +1139,15 @@ def main():
             title="1) 월별 누적", key="monthly_cum", mode="month",
         )
 
-        week_show_cols = ["week_start", "week_end", "label", "impressions", "clicks", "ctr", "cpc",
+        wk = weekly.copy()
+        if not wk.empty:
+            wk["week_no"] = wk["label"].astype(str).str.replace(r"\s*\(.*\)\s*$", "", regex=True).str.strip()
+            wk["week_range"] = wk.apply(lambda r: f"{r['week_start']:%Y-%m-%d}~{r['week_end']:%Y-%m-%d}", axis=1)
+        week_show_cols = ["week_no", "week_range", "impressions", "clicks", "ctr", "cpc",
                            "cost_excl_vat", "cost_incl_vat", "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
-        week_numeric_cols = [c for c in week_show_cols if c not in ("label", "week_start", "week_end")]
+        week_numeric_cols = [c for c in week_show_cols if c not in ("week_no", "week_range")]
         render_cumulative_table(
-            add_kpis(weekly) if not weekly.empty else weekly,
+            add_kpis(wk) if not wk.empty else wk,
             date_col="week_start", show_cols=week_show_cols, numeric_cols=week_numeric_cols,
             title="2) 주간별 누적", key="weekly_cum", mode="week",
         )
