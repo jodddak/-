@@ -1118,7 +1118,7 @@ def main():
             title="1) 월별 누적", key="monthly_cum", mode="month",
         )
 
-        week_show_cols = ["label", "week_start", "week_end", "impressions", "clicks", "ctr", "cpc",
+        week_show_cols = ["week_start", "week_end", "label", "impressions", "clicks", "ctr", "cpc",
                            "cost_excl_vat", "cost_incl_vat", "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
         week_numeric_cols = [c for c in week_show_cols if c not in ("label", "week_start", "week_end")]
         render_cumulative_table(
