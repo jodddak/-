@@ -817,7 +817,7 @@ def format_display(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m")
         elif c == "report_date":
             dt = pd.to_datetime(df[c])
-            df[c] = dt.dt.strftime("%Y-%m-%d") + "(" + dt.dt.dayofweek.map(lambda i: KOR_WEEKDAY[int(i)]) + ")"
+            df[c] = dt.dt.strftime("%Y-%m-%d") + " (" + dt.dt.dayofweek.map(lambda i: KOR_WEEKDAY[int(i)]) + ")"
         elif c in ("week_start", "week_end", "as_of_month", "as_of_date"):
             df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m-%d")
         elif c in MONEY_COLS:
