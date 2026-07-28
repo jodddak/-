@@ -806,13 +806,19 @@ PCT2_COLS = {"ctr", "cvr", "bounce_rate", "ecommerce_cvr"}
 PCT0_COLS = {"roas", "ga_roas"}
 
 
+KOR_WEEKDAY = ["월", "화", "수", "목", "금", "토", "일"]
+
+
 def format_display(df: pd.DataFrame) -> pd.DataFrame:
     """화면/엑셀에 보여줄 때 쓰는 최종 포맷팅 (콤마, 소수점 자리수, 날짜 형식)."""
     df = df.copy()
     for c in df.columns:
         if c == "report_month":
             df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m")
-        elif c in ("week_start", "week_end", "report_date", "as_of_month", "as_of_date"):
+        elif c == "report_date":
+            dt = pd.to_datetime(df[c])
+            df[c] = dt.dt.strftime("%Y-%m-%d") + "(" + dt.dt.dayofweek.map(lambda i: KOR_WEEKDAY[int(i)]) + ")"
+        elif c in ("week_start", "week_end", "as_of_month", "as_of_date"):
             df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m-%d")
         elif c in MONEY_COLS:
             df[c] = pd.to_numeric(df[c], errors="coerce").map(lambda v: f"{v:,.0f}" if pd.notna(v) else "")
