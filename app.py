@@ -194,11 +194,37 @@ TABLES = {
     "channel_monthly": "channel_monthly",
     "channel_snapshot": "channel_snapshot",
     "ga_source": "ga_source",
+    "creative_performance": "creative_performance",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
 SHEET_SKIP_EXACT = {"매체통합", "GA-RAW", "RD_네이버"}
 SHEET_SKIP_SUBSTR = ["_data", "_date", "확인용", "소재"]
+
+# 채널믹스 목표 비중 (STCO 퍼포먼스마케팅 인수인계서 4절 기준: 발굴 메타50/구글20/네이버20, 회수 모비온10)
+CHANNEL_MIX_TARGET = {
+    "메타": 0.50,
+    "구글": 0.20,
+    "네이버": 0.20,
+    "모비온": 0.10,
+}
+
+CHANNEL_GROUP_RULES = [
+    ("메타", ["메타", "페이스북", "facebook", "meta", "인스타"]),
+    ("구글", ["구글", "google"]),
+    ("네이버", ["네이버", "naver", "gfa", "브검", "ssp"]),
+    ("모비온", ["모비온", "mobon"]),
+]
+
+
+def map_channel_group(channel_name: str) -> str:
+    """시트/채널명을 채널믹스 목표의 4개 그룹(메타/구글/네이버/모비온)으로 매핑.
+    어디에도 안 걸리면 '기타'(크리테오·에디AI·카카오모먼트 등 목표 비중 배정이 없는 매체)."""
+    name = str(channel_name).lower()
+    for group, keywords in CHANNEL_GROUP_RULES:
+        if any(kw.lower() in name for kw in keywords):
+            return group
+    return "기타"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -589,6 +615,75 @@ def parse_ga_raw(xls: pd.ExcelFile, today: date):
     return out.reset_index(drop=True)
 
 
+CREATIVE_NAME_HINTS = ["소재성과", "소재별성과"]  # 예: 페이스북_소재성과요약
+
+
+def _infer_channel_from_sheet(sheet: str) -> str:
+    """'(DA) 구글_실적최대화_data' → '구글', '페이스북_소재성과요약' → '페이스북' 처럼
+    시트명 접두어에서 매체명만 뽑아낸다."""
+    name = re.sub(r"^\([^)]*\)\s*", "", sheet)  # 앞의 "(DA) " 같은 괄호 접두어 제거
+    name = name.split("_")[0].strip()
+    return name or sheet
+
+
+def find_creative_sheets(xls: pd.ExcelFile):
+    """소재 단위 데이터가 있는 시트를 찾는다.
+    1) 시트명에 '소재성과'가 들어간 요약 시트 (예: 페이스북_소재성과요약)
+    2) '_data' 로 끝나는 원본 시트 중 '광고소재' 컬럼이 있는 시트 (예: (DA) 구글_실적최대화_data)
+    """
+    found = []
+    for s in xls.sheet_names:
+        if any(hint in s for hint in CREATIVE_NAME_HINTS):
+            found.append(s)
+            continue
+        if s.endswith("_data"):
+            try:
+                probe = pd.read_excel(xls, sheet_name=s, header=None, nrows=30)
+            except Exception:
+                continue
+            if find_header_row(probe, required=("광고소재",), scan=30) is not None:
+                found.append(s)
+    return found
+
+
+def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
+    """소재 단위 시트 하나를 파싱. 시트마다 컬럼 구성이 조금씩 달라
+    '소재명/광고소재' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다."""
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+    hdr = find_header_row(raw, required=("노출수", "클릭수"), scan=30)
+    if hdr is None:
+        return None
+    headers = [clean_col(h) for h in raw.iloc[hdr].tolist()]
+    data = raw.iloc[hdr + 1:].copy()
+    data.columns = headers
+
+    creative_col = match_col(headers, include_any=["소재명", "광고소재", "소재"])
+    if not creative_col:
+        return None
+    data = data[data[creative_col].notna()]
+    if data.empty:
+        return None
+
+    m = metric_cols(headers)
+    # VAT 구분 없이 '광고비' 한 컬럼만 있는 시트 대응 (없으면 포함/제외를 같은 값으로 취급)
+    cost_generic = match_col(headers, include_any=["광고비", "비용"], exclude=["제외", "포함", "마크업"])
+    cost_ex_col = m["cost_ex"] or cost_generic
+    cost_in_col = m["cost_in"] or cost_generic
+
+    out = pd.DataFrame()
+    out["creative"] = data[creative_col].astype(str).str.strip()
+    out["channel"] = _infer_channel_from_sheet(sheet)
+    out["impressions"] = numcol(data, m["impr"])
+    out["clicks"] = numcol(data, m["clicks"])
+    out["cost_excl_vat"] = numcol(data, cost_ex_col)
+    out["cost_incl_vat"] = numcol(data, cost_in_col)
+    out["conversions"] = numcol(data, m["conv"])
+    out["revenue"] = numcol(data, m["rev"])
+    out["as_of_date"] = today
+    out = out[(out["impressions"] > 0) | (out["clicks"] > 0) | (out["cost_incl_vat"] > 0)]
+    return out.reset_index(drop=True)
+
+
 def parse_workbook(file, today: date):
     xls = pd.ExcelFile(file)
     result = {
@@ -598,8 +693,10 @@ def parse_workbook(file, today: date):
         "channel_snapshot": pd.DataFrame(),
         "channels": pd.DataFrame(),
         "ga": pd.DataFrame(),
+        "creatives": pd.DataFrame(),
         "channel_sheets_found": [],
         "channel_sheets_parsed": [],
+        "creative_sheets_found": [],
     }
     if "매체통합" in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name="매체통합", header=None)
@@ -618,6 +715,15 @@ def parse_workbook(file, today: date):
             result["channel_sheets_parsed"].append(s)
     if chan_frames:
         result["channels"] = pd.concat(chan_frames, ignore_index=True)
+
+    creative_frames = []
+    creative_sheets = find_creative_sheets(xls)
+    for s in creative_sheets:
+        df = parse_creative_sheet(xls, s, today)
+        if df is not None and len(df):
+            creative_frames.append(df)
+    result["creatives"] = pd.concat(creative_frames, ignore_index=True) if creative_frames else pd.DataFrame()
+    result["creative_sheets_found"] = creative_sheets
 
     result["ga"] = parse_ga_raw(xls, today)
     return result
@@ -663,6 +769,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # 화면/엑셀에 표시할 때 쓰는 한글 컬럼명
 KOR_COLS = {
     "channel": "매체",
+    "creative": "소재명",
     "impressions": "노출수",
     "clicks": "클릭수",
     "cost_excl_vat": "광고비(VAT제외)",
@@ -1119,6 +1226,10 @@ def render_upload_panel():
             st.write(f"🏷️ 당월 매체별 스냅샷: {len(result['channel_snapshot'])}개 매체")
             st.write(f"📊 매체별 시트 인식: {len(result['channel_sheets_parsed'])}/{len(result['channel_sheets_found'])}개")
             st.write(f"🔎 GA 유입경로: {len(result['ga'])}건")
+            st.write(
+                f"🎨 소재별 성과 인식: {len(result.get('creatives', []))}행 "
+                f"({', '.join(result.get('creative_sheets_found', [])) or '해당 시트 없음'})"
+            )
             missing = set(result["channel_sheets_found"]) - set(result["channel_sheets_parsed"])
             if missing:
                 st.warning(f"인식 실패한 매체 시트: {', '.join(missing)}")
@@ -1131,8 +1242,14 @@ def render_upload_panel():
             n4 = save_table("channel_snapshot", result["channel_snapshot"], "as_of_month,channel", file.name)
             n5 = save_table("ga_source", result["ga"], "as_of_date,source_medium", file.name)
             n6 = save_table("daily_overview", result["daily"], "report_date", file.name)
+            n7 = save_table(
+                "creative_performance", result.get("creatives", pd.DataFrame()),
+                "as_of_date,channel,creative", file.name,
+            )
             st.cache_data.clear()
-            st.sidebar.success(f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · GA {n5}건")
+            st.sidebar.success(
+                f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · GA {n5}건 · 소재 {n7}건"
+            )
             st.rerun()
 
     st.sidebar.markdown("---")
@@ -1144,64 +1261,198 @@ def render_upload_panel():
 
 
 # ──────────────────────────────────────────────────────────────
-# 메인
+# 채널믹스 목표 대비 (신규) — "매체별 성과" 페이지 안에서 호출
 # ──────────────────────────────────────────────────────────────
-def main():
-    st.title("📊 STCO 온라인팀 광고/마케팅 성과 대시보드")
-    render_upload_panel()
-
-    weekly = load_table("weekly_overview")
-    monthly = load_table("monthly_overview")
-    daily = load_table("daily_overview")
-    channels = load_table("channel_monthly")
-    snapshot = load_table("channel_snapshot")
-    ga = load_table("ga_source")
-
-    if weekly.empty and monthly.empty:
-        st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
+def render_channel_mix(fc: pd.DataFrame):
+    st.markdown("---")
+    st.markdown("### 채널믹스 목표 대비 (발굴 메타50·구글20·네이버20 / 회수 모비온10)")
+    st.caption(
+        "목표 비중은 「STCO 퍼포먼스마케팅 인수인계서」 4절 기준. "
+        "'기타'는 목표 비중 배정이 없는 매체(크리테오 등)입니다."
+    )
+    if fc is None or fc.empty:
+        st.info("데이터가 아직 없습니다.")
         return
 
-    for df, col in [(weekly, "week_start"), (weekly, "week_end"), (monthly, "report_month"), (daily, "report_date")]:
-        if not df.empty and col in df.columns:
-            df[col] = pd.to_datetime(df[col]).dt.date
+    grp = fc.copy()
+    grp["채널그룹"] = grp["channel"].apply(map_channel_group)
+    by_group = grp.groupby("채널그룹", as_index=False)["cost_incl_vat"].sum()
+    total_cost = by_group["cost_incl_vat"].sum()
+    if total_cost <= 0:
+        st.info("광고비 데이터가 없습니다.")
+        return
 
-    tab1, tab2, tab3, tab4 = st.tabs(["종합 대시보드", "매체별 성과", "GA 유입경로", "GA4 라이브 리포트"])
+    all_groups = list(CHANNEL_MIX_TARGET.keys())
+    if (by_group["채널그룹"] == "기타").any():
+        all_groups = all_groups + ["기타"]
+    by_group = (
+        by_group.set_index("채널그룹").reindex(all_groups, fill_value=0).reset_index()
+    )
 
-    # ── 종합 대시보드 ──────────────────────────────
-    with tab1:
-        if not weekly.empty:
-            st.subheader("🔎 기간 필터 (주간 기준)")
-            min_d, max_d = weekly["week_start"].min(), weekly["week_end"].max()
-            start, end = period_filter(min_d, max_d, key="weekly")
-            fw = weekly[(weekly["week_start"] >= start) & (weekly["week_start"] <= end)]
-            fw = add_kpis(fw).sort_values("week_start")
+    by_group["실제비중(%)"] = by_group["cost_incl_vat"] / total_cost * 100
+    by_group["목표비중(%)"] = by_group["채널그룹"].map(lambda g: CHANNEL_MIX_TARGET.get(g, 0) * 100)
+    by_group["차이(%p)"] = by_group["실제비중(%)"] - by_group["목표비중(%)"]
 
-            kpi_cards(fw)
-            st.markdown("### 주간 추이")
-            c1, c2 = st.columns(2)
-            with c1:
-                chart_df = fw.rename(columns={"cost_incl_vat": "광고비(VAT포함)", "revenue": "매출"})
-                fig = px.bar(
-                    chart_df, x="week_start", y=["광고비(VAT포함)", "매출"], barmode="group",
-                    title="주간 비용(VAT포함) vs 매출",
-                    labels={"week_start": "주 시작일", "value": "금액(원)", "variable": "구분"},
+    chart_df = by_group.melt(
+        id_vars="채널그룹", value_vars=["목표비중(%)", "실제비중(%)"], var_name="구분", value_name="비중(%)"
+    )
+    fig = px.bar(
+        chart_df, x="채널그룹", y="비중(%)", color="구분", barmode="group", text_auto=".1f",
+        title="채널그룹별 목표 vs 실제 예산 비중",
+    )
+    st.plotly_chart(theme_chart(fig), use_container_width=True)
+
+    show = by_group.copy()
+    show["광고비(원)"] = show["cost_incl_vat"].map(lambda v: f"{v:,.0f}")
+    show["실제비중(%)"] = show["실제비중(%)"].map(lambda v: f"{v:.1f}%")
+    show["목표비중(%)"] = show["목표비중(%)"].map(lambda v: f"{v:.1f}%")
+    show["차이(%p)"] = show["차이(%p)"].map(lambda v: f"{v:+.1f}%p")
+    render_html_table(show[["채널그룹", "광고비(원)", "목표비중(%)", "실제비중(%)", "차이(%p)"]])
+
+    over = by_group[(by_group["채널그룹"] != "기타") & (by_group["차이(%p)"] > 5)]
+    under = by_group[(by_group["채널그룹"] != "기타") & (by_group["차이(%p)"] < -5)]
+    if len(over) or len(under):
+        msgs = []
+        for _, r in over.iterrows():
+            msgs.append(f"- **{r['채널그룹']}** 목표 대비 +{r['차이(%p)']:.1f}%p 초과 집행 중 — 단계적 축소(10~15% 내) 검토")
+        for _, r in under.iterrows():
+            msgs.append(f"- **{r['채널그룹']}** 목표 대비 {r['차이(%p)']:.1f}%p 미달 — 단계적 증액 검토")
+        st.markdown("\n".join(msgs))
+
+
+# ──────────────────────────────────────────────────────────────
+# 소재별 성과 (신규 페이지)
+# ──────────────────────────────────────────────────────────────
+def render_creative_performance(creatives: pd.DataFrame):
+    st.subheader("🎨 소재별 성과")
+    st.caption(
+        "페이스북·구글 실적최대화처럼 소재 단위 데이터가 제공되는 매체만 표시됩니다. "
+        "네이버 등 캠페인/그룹 단위까지만 제공되는 매체는 현재 커버되지 않습니다."
+    )
+    if creatives is None or creatives.empty:
+        st.info(
+            "소재별 데이터가 아직 없습니다. 엑셀에 '○○_소재성과요약' 시트 또는 "
+            "'광고소재' 컬럼이 있는 '_data' 시트가 있는지 확인해주세요."
+        )
+        return
+
+    creatives = creatives.copy()
+    creatives["as_of_date"] = pd.to_datetime(creatives["as_of_date"]).dt.date
+    min_d, max_d = creatives["as_of_date"].min(), creatives["as_of_date"].max()
+    start, end = period_filter(min_d, max_d, key="creative")
+    fc = creatives[(creatives["as_of_date"] >= start) & (creatives["as_of_date"] <= end)]
+
+    channels_avail = sorted(fc["channel"].unique().tolist())
+    picked = st.multiselect("매체 필터", channels_avail, default=channels_avail, key="creative_channel_filter")
+    fc = fc[fc["channel"].isin(picked)]
+
+    agg = (
+        fc.groupby(["channel", "creative"], as_index=False)
+        .agg(
+            impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+            cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+            conversions=("conversions", "sum"), revenue=("revenue", "sum"),
+        )
+    )
+    agg = add_kpis(agg)
+
+    MIN_SPEND = 50000  # 표본 기준: 광고비 5만원 미만은 판단 보류 (performance-marketing-analysis 스킬 기본값)
+    total_cost, total_rev = agg["cost_incl_vat"].sum(), agg["revenue"].sum()
+    account_avg_roas = (total_rev / total_cost * 100) if total_cost else 0
+
+    def judge(row):
+        if row["cost_incl_vat"] < MIN_SPEND:
+            return "판단 보류(표본 부족)"
+        if account_avg_roas <= 0:
+            return "판단 보류"
+        ratio = row["roas"] / account_avg_roas
+        if ratio >= 1.2:
+            return "우수"
+        if ratio <= 0.7:
+            return "부진"
+        return "평균 수준"
+
+    agg["판정"] = agg.apply(judge, axis=1)
+    agg = agg.sort_values("cost_incl_vat", ascending=False)
+
+    st.caption(f"계정 평균 ROAS(선택 기간): {account_avg_roas:,.0f}% · 광고비 {MIN_SPEND:,}원 미만은 표본 부족으로 판단 보류 처리")
+    cols = ["channel", "creative", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
+            "conversions", "cvr", "cpa", "revenue", "roas", "판정"]
+    cols = [c for c in cols if c in agg.columns]
+    show = format_display(agg[cols])
+    render_html_table(korify(show))
+    st.download_button(
+        "⬇️ 엑셀 다운로드 (소재별 성과)",
+        data=to_excel_bytes(korify(format_display(agg[cols]))),
+        file_name="creative_performance.xlsx",
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
+# ──────────────────────────────────────────────────────────────
+NAV_GROUPS = {
+    "성과 리포트": ["종합 대시보드", "매체별 성과", "소재별 성과", "GA 유입경로", "GA4 라이브 리포트"],
+    # 트래커의 다른 시트를 대시보드에 들일 준비가 되면 아래처럼 그룹만 추가하면 됩니다.
+    # "퍼널 관리": ["퍼널 대시보드", "마일스톤"],
+    # "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
+    # "가이드": ["가이드"],
+}
+
+
+def render_nav() -> str:
+    st.sidebar.markdown("---")
+    st.sidebar.header("📁 메뉴")
+    default_page = NAV_GROUPS["성과 리포트"][0]
+    if "nav_page" not in st.session_state:
+        st.session_state["nav_page"] = default_page
+    for group, pages in NAV_GROUPS.items():
+        with st.sidebar.expander(group, expanded=True):
+            for p in pages:
+                is_current = st.session_state["nav_page"] == p
+                if st.button(
+                    p, key=f"nav_{p}", use_container_width=True,
+                    type="primary" if is_current else "secondary",
+                ):
+                    st.session_state["nav_page"] = p
+                    st.rerun()
+    return st.session_state["nav_page"]
+
+
+# ──────────────────────────────────────────────────────────────
+# 페이지별 렌더 함수 (예전 tab1~tab4의 내용을 그대로 옮김, 로직 변경 없음)
+# ──────────────────────────────────────────────────────────────
+def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame):
+    if not weekly.empty:
+        st.subheader("🔎 기간 필터 (주간 기준)")
+        min_d, max_d = weekly["week_start"].min(), weekly["week_end"].max()
+        start, end = period_filter(min_d, max_d, key="weekly")
+        fw = weekly[(weekly["week_start"] >= start) & (weekly["week_start"] <= end)]
+        fw = add_kpis(fw).sort_values("week_start")
+
+        kpi_cards(fw)
+        st.markdown("### 주간 추이")
+        c1, c2 = st.columns(2)
+        with c1:
+            chart_df = fw.rename(columns={"cost_incl_vat": "광고비(VAT포함)", "revenue": "매출"})
+            fig = px.bar(
+                chart_df, x="week_start", y=["광고비(VAT포함)", "매출"], barmode="group",
+                title="주간 비용(VAT포함) vs 매출",
+                labels={"week_start": "주 시작일", "value": "금액(원)", "variable": "구분"},
+            )
+            fig.update_yaxes(tickformat=",.0f")
+            fig.for_each_trace(
+                lambda t: t.update(
+                    hovertemplate=f"구분={t.name}<br>주 시작일=%{{x}}<br>금액(원)=%{{y:,.0f}}원<extra></extra>"
                 )
-                fig.update_yaxes(tickformat=",.0f")
-                fig.for_each_trace(
-                    lambda t: t.update(
-                        hovertemplate=f"구분={t.name}<br>주 시작일=%{{x}}<br>금액(원)=%{{y:,.0f}}원<extra></extra>"
-                    )
-                )
-                st.plotly_chart(theme_chart(fig), use_container_width=True)
-            with c2:
-                fig2 = px.line(
-                    fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)",
-                    labels={"week_start": "주 시작일", "roas": "ROAS(%)"},
-                )
-                st.plotly_chart(theme_chart(fig2), use_container_width=True)
-
-        else:
-            st.info("주간 데이터가 아직 없습니다.")
+            )
+            st.plotly_chart(theme_chart(fig), use_container_width=True)
+        with c2:
+            fig2 = px.line(
+                fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)",
+                labels={"week_start": "주 시작일", "roas": "ROAS(%)"},
+            )
+            st.plotly_chart(theme_chart(fig2), use_container_width=True)
 
         if not monthly.empty:
             st.markdown("---")
@@ -1217,7 +1468,6 @@ def main():
             st.plotly_chart(theme_chart(fig3), use_container_width=True)
             st.caption("* GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
 
-        # ── 누적 데이터 (월별 / 주간별 / 일자별) ──────────────────
         st.markdown("---")
         st.markdown("## 📚 누적 데이터")
         st.caption("기본은 최근 데이터만 보여주고, '이전 데이터 더 보기'를 켜면 10/30/50/100/200개 단위로 넘겨볼 수 있어요.")
@@ -1253,97 +1503,141 @@ def main():
             date_col="report_date", show_cols=day_show_cols, numeric_cols=day_numeric_cols,
             title="3) 일자별 누적", key="daily_cum", mode="day",
         )
+    else:
+        st.info("주간 데이터가 아직 없습니다.")
 
-    # ── 매체별 성과 ──────────────────────────────
-    with tab2:
-        if not channels.empty:
-            channels["report_month"] = pd.to_datetime(channels["report_month"]).dt.date
-            st.subheader("🔎 기간 필터 (월별 기준)")
-            min_m = channels["report_month"].min()
-            max_m = (pd.Timestamp(channels["report_month"].max()) + pd.offsets.MonthEnd(0)).date()
-            mstart, mend = period_filter(min_m, max_m, key="channel")
-            fc = channels[(channels["report_month"] >= mstart) & (channels["report_month"] <= mend)]
 
-            by_channel = (
-                fc.groupby("channel", as_index=False)
-                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-                     cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
-                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
-            )
-            by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
+def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
+    if not channels.empty:
+        channels["report_month"] = pd.to_datetime(channels["report_month"]).dt.date
+        st.subheader("🔎 기간 필터 (월별 기준)")
+        min_m = channels["report_month"].min()
+        max_m = (pd.Timestamp(channels["report_month"].max()) + pd.offsets.MonthEnd(0)).date()
+        mstart, mend = period_filter(min_m, max_m, key="channel")
+        fc = channels[(channels["report_month"] >= mstart) & (channels["report_month"] <= mend)]
 
-            fig = px.bar(
-                by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
-                labels={"channel": "매체", "roas": "ROAS(%)"},
-            )
-            st.plotly_chart(theme_chart(fig), use_container_width=True)
-
-            bc_cols = list(by_channel.columns)
-            bc_table = format_display(by_channel[bc_cols])
-            bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
-            if bc_total:
-                bc_table = pd.concat([bc_table, pd.DataFrame([bc_total])], ignore_index=True)
-            render_html_table(korify(bc_table))
-            st.download_button("⬇️ 엑셀 다운로드 (매체별·월별)", data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx")
-        else:
-            st.info("매체별 데이터가 아직 없습니다.")
-
-        if not snapshot.empty:
-            st.markdown("---")
-            st.markdown("### 당월 매체별 GA 비교 (최신 스냅샷)")
-            latest_month = snapshot["as_of_month"].max()
-            snap_latest = add_kpis(snapshot[snapshot["as_of_month"] == latest_month])
-            st.caption(f"기준월: {latest_month}")
-            cols = ["channel", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas", "ga_conversions", "ga_revenue", "ga_roas"]
-            cols = [c for c in cols if c in snap_latest.columns]
-            st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True, hide_index=True)
-
-    # ── GA 유입경로 ──────────────────────────────
-    with tab3:
-        if not ga.empty:
-            ga["as_of_date"] = pd.to_datetime(ga["as_of_date"]).dt.date
-            st.subheader("🔎 기간 필터")
-            min_g, max_g = ga["as_of_date"].min(), ga["as_of_date"].max()
-            gstart, gend = period_filter(min_g, max_g, key="ga")
-            g_in_range = ga[(ga["as_of_date"] >= gstart) & (ga["as_of_date"] <= gend)]
-            if g_in_range.empty:
-                st.info("선택한 기간에 해당하는 GA 스냅샷이 없습니다.")
-            else:
-                latest = g_in_range["as_of_date"].max()
-                g = g_in_range[g_in_range["as_of_date"] == latest].sort_values("revenue", ascending=False)
-                st.caption(f"기준일: {latest} (선택 기간 내 가장 최신 업로드 스냅샷)")
-                st.dataframe(korify(format_display(g)), use_container_width=True, hide_index=True)
-                st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(format_display(g))), file_name="ga_source.xlsx")
-        else:
-            st.info("GA 유입경로 데이터가 아직 없습니다.")
-
-    # ── GA4 라이브 리포트 (Looker Studio) ──────────────────
-    with tab4:
-        looker_view_url = (
-            "https://lookerstudio.google.com/u/0/reporting/"
-            "7177b0a5-7d7e-4f07-af76-17f2436b317e/page/p_bbwwb7lo4c"
+        by_channel = (
+            fc.groupby("channel", as_index=False)
+            .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+                 cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+                 conversions=("conversions", "sum"), revenue=("revenue", "sum"))
         )
-        looker_embed_url = (
-            "https://lookerstudio.google.com/embed/reporting/"
-            "7177b0a5-7d7e-4f07-af76-17f2436b317e/page/p_bbwwb7lo4c"
+        by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
+
+        fig = px.bar(
+            by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
+            labels={"channel": "매체", "roas": "ROAS(%)"},
         )
-        st.markdown("### 구글 애널리틱스(GA4) 라이브 리포트")
+        st.plotly_chart(theme_chart(fig), use_container_width=True)
+
+        bc_cols = list(by_channel.columns)
+        bc_table = format_display(by_channel[bc_cols])
+        bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
+        if bc_total:
+            bc_table = pd.concat([bc_table, pd.DataFrame([bc_total])], ignore_index=True)
+        render_html_table(korify(bc_table))
+        st.download_button(
+            "⬇️ 엑셀 다운로드 (매체별·월별)",
+            data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx",
+        )
+
+        render_channel_mix(fc)  # ← 신규: 채널믹스 목표 대비
+    else:
+        st.info("매체별 데이터가 아직 없습니다.")
+
+    if not snapshot.empty:
+        st.markdown("---")
+        st.markdown("### 당월 매체별 GA 비교 (최신 스냅샷)")
+        latest_month = snapshot["as_of_month"].max()
+        snap_latest = add_kpis(snapshot[snapshot["as_of_month"] == latest_month])
+        st.caption(f"기준월: {latest_month}")
+        cols = ["channel", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas", "ga_conversions", "ga_revenue", "ga_roas"]
+        cols = [c for c in cols if c in snap_latest.columns]
+        st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True, hide_index=True)
+
+
+def render_ga_page(ga: pd.DataFrame):
+    if not ga.empty:
+        ga["as_of_date"] = pd.to_datetime(ga["as_of_date"]).dt.date
+        st.subheader("🔎 기간 필터")
+        min_g, max_g = ga["as_of_date"].min(), ga["as_of_date"].max()
+        gstart, gend = period_filter(min_g, max_g, key="ga")
+        g_in_range = ga[(ga["as_of_date"] >= gstart) & (ga["as_of_date"] <= gend)]
+        if g_in_range.empty:
+            st.info("선택한 기간에 해당하는 GA 스냅샷이 없습니다.")
+        else:
+            latest = g_in_range["as_of_date"].max()
+            g = g_in_range[g_in_range["as_of_date"] == latest].sort_values("revenue", ascending=False)
+            st.caption(f"기준일: {latest} (선택 기간 내 가장 최신 업로드 스냅샷)")
+            st.dataframe(korify(format_display(g)), use_container_width=True, hide_index=True)
+            st.download_button("⬇️ 엑셀 다운로드 (GA 유입경로)", data=to_excel_bytes(korify(format_display(g))), file_name="ga_source.xlsx")
+    else:
+        st.info("GA 유입경로 데이터가 아직 없습니다.")
+
+
+def render_ga4_page():
+    looker_view_url = (
+        "https://lookerstudio.google.com/u/0/reporting/"
+        "7177b0a5-7d7e-4f07-af76-17f2436b317e/page/p_bbwwb7lo4c"
+    )
+    looker_embed_url = (
+        "https://lookerstudio.google.com/embed/reporting/"
+        "7177b0a5-7d7e-4f07-af76-17f2436b317e/page/p_bbwwb7lo4c"
+    )
+    st.markdown("### 구글 애널리틱스(GA4) 라이브 리포트")
+    st.caption(
+        "대행사가 만든 리포트라 일반 공개(링크가 있는 모든 사용자)로 바꾸기 어려우면, "
+        "대시보드 안에 그대로 넣는(임베드) 대신 아래 버튼으로 본인 구글 계정 권한으로 새 창에서 열어 보세요."
+    )
+    st.link_button("📊 GA4 리포트 새 창에서 열기", looker_view_url, use_container_width=True)
+
+    with st.expander("대시보드 안에 직접 띄워보기 (권한 있으면 아래에 표시됨)"):
         st.caption(
-            "대행사가 만든 리포트라 일반 공개(링크가 있는 모든 사용자)로 바꾸기 어려우면, "
-            "대시보드 안에 그대로 넣는(임베드) 대신 아래 버튼으로 본인 구글 계정 권한으로 새 창에서 열어 보세요."
+            "대행사에게 Looker Studio에서 파일 > 삽입 보고서(Embed report)를 켜달라고 요청하면 "
+            "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
         )
-        st.link_button("📊 GA4 리포트 새 창에서 열기", looker_view_url, use_container_width=True)
+        st.markdown(
+            f'<iframe src="{looker_embed_url}" width="100%" height="900" '
+            f'style="border:0" allowfullscreen></iframe>',
+            unsafe_allow_html=True,
+        )
 
-        with st.expander("대시보드 안에 직접 띄워보기 (권한 있으면 아래에 표시됨)"):
-            st.caption(
-                "대행사에게 Looker Studio에서 파일 > 삽입 보고서(Embed report)를 켜달라고 요청하면 "
-                "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
-            )
-            st.markdown(
-                f'<iframe src="{looker_embed_url}" width="100%" height="900" '
-                f'style="border:0" allowfullscreen></iframe>',
-                unsafe_allow_html=True,
-            )
+
+# ──────────────────────────────────────────────────────────────
+# 메인
+# ──────────────────────────────────────────────────────────────
+def main():
+    st.title("📊 STCO 온라인팀 광고/마케팅 성과 대시보드")
+    render_upload_panel()
+
+    weekly = load_table("weekly_overview")
+    monthly = load_table("monthly_overview")
+    daily = load_table("daily_overview")
+    channels = load_table("channel_monthly")
+    snapshot = load_table("channel_snapshot")
+    ga = load_table("ga_source")
+    creatives = load_table("creative_performance")
+
+    if weekly.empty and monthly.empty:
+        st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
+        return
+
+    for df, col in [(weekly, "week_start"), (weekly, "week_end"), (monthly, "report_month"), (daily, "report_date")]:
+        if not df.empty and col in df.columns:
+            df[col] = pd.to_datetime(df[col]).dt.date
+
+    page = render_nav()  # ← st.tabs() 대신 사이드바 그룹 네비게이션
+
+    if page == "종합 대시보드":
+        render_overview_page(weekly, monthly, daily)
+    elif page == "매체별 성과":
+        render_channel_page(channels, snapshot)
+    elif page == "소재별 성과":
+        render_creative_performance(creatives)
+    elif page == "GA 유입경로":
+        render_ga_page(ga)
+    elif page == "GA4 라이브 리포트":
+        render_ga4_page()
 
 
 if __name__ == "__main__":
