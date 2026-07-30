@@ -1608,12 +1608,19 @@ def render_ga4_page():
             "대행사에게 Looker Studio에서 파일 > 삽입 보고서(Embed report)를 켜달라고 요청하면 "
             "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
         )
-        embed_height = st.slider(
-            "임베드 높이(px)", min_value=300, max_value=1000, value=550, step=50, key="looker_embed_height",
+        scale = st.slider(
+            "리포트 축소 비율", min_value=0.4, max_value=1.0, value=0.75, step=0.05, key="looker_scale",
         )
+        # 폭을 줄이면 리포트 내부 표가 반응형으로 찌그러지며 컬럼이 잘리므로,
+        # 원본 크기(1400x1000)로 그린 뒤 CSS로 통째로 축소(zoom-out)해서
+        # 컬럼이 안 잘리고 더 많은 내용이 한 화면에 들어오게 한다.
+        native_w, native_h = 1400, 1000
+        disp_w, disp_h = int(native_w * scale), int(native_h * scale)
         st.markdown(
-            f'<iframe src="{looker_embed_url}" width="100%" height="{embed_height}" '
-            f'style="border:0" allowfullscreen></iframe>',
+            f'<div style="width:{disp_w}px; height:{disp_h}px; overflow:hidden; margin:0 auto; border:1px solid #e5e8eb; border-radius:8px;">'
+            f'<iframe src="{looker_embed_url}" width="{native_w}" height="{native_h}" '
+            f'style="border:0; transform:scale({scale}); transform-origin:0 0;" allowfullscreen></iframe>'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
