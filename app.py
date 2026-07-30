@@ -1609,7 +1609,7 @@ def render_ga4_page():
             "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
         )
         scale = st.slider(
-            "리포트 축소 비율", min_value=0.4, max_value=1.0, value=0.75, step=0.05, key="looker_scale",
+            "리포트 축소 비율", min_value=0.4, max_value=1.0, value=1.0, step=0.05, key="looker_scale",
         )
         # 폭을 줄이면 리포트 내부 표가 반응형으로 찌그러지며 컬럼이 잘리므로,
         # 원본 크기(1400x1000)로 그린 뒤 CSS로 통째로 축소(zoom-out)해서
