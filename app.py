@@ -254,18 +254,24 @@ def load_table(name: str) -> pd.DataFrame:
         return _local_store().get(name, pd.DataFrame()).copy()
 
     rows, page, page_size = [], 0, 1000
-    while True:
-        resp = (
-            client.table(TABLES[name])
-            .select("*")
-            .range(page * page_size, page * page_size + page_size - 1)
-            .execute()
-        )
-        chunk = resp.data or []
-        rows.extend(chunk)
-        if len(chunk) < page_size:
-            break
-        page += 1
+    try:
+        while True:
+            resp = (
+                client.table(TABLES[name])
+                .select("*")
+                .range(page * page_size, page * page_size + page_size - 1)
+                .execute()
+            )
+            chunk = resp.data or []
+            rows.extend(chunk)
+            if len(chunk) < page_size:
+                break
+            page += 1
+    except Exception as e:
+        # 테이블이 아직 Supabase에 없는 경우(예: creative_performance 신규 테이블 미생성) 등
+        # API 에러가 나면 앱 전체가 죽지 않도록 빈 데이터로 취급하고 안내만 띄운다.
+        st.sidebar.warning(f"'{TABLES.get(name, name)}' 테이블 조회 실패 — 해당 테이블이 Supabase에 없을 수 있습니다. ({e})")
+        return pd.DataFrame()
     return pd.DataFrame(rows)
 
 
@@ -297,8 +303,14 @@ def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
         return len(df)
 
     records = df.to_dict(orient="records")
-    for i in range(0, len(records), 500):
-        client.table(TABLES[name]).upsert(records[i : i + 500], on_conflict=on_conflict).execute()
+    try:
+        for i in range(0, len(records), 500):
+            client.table(TABLES[name]).upsert(records[i : i + 500], on_conflict=on_conflict).execute()
+    except Exception as e:
+        # 예: creative_performance처럼 Supabase에 아직 테이블을 안 만든 경우 — 이 테이블만 건너뛰고
+        # 나머지 저장(주간/월별/매체 등)은 정상 진행되도록 전체 저장 흐름을 막지 않는다.
+        st.sidebar.error(f"'{TABLES.get(name, name)}' 저장 실패 — Supabase에 해당 테이블이 있는지 확인해주세요. ({e})")
+        return 0
     return len(df)
 
 
