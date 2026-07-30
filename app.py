@@ -640,21 +640,22 @@ def _infer_channel_from_sheet(sheet: str) -> str:
 
 def find_creative_sheets(xls: pd.ExcelFile):
     """소재 단위 데이터가 있는 시트를 찾는다.
-    1) 시트명에 '소재성과'가 들어간 요약 시트 (예: 페이스북_소재성과요약)
-    2) '_data' 로 끝나는 원본 시트 중 '광고소재' 컬럼이 있는 시트 (예: (DA) 구글_실적최대화_data)
+    시트명 패턴(예: '_data' 접미사)에 의존하면 '(DA) GFA_data(자사몰)'처럼
+    '_data'가 끝이 아니라 중간에 오는 등 실제 파일의 이름 규칙이 제각각이라 놓치기 쉽다.
+    그래서 이름은 참고만 하고, 실제로 각 시트 앞부분에 '광고소재' 컬럼이 있는지
+    내용 기준으로 직접 확인한다 (숨겨진/그룹화된 행이 있어도 pandas는 다 읽으므로 문제 없음).
     """
     found = []
     for s in xls.sheet_names:
         if any(hint in s for hint in CREATIVE_NAME_HINTS):
             found.append(s)
             continue
-        if s.endswith("_data"):
-            try:
-                probe = pd.read_excel(xls, sheet_name=s, header=None, nrows=30)
-            except Exception:
-                continue
-            if find_header_row(probe, required=("광고소재",), scan=30) is not None:
-                found.append(s)
+        try:
+            probe = pd.read_excel(xls, sheet_name=s, header=None, nrows=50)
+        except Exception:
+            continue
+        if find_header_row(probe, required=("광고소재",), scan=50) is not None:
+            found.append(s)
     return found
 
 
@@ -662,25 +663,37 @@ def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     """소재 단위 시트 하나를 파싱. 시트마다 컬럼 구성이 조금씩 달라
     '소재명/광고소재' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다."""
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
-    hdr = find_header_row(raw, required=("노출수", "클릭수"), scan=30)
+    hdr = find_header_row(raw, required=("노출수", "클릭수"), scan=50)
     if hdr is None:
         return None
     headers = [clean_col(h) for h in raw.iloc[hdr].tolist()]
-    data = raw.iloc[hdr + 1:].copy()
-    data.columns = headers
-
     creative_col = match_col(headers, include_any=["소재명", "광고소재", "소재"])
     if not creative_col:
         return None
+
+    data = raw.iloc[hdr + 1:].copy()
+    data.columns = headers
+
+    # 소재 표는 보통 '소재 합계'/TOTAL 행에서 끝나고, 그 아래에 소재 이미지 미리보기 같은
+    # 성격이 다른 표가 이어지는 경우가 있어 합계 행을 만나면 그 지점에서 잘라낸다.
+    total_rows = data.index[data[creative_col].astype(str).str.contains("합계|TOTAL|총계", case=False, na=False)]
+    if len(total_rows):
+        data = data.loc[: total_rows[0]].drop(index=total_rows[0])
+
     data = data[data[creative_col].notna()]
     if data.empty:
         return None
 
     m = metric_cols(headers)
-    # VAT 구분 없이 '광고비' 한 컬럼만 있는 시트 대응 (없으면 포함/제외를 같은 값으로 취급)
-    cost_generic = match_col(headers, include_any=["광고비", "비용"], exclude=["제외", "포함", "마크업"])
-    cost_ex_col = m["cost_ex"] or cost_generic
-    cost_in_col = m["cost_in"] or cost_generic
+    # cost_ex/cost_in은 공용 metric_cols()가 '마크업'을 무조건 제외시키는데,
+    # 실제 파일엔 "광고비(VAT/마크업 포함)"처럼 포함 컬럼 이름에 '마크업'이 들어가는 경우가 있어
+    # 여기서는 마크업을 배제하지 않는 별도 매칭을 우선 시도한다.
+    cost_ex_col = match_col(headers, include_all=["제외"], include_any=["광고비", "비용"]) or m["cost_ex"]
+    cost_in_col = match_col(headers, include_all=["포함"], include_any=["광고비", "비용"]) or m["cost_in"]
+    if not cost_ex_col and not cost_in_col:
+        # VAT 구분 없이 '광고비' 한 컬럼만 있는 시트 대응 (포함/제외를 같은 값으로 취급)
+        cost_generic = match_col(headers, include_any=["광고비", "비용"])
+        cost_ex_col = cost_in_col = cost_generic
 
     out = pd.DataFrame()
     out["creative"] = data[creative_col].astype(str).str.strip()
