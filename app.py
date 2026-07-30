@@ -1609,10 +1609,8 @@ def render_ga4_page():
             "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
         )
         st.markdown(
-            f'<div style="max-width:900px; margin:0 auto;">'
-            f'<iframe src="{looker_embed_url}" width="100%" height="480" '
-            f'style="border:0" allowfullscreen></iframe>'
-            f'</div>',
+            f'<iframe src="{looker_embed_url}" width="100%" height="750" '
+            f'style="border:0" allowfullscreen></iframe>',
             unsafe_allow_html=True,
         )
 
