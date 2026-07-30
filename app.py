@@ -1608,8 +1608,11 @@ def render_ga4_page():
             "대행사에게 Looker Studio에서 파일 > 삽입 보고서(Embed report)를 켜달라고 요청하면 "
             "이 안에 화면이 그대로 뜹니다. 권한이 없으면 로그인 요청이나 빈 화면이 보일 수 있어요."
         )
+        embed_height = st.slider(
+            "임베드 높이(px)", min_value=300, max_value=1000, value=550, step=50, key="looker_embed_height",
+        )
         st.markdown(
-            f'<iframe src="{looker_embed_url}" width="100%" height="750" '
+            f'<iframe src="{looker_embed_url}" width="100%" height="{embed_height}" '
             f'style="border:0" allowfullscreen></iframe>',
             unsafe_allow_html=True,
         )
