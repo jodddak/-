@@ -278,6 +278,26 @@ def load_table(name: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def delete_creative_performance_for_date(as_of_date_value):
+    """오늘자 소재별 성과를 다시 저장하기 전에, 같은 날짜로 이미 저장돼있던 이전 스냅샷을
+    통째로 지운다. upsert는 '새 업로드에 있는 행'만 갱신할 뿐 '새 업로드에서 빠진 행'은
+    절대 지우지 않아서, 엑셀에서 시트를 숨기거나 소재를 뺐는데도 예전에 저장된 행이
+    DB에 계속 남아 화면에 나오는 문제(예: 철 지난 숨김 시트 데이터)를 막기 위함이다."""
+    client = get_supabase_client()
+    if client is None:
+        store = _local_store()
+        df = store.get("creative_performance", pd.DataFrame())
+        if not df.empty and "as_of_date" in df.columns:
+            store["creative_performance"] = df[df["as_of_date"].astype(str) != str(as_of_date_value)]
+        return
+    try:
+        client.table(TABLES["creative_performance"]).delete().eq(
+            "as_of_date", str(as_of_date_value)
+        ).execute()
+    except Exception as e:
+        st.sidebar.warning(f"기존 소재별 성과 스냅샷 삭제 실패(무시하고 계속 진행합니다): {e}")
+
+
 def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
     if df is None or df.empty:
         return 0
@@ -1600,6 +1620,7 @@ def render_upload_panel():
             n4 = save_table("channel_snapshot", result["channel_snapshot"], "as_of_month,channel", file.name)
             n5 = save_table("ga_source", result["ga"], "as_of_date,source_medium", file.name)
             n6 = save_table("daily_overview", result["daily"], "report_date", file.name)
+            delete_creative_performance_for_date(today)
             n7 = save_table(
                 "creative_performance", creatives_df,
                 "as_of_date,channel,creative", file.name,
