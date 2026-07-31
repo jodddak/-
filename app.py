@@ -26,6 +26,7 @@ import openpyxl
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="STCO 광고성과 대시보드", page_icon="📊", layout="wide")
 
@@ -1397,6 +1398,151 @@ def render_html_table(table: pd.DataFrame):
     st.markdown(html, unsafe_allow_html=True)
 
 
+# 소재별 성과 표에서 헤더 클릭으로 정렬 가능한 컬럼: 화면표시(한글) 헤더 → 정렬 기준이 되는 원본 컬럼 키.
+# st.markdown은 보안상 <script>를 실행하지 않아서(react-markdown이 그냥 무시함), 클릭 정렬처럼
+# JS가 필요한 표는 반드시 st.components.v1.html(iframe)로 렌더링해야 한다.
+CREATIVE_SORT_COLS = {
+    "노출수": "impressions",
+    "클릭수": "clicks",
+    "CTR(%)": "ctr",
+    "CPC": "cpc",
+    "전환수": "conversions",
+    "ROAS(%)": "roas",
+}
+
+
+def render_sortable_creative_table(show: pd.DataFrame, raw: pd.DataFrame):
+    """소재별 성과 표 전용 렌더러. render_html_table과 모양은 같지만, 노출/클릭/CTR/CPC/전환/ROAS
+    헤더를 클릭하면 오름차순↔내림차순으로 재정렬된다 (TOTAL 행은 항상 맨 위 고정).
+    show: korify+format_display를 거친 화면표시용 표 (맨 위 TOTAL 행 포함, 문자열 포맷).
+    raw : TOTAL 행을 제외한, show의 데이터 행과 같은 순서의 원본(raw, 숫자) 값 표
+          (정렬 기준값을 문자열이 아니라 실제 숫자로 비교하기 위해 필요)."""
+    if show.empty:
+        st.caption("데이터가 아직 없습니다.")
+        return
+
+    cols = list(show.columns)
+    thead_cells = []
+    for c in cols:
+        sort_key = CREATIVE_SORT_COLS.get(c)
+        if sort_key:
+            thead_cells.append(
+                f'<th class="stco-sortable" data-key="{sort_key}">{c} <span class="stco-sort-arrow">⇅</span></th>'
+            )
+        else:
+            thead_cells.append(f"<th>{c}</th>")
+    thead = "".join(thead_cells)
+
+    row_htmls = []
+    raw_idx = 0  # show에서 TOTAL 행(맨 위 1개)을 제외한 순번 == raw의 행 순번
+    for _, row in show.iterrows():
+        first_text = str(row[cols[0]]).strip()
+        is_total = first_text == "TOTAL"
+        cells = []
+        for c in cols:
+            val = row[c]
+            text = "" if pd.isna(val) else str(val)
+            sort_key = CREATIVE_SORT_COLS.get(c)
+            data_attr = ""
+            if sort_key and not is_total and raw_idx < len(raw) and sort_key in raw.columns:
+                raw_val = raw.iloc[raw_idx][sort_key]
+                if pd.notna(raw_val):
+                    data_attr = f' data-value="{float(raw_val)}"'
+            cells.append(f"<td{data_attr}>{text}</td>")
+        row_class = ' class="stco-total-row"' if is_total else ""
+        row_htmls.append(f"<tr{row_class}>{''.join(cells)}</tr>")
+        if not is_total:
+            raw_idx += 1
+
+    n_data_rows = max(len(show) - 1, 0)
+    iframe_height = min(max(110 + n_data_rows * 156, 220), 900)
+
+    html = f"""
+    <style>
+    body {{ margin:0; font-family:{THEME_FONT_STACK}; }}
+    .stco-table-wrap {{
+        overflow:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px; background:{THEME_COLORS["canvas"]};
+    }}
+    .stco-table {{ width:auto; max-width:100%; border-collapse:collapse; font-size:14px; }}
+    .stco-table th {{
+        background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["muted"]}; font-weight:600; padding:8px 14px;
+        text-align:right; border-bottom:1px solid {THEME_COLORS["border"]}; white-space:nowrap;
+        position:sticky; top:0; z-index:1;
+    }}
+    .stco-table th:first-child {{ text-align:left; border-top-left-radius:10px; }}
+    .stco-table th:last-child {{ border-top-right-radius:10px; }}
+    .stco-table td {{
+        padding:8px 14px; text-align:right; color:{THEME_COLORS["foreground"]};
+        border-bottom:1px solid {THEME_COLORS["border"]}; white-space:nowrap;
+    }}
+    .stco-table td:first-child {{ text-align:left; }}
+    .stco-table tr:last-child td {{ border-bottom:none; }}
+    .stco-table tr:hover td {{ background:{THEME_COLORS["surface"]}; }}
+    .stco-table tr.stco-total-row td {{
+        background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["foreground"]};
+        font-weight:700; border-top:2px solid {THEME_COLORS["border"]};
+    }}
+    .stco-sortable {{ cursor:pointer; user-select:none; }}
+    .stco-sortable:hover {{ color:{THEME_COLORS["foreground"]}; }}
+    .stco-sort-arrow {{ font-size:11px; margin-left:2px; }}
+    .stco-sortable.stco-sort-active {{ color:{THEME_COLORS["foreground"]}; }}
+    .stco-sortable.stco-sort-active .stco-sort-arrow {{ font-weight:700; }}
+    </style>
+    <div class="stco-table-wrap">
+    <table class="stco-table" id="stco-creative-table">
+      <thead><tr>{thead}</tr></thead>
+      <tbody>{''.join(row_htmls)}</tbody>
+    </table>
+    </div>
+    <script>
+    (function() {{
+        var table = document.getElementById("stco-creative-table");
+        var tbody = table.querySelector("tbody");
+        var headers = table.querySelectorAll("th.stco-sortable");
+        var state = {{ key: null, dir: 1 }};
+
+        headers.forEach(function(th) {{
+            th.addEventListener("click", function() {{
+                var key = th.getAttribute("data-key");
+                var colIndex = Array.prototype.indexOf.call(th.parentNode.children, th);
+                if (state.key === key) {{
+                    state.dir = -state.dir;
+                }} else {{
+                    state.key = key;
+                    state.dir = -1;  // 처음 클릭하면 내림차순(큰 값 먼저)
+                }}
+                headers.forEach(function(h) {{
+                    h.classList.remove("stco-sort-active");
+                    h.querySelector(".stco-sort-arrow").textContent = "⇅";
+                }});
+                th.classList.add("stco-sort-active");
+                th.querySelector(".stco-sort-arrow").textContent = state.dir === 1 ? "▲" : "▼";
+
+                var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
+                var totalRows = rows.filter(function(r) {{ return r.classList.contains("stco-total-row"); }});
+                var dataRows = rows.filter(function(r) {{ return !r.classList.contains("stco-total-row"); }});
+
+                dataRows.sort(function(a, b) {{
+                    var av = parseFloat(a.children[colIndex].getAttribute("data-value"));
+                    var bv = parseFloat(b.children[colIndex].getAttribute("data-value"));
+                    var aNum = isNaN(av) ? -Infinity : av;
+                    var bNum = isNaN(bv) ? -Infinity : bv;
+                    return (aNum - bNum) * state.dir;
+                }});
+
+                totalRows.forEach(function(r) {{ tbody.appendChild(r); }});
+                dataRows.forEach(function(r) {{ tbody.appendChild(r); }});
+                for (var i = totalRows.length - 1; i >= 0; i--) {{
+                    tbody.insertBefore(totalRows[i], tbody.firstChild);
+                }}
+            }});
+        }});
+    }})();
+    </script>
+    """
+    components.html(html, height=iframe_height, scrolling=True)
+
+
 def pct_change_row(d_full: pd.DataFrame, latest_pos: int, numeric_cols: list, label_col: str, label_text: str = "전기간 대비"):
     """d_full(전체 정렬 데이터)에서 latest_pos 위치의 행과 바로 이전 행을 비교해 증감율 행을 만든다."""
     if latest_pos <= 0 or latest_pos >= len(d_full):
@@ -1797,7 +1943,7 @@ def _render_creative_table(fc: pd.DataFrame):
     total_show = format_display(pd.DataFrame([total_row])[display_cols])
     show = pd.concat([total_show, show], ignore_index=True)
 
-    render_html_table(korify(show))
+    render_sortable_creative_table(korify(show), agg)
 
     # 엑셀 다운로드에는 이미지 썸네일(HTML) 대신 원본 URL을 남긴다.
     dl_cols = [c for c in display_cols if c != "creative_image"]
