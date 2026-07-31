@@ -302,10 +302,24 @@ def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
     if df is None or df.empty:
         return 0
     df = df.copy()
-    # 같은 업로드 안에 동일 키(예: 같은 월+매체) 행이 중복되면 upsert 한 번의 요청 안에서
-    # 같은 행을 두 번 건드리게 되어 Postgres가 에러를 내므로, 저장 전에 미리 정리한다.
+    # 같은 업로드 안에 동일 키(예: creative_performance라면 같은 날짜+매체+소재명) 행이 중복되면
+    # upsert 한 번의 요청 안에서 같은 행을 두 번 건드리게 되어 Postgres가 에러를 내므로, 저장 전에
+    # 미리 정리해야 한다. 예전에는 단순 drop_duplicates(keep="last")로 나머지를 버렸는데, 같은
+    # 소재가 여러 캠페인/그룹에 동시에 쓰이는 경우(예: '260630_슈즈'가 리타겟팅/프로스펙팅 캠페인에
+    # 둘 다 있는 경우) 실제로는 두 행을 '합산'해야 할 실적인데 한쪽을 통째로 버려서 노출·광고비·매출이
+    # 실제보다 훨씬 작게 저장되는 버그가 있었다. 그래서 중복 키가 있으면 숫자 컬럼은 합산하고,
+    # 문자열/날짜 등 나머지 컬럼은 비어있지 않은 첫 값을 사용하도록 바꾼다.
     key_cols = [c.strip() for c in on_conflict.split(",")]
-    df = df.drop_duplicates(subset=key_cols, keep="last")
+    if df.duplicated(subset=key_cols, keep=False).any():
+        agg_map = {}
+        for col in df.columns:
+            if col in key_cols:
+                continue
+            if pd.api.types.is_numeric_dtype(df[col]):
+                agg_map[col] = "sum"
+            else:
+                agg_map[col] = lambda s: next((v for v in s if pd.notna(v) and v != ""), None)
+        df = df.groupby(key_cols, as_index=False).agg(agg_map)
     df["source_file"] = source_file
     df["uploaded_at"] = datetime.utcnow().isoformat()
 
