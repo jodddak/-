@@ -996,6 +996,16 @@ def get_hidden_rows(wb, sheet: str) -> set:
     return hidden
 
 
+def get_visible_sheets(wb) -> set:
+    """워크북 탭 자체가 숨겨진(우클릭 → 시트 숨기기) 시트 이름을 제외한, 눈에 보이는 시트 이름 집합.
+    현재 안 쓰는 매체나 철 지난 시트를 통째로 탭 숨김 처리해두는 게 이 대시보드 운영자의
+    실제 워크플로우라, '시트가 숨겨져 있으면 데이터도 안 가져온다'가 가장 직접적인 신호다.
+    (wb가 없으면 None을 반환해 — 필터링 자체를 건너뛰고 기존처럼 전부 읽도록 — 안전하게 폴백한다.)"""
+    if wb is None:
+        return None
+    return {name for name in wb.sheetnames if wb[name].sheet_state == "visible"}
+
+
 def parse_workbook(file, today: date):
     xls = pd.ExcelFile(file)
     try:
@@ -1011,6 +1021,7 @@ def parse_workbook(file, today: date):
             file.seek(0)
         except Exception:
             pass
+    visible_sheets = get_visible_sheets(wb_for_hidden)
     result = {
         "weekly": pd.DataFrame(),
         "monthly": pd.DataFrame(),
@@ -1032,7 +1043,10 @@ def parse_workbook(file, today: date):
         result["channel_snapshot"] = parse_channel_snapshot(raw, bounds, result["monthly"])
 
     chan_frames = []
-    for s in discover_channel_sheets(xls):
+    channel_sheet_candidates = discover_channel_sheets(xls)
+    if visible_sheets is not None:
+        channel_sheet_candidates = [s for s in channel_sheet_candidates if s in visible_sheets]
+    for s in channel_sheet_candidates:
         result["channel_sheets_found"].append(s)
         df = parse_channel_sheet(xls, s, today)
         if df is not None and len(df):
@@ -1043,6 +1057,8 @@ def parse_workbook(file, today: date):
 
     creative_frames = []
     creative_sheets = find_creative_sheets(xls)
+    if visible_sheets is not None:
+        creative_sheets = [s for s in creative_sheets if s in visible_sheets]
     for s in creative_sheets:
         hidden_rows = get_hidden_rows(wb_for_hidden, s)
         df = parse_creative_sheet(xls, s, today, hidden_rows=hidden_rows)
