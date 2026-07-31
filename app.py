@@ -702,6 +702,33 @@ def _find_last_matching_row(raw: pd.DataFrame, required, scan=CREATIVE_SCAN_ROWS
     return last
 
 
+# 소재별 성과 화면에는 '현재 실제로 운영 중인' 매체만 노출한다 (당근마켓/카카오모먼트/DV360/
+# 구글에즈/MOBON/에디AI/네이버 SA·SSP 등은 현재 미운영이라 제외).
+# GFA는 캠페인명에 붙는 '_PC'/'_MO' 접미사로 기기별(네이버 GFA PC / 네이버 GFA MO)로 쪼갠다.
+CREATIVE_CHANNEL_WHITELIST_MAP = {
+    "페이스북": "메타",
+    "구글": "구글(P-MAX)",  # '(DA) 구글_실적최대화_data' 시트 = Performance Max
+    "크리테오": "크리테오",
+}
+
+
+def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> pd.Series:
+    """행별 매체탭 라벨을 계산. 현재 미운영 매체는 None을 반환해 화면/저장에서 제외되도록 한다."""
+    idx = campaign_series.index
+    if inferred_channel in CREATIVE_CHANNEL_WHITELIST_MAP:
+        label = CREATIVE_CHANNEL_WHITELIST_MAP[inferred_channel]
+        return pd.Series([label] * len(idx), index=idx, dtype=object)
+    if inferred_channel == "GFA":
+        camp = campaign_series.astype(str)
+        is_pc = camp.str.contains("_PC", case=False, na=False)
+        is_mo = camp.str.contains("_MO", case=False, na=False)
+        result = pd.Series([None] * len(idx), index=idx, dtype=object)
+        result[is_pc] = "네이버 GFA PC"
+        result[~is_pc & is_mo] = "네이버 GFA MO"
+        return result
+    return pd.Series([None] * len(idx), index=idx, dtype=object)
+
+
 def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     """소재 단위 시트 하나를 파싱. 시트마다 컬럼 구성이 조금씩 달라
     '소재명/광고소재/행 레이블' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다."""
@@ -750,10 +777,15 @@ def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
         cost_ex_idx = cost_in_idx = cost_generic_idx
     conv_idx = match_col_pos(headers, include_all=["전환"], exclude=["금액", "ga", "율"])
     rev_idx = match_col_pos(headers, include_any=["매출", "전환금액"], exclude=["ga", "객단가"])
+    campaign_idx = match_col_pos(headers, include_any=["캠페인"])
+    campaign_series = (
+        body.iloc[:, campaign_idx] if campaign_idx is not None
+        else pd.Series([""] * len(body), index=body.index)
+    )
 
     out = pd.DataFrame()
     out["creative"] = creative_series.values
-    out["channel"] = _infer_channel_from_sheet(sheet)
+    out["channel"] = _map_creative_channel(_infer_channel_from_sheet(sheet), campaign_series).values
     out["impressions"] = numcol_by_pos(body, impr_idx)
     out["clicks"] = numcol_by_pos(body, clicks_idx)
     out["cost_excl_vat"] = numcol_by_pos(body, cost_ex_idx)
@@ -761,6 +793,10 @@ def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     out["conversions"] = numcol_by_pos(body, conv_idx)
     out["revenue"] = numcol_by_pos(body, rev_idx)
     out["as_of_date"] = today
+    # 현재 미운영 매체(채널 매핑이 None인 행)는 소재별 성과에서 제외
+    out = out[out["channel"].notna()]
+    if out.empty:
+        return None
     out = out[
         (out["impressions"] > 0) | (out["clicks"] > 0) | (out["cost_incl_vat"] > 0)
         | (out["conversions"] > 0) | (out["revenue"] > 0)
@@ -1407,28 +1443,15 @@ def render_channel_mix(fc: pd.DataFrame):
 # ──────────────────────────────────────────────────────────────
 # 소재별 성과 (신규 페이지)
 # ──────────────────────────────────────────────────────────────
-def render_creative_performance(creatives: pd.DataFrame):
-    st.subheader("🎨 소재별 성과")
-    st.caption(
-        "페이스북·구글 실적최대화처럼 소재 단위 데이터가 제공되는 매체만 표시됩니다. "
-        "네이버 등 캠페인/그룹 단위까지만 제공되는 매체는 현재 커버되지 않습니다."
-    )
-    if creatives is None or creatives.empty:
-        st.info(
-            "소재별 데이터가 아직 없습니다. 엑셀에 '○○_소재성과요약' 시트 또는 "
-            "'광고소재' 컬럼이 있는 '_data' 시트가 있는지 확인해주세요."
-        )
+# 현재 실제로 운영 중인 매체 탭만 고정 순서로 노출 (TOTAL이 맨 왼쪽)
+CREATIVE_TABS = ["TOTAL", "네이버 GFA PC", "네이버 GFA MO", "메타", "구글(P-MAX)", "크리테오"]
+
+
+def _render_creative_table(fc: pd.DataFrame):
+    """선택된 탭(매체)의 필터링된 소재 데이터로 집계 테이블 + 판정 + 다운로드 버튼을 렌더링."""
+    if fc.empty:
+        st.info("선택한 기간/매체에 데이터가 없습니다.")
         return
-
-    creatives = creatives.copy()
-    creatives["as_of_date"] = pd.to_datetime(creatives["as_of_date"]).dt.date
-    min_d, max_d = creatives["as_of_date"].min(), creatives["as_of_date"].max()
-    start, end = period_filter(min_d, max_d, key="creative")
-    fc = creatives[(creatives["as_of_date"] >= start) & (creatives["as_of_date"] <= end)]
-
-    channels_avail = sorted(fc["channel"].unique().tolist())
-    picked = st.multiselect("매체 필터", channels_avail, default=channels_avail, key="creative_channel_filter")
-    fc = fc[fc["channel"].isin(picked)]
 
     agg = (
         fc.groupby(["channel", "creative"], as_index=False)
@@ -1469,7 +1492,33 @@ def render_creative_performance(creatives: pd.DataFrame):
         "⬇️ 엑셀 다운로드 (소재별 성과)",
         data=to_excel_bytes(korify(format_display(agg[cols]))),
         file_name="creative_performance.xlsx",
+        key=f"dl_creative_{fc['channel'].iloc[0] if fc['channel'].nunique() == 1 else 'total'}",
     )
+
+
+def render_creative_performance(creatives: pd.DataFrame):
+    st.subheader("🎨 소재별 성과")
+    st.caption("현재 운영 중인 매체(네이버 GFA PC/MO, 메타, 구글 P-MAX, 크리테오)의 소재 단위 데이터만 표시됩니다.")
+    if creatives is None or creatives.empty:
+        st.info(
+            "소재별 데이터가 아직 없습니다. 엑셀에 '○○_소재성과요약' 시트 또는 "
+            "'광고소재' 컬럼이 있는 '_data' 시트가 있는지 확인해주세요."
+        )
+        return
+
+    creatives = creatives.copy()
+    creatives["as_of_date"] = pd.to_datetime(creatives["as_of_date"]).dt.date
+    min_d, max_d = creatives["as_of_date"].min(), creatives["as_of_date"].max()
+    start, end = period_filter(min_d, max_d, key="creative")
+    fc = creatives[(creatives["as_of_date"] >= start) & (creatives["as_of_date"] <= end)]
+    # 예전 업로드분에 남아있을 수 있는 미운영 매체(당근마켓 등) 잔여 행은 TOTAL에서도 제외
+    fc = fc[fc["channel"].isin(CREATIVE_TABS[1:])]
+
+    tabs = st.tabs(CREATIVE_TABS)
+    for tab_widget, tab_name in zip(tabs, CREATIVE_TABS):
+        with tab_widget:
+            tab_fc = fc if tab_name == "TOTAL" else fc[fc["channel"] == tab_name]
+            _render_creative_table(tab_fc)
 
 
 # ──────────────────────────────────────────────────────────────
