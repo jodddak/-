@@ -739,9 +739,11 @@ def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> 
     return pd.Series([None] * len(idx), index=idx, dtype=object)
 
 
-def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
+def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date, hidden_rows: set = None):
     """소재 단위 시트 하나를 파싱. 시트마다 컬럼 구성이 조금씩 달라
-    '소재명/광고소재/행 레이블' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다."""
+    '소재명/광고소재/행 레이블' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다.
+    hidden_rows: 엑셀에서 '행 숨기기'로 숨긴 행 번호(0-indexed) 집합. 해당 소재는 더 이상
+    안 쓰는 것으로 보고 집계에서 제외한다(다시 보이게 하면 다음 업로드부터 자동으로 복귀)."""
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
     # 1순위: 노출수·클릭수·소재(광고소재/소재명 등)가 다 있는 '진짜 소재 상세표' 헤더 중 가장 마지막 것.
@@ -765,6 +767,12 @@ def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     body = raw.iloc[hdr + 1:]
     if body.empty:
         return None
+
+    # 엑셀에서 '행 숨기기'로 숨겨둔 소재 행은 더 이상 안 쓰는 것으로 보고 제외
+    if hidden_rows:
+        body = body[~body.index.isin(hidden_rows)]
+        if body.empty:
+            return None
 
     # '총 합계'/TOTAL 행(캠페인·그룹 칸에 라벨이 오기도 함)과, 그 아래 붙는 '소재 이미지'
     # 미리보기 같은 성격이 다른 표는 소재명 칸 자체가 비어있거나(합계 행) 다른 컬럼 위치에
@@ -974,8 +982,35 @@ def attach_creative_images(creatives: pd.DataFrame, image_urls: dict) -> pd.Data
     return creatives
 
 
+def get_hidden_rows(wb, sheet: str) -> set:
+    """엑셀에서 마우스 우클릭 → '행 숨기기'로 숨긴 행의 번호(0-indexed, header=None으로 읽은
+    raw DataFrame의 행 인덱스와 동일)를 반환한다. 소재 하나를 '이제 안 씀' 표시로 숨겨두면
+    소재별 성과 집계에서 자동으로 제외하기 위한 용도 — 숨김을 풀면 다음 업로드부터 다시 잡힌다."""
+    if wb is None or sheet not in wb.sheetnames:
+        return set()
+    ws = wb[sheet]
+    hidden = set()
+    for row_idx, dim in ws.row_dimensions.items():
+        if dim.hidden:
+            hidden.add(row_idx - 1)  # openpyxl 행 번호는 1-indexed
+    return hidden
+
+
 def parse_workbook(file, today: date):
     xls = pd.ExcelFile(file)
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+    try:
+        wb_for_hidden = openpyxl.load_workbook(file, data_only=True)
+    except Exception:
+        wb_for_hidden = None
+    finally:
+        try:
+            file.seek(0)
+        except Exception:
+            pass
     result = {
         "weekly": pd.DataFrame(),
         "monthly": pd.DataFrame(),
@@ -1009,7 +1044,8 @@ def parse_workbook(file, today: date):
     creative_frames = []
     creative_sheets = find_creative_sheets(xls)
     for s in creative_sheets:
-        df = parse_creative_sheet(xls, s, today)
+        hidden_rows = get_hidden_rows(wb_for_hidden, s)
+        df = parse_creative_sheet(xls, s, today, hidden_rows=hidden_rows)
         if df is not None and len(df):
             creative_frames.append(df)
     result["creatives"] = pd.concat(creative_frames, ignore_index=True) if creative_frames else pd.DataFrame()
@@ -1279,7 +1315,7 @@ def render_html_table(table: pd.DataFrame):
         overflow-x:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px; background:{THEME_COLORS["canvas"]};
     }}
     .stco-table {{
-        width:100%; border-collapse:collapse; font-size:14px;
+        width:auto; max-width:100%; border-collapse:collapse; font-size:14px;
         font-family: {THEME_FONT_STACK};
     }}
     .stco-table th {{
@@ -1676,7 +1712,7 @@ def _render_creative_table(fc: pd.DataFrame):
         # render_html_table은 셀 값을 그대로 <td>에 넣으므로 <img> 태그 문자열이 실제 썸네일로 렌더링된다.
         agg["creative_image"] = agg["image_url"].map(
             lambda u: (
-                f'<img src="{u}" style="height:90px;width:90px;border-radius:6px;object-fit:cover;">'
+                f'<img src="{u}" style="height:140px;width:140px;border-radius:8px;object-fit:cover;">'
                 if isinstance(u, str) and u else ""
             )
         )
