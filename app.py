@@ -1759,6 +1759,23 @@ def _render_creative_table(fc: pd.DataFrame):
     display_cols = [c for c in display_cols if c in agg.columns]
 
     show = format_display(agg[display_cols])
+
+    # TOTAL 행: 선택된 탭/기간 전체 합계를 표 맨 위(헤더 바로 아래)에 음영 처리해서 보여준다.
+    # render_html_table은 첫 컬럼이 정확히 "TOTAL"이면 자동으로 강조 스타일(음영/굵게)을 입힌다.
+    total_base = pd.DataFrame([{
+        "impressions": agg["impressions"].sum(), "clicks": agg["clicks"].sum(),
+        "cost_excl_vat": agg["cost_excl_vat"].sum(), "cost_incl_vat": agg["cost_incl_vat"].sum(),
+        "conversions": agg["conversions"].sum(), "revenue": agg["revenue"].sum(),
+    }])
+    total_kpis = add_kpis(total_base).iloc[0]
+    total_row = {c: "" for c in display_cols}
+    total_row["channel"] = "TOTAL"
+    for c in ("impressions", "clicks", "ctr", "cpc", "cost_incl_vat", "conversions", "cvr", "cpa", "revenue", "roas"):
+        if c in display_cols:
+            total_row[c] = total_kpis[c]
+    total_show = format_display(pd.DataFrame([total_row])[display_cols])
+    show = pd.concat([total_show, show], ignore_index=True)
+
     render_html_table(korify(show))
 
     # 엑셀 다운로드에는 이미지 썸네일(HTML) 대신 원본 URL을 남긴다.
