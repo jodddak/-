@@ -17,6 +17,7 @@ STCO 온라인팀 광고/마케팅 성과 대시보드
 
 import io
 import re
+import urllib.parse
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -822,6 +823,15 @@ TAB_TO_ORIGIN_CHANNEL = {
     "네이버 GFA MO": "GFA",
 }
 
+# Storage 저장 경로(폴더명)는 한글이 섞이면 일부 클라이언트/버전에서 URL 인코딩 문제로
+# 업로드가 통째로 실패할 수 있어, 폴더명은 반드시 ASCII로 고정한다.
+ORIGIN_CHANNEL_FOLDER = {
+    "페이스북": "facebook",
+    "구글": "google",
+    "크리테오": "criteo",
+    "GFA": "gfa",
+}
+
 
 def _creative_image_key(name) -> str:
     """소재명 표기 차이를 무시하고 매칭하기 위한 정규화 키.
@@ -906,25 +916,31 @@ def extract_creative_images(file, sheets_and_channels) -> dict:
     return images
 
 
-def upload_creative_images(images: dict) -> dict:
+def upload_creative_images(images: dict):
     """추출된 이미지를 Supabase Storage(버킷: creative-images)에 업로드하고
-    {(원본채널, 정규화된 소재명): 공개 URL} 딕셔너리를 반환한다.
+    ({(원본채널, 정규화된 소재명): 공개 URL} 딕셔너리, 에러 메시지 목록)을 반환한다.
     Supabase 미연결이거나 버킷이 없는 등 실패 시 조용히 건너뛴다(성과 저장 자체는 막지 않음)."""
     client = get_supabase_client()
     if client is None or not images:
-        return {}
+        return {}, []
     urls = {}
+    errors = []
     for (origin_channel, name_key), (data, ext) in images.items():
-        safe_name = re.sub(r"[^0-9A-Za-z가-힣_\-]", "_", name_key)[:80] or "unnamed"
-        path = f"{origin_channel}/{safe_name}.{ext}"
+        # 경로에 한글이 섞이면 일부 환경에서 업로드가 통째로 실패할 수 있어 폴더명/파일명 모두
+        # ASCII로만 구성한다 (폴더는 고정 영문명, 파일명은 소재명을 percent-encoding).
+        folder = ORIGIN_CHANNEL_FOLDER.get(origin_channel, "etc")
+        safe_name = urllib.parse.quote(name_key, safe="")[:150] or "unnamed"
+        path = f"{folder}/{safe_name}.{ext}"
         try:
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
                 path, data, {"content-type": f"image/{ext}", "upsert": "true"}
             )
             urls[(origin_channel, name_key)] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
-        except Exception:
+        except Exception as e:
+            if len(errors) < 3:  # 화면에 너무 길게 쌓이지 않도록 앞의 몇 개만 보관
+                errors.append(f"{origin_channel}/{name_key}: {e}")
             continue
-    return urls
+    return urls, errors
 
 
 def attach_creative_images(creatives: pd.DataFrame, image_urls: dict) -> pd.DataFrame:
@@ -1502,10 +1518,12 @@ def render_upload_panel():
                         (s, _infer_channel_from_sheet(s)) for s in result.get("creative_sheets_found", [])
                     ]
                     images = extract_creative_images(file, sheets_and_channels)
-                    image_urls = upload_creative_images(images)
+                    image_urls, image_errors = upload_creative_images(images)
                     creatives_df = attach_creative_images(creatives_df, image_urls)
                     if images:
                         st.write(f"소재 이미지 {len(images)}개 인식, {len(image_urls)}개 업로드 성공")
+                        if image_errors:
+                            st.warning("업로드 실패 예시:\n" + "\n".join(image_errors))
 
             n1 = save_table("weekly_overview", result["weekly"], "week_start", file.name)
             n2 = save_table("monthly_overview", result["monthly"], "report_month", file.name)
