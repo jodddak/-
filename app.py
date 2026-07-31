@@ -1676,7 +1676,7 @@ def _render_creative_table(fc: pd.DataFrame):
         # render_html_table은 셀 값을 그대로 <td>에 넣으므로 <img> 태그 문자열이 실제 썸네일로 렌더링된다.
         agg["creative_image"] = agg["image_url"].map(
             lambda u: (
-                f'<img src="{u}" style="height:44px;border-radius:6px;object-fit:cover;">'
+                f'<img src="{u}" style="height:90px;width:90px;border-radius:6px;object-fit:cover;">'
                 if isinstance(u, str) and u else ""
             )
         )
