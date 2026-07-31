@@ -295,6 +295,13 @@ def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
         elif df[col].dtype == object:
             df[col] = df[col].apply(lambda v: v.isoformat() if isinstance(v, (date, datetime)) else v)
 
+    # NaN/inf는 표준 JSON에 없는 값이라 Supabase API 호출(JSON 직렬화) 자체가 통째로 실패한다
+    # ("Out of range float values are not JSON compliant: nan"). 어떤 컬럼에서 오든(신규 image_url
+    # 컬럼이 전부 비어 float64/NaN으로 잡히는 경우 등) 저장 직전에 전부 None으로 정리해 방지한다.
+    # (float64 컬럼은 dtype을 object로 바꾸지 않으면 None이 다시 NaN으로 되돌아가므로 astype(object) 필수)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.astype(object).where(pd.notnull(df), None)
+
     client = get_supabase_client()
     if client is None:
         store = _local_store()
