@@ -20,6 +20,7 @@ import re
 from datetime import date, datetime, timedelta
 
 import numpy as np
+import openpyxl
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -804,6 +805,142 @@ def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     return out.reset_index(drop=True)
 
 
+# ──────────────────────────────────────────────────────────────
+# 소재 이미지 추출/업로드 (신규)
+# 각 채널 시트 끝에 실제로 embedded 되어 있는 '소재명 | 이미지' 표에서
+# 이미지를 직접 추출해 Supabase Storage에 업로드하고, (원본채널, 소재명) → 공개 URL로 매핑한다.
+# 소재 단위 성과 파싱(parse_creative_sheet)과는 별도 경로 — 실패해도 성과 데이터 저장에는 영향 없음.
+# ──────────────────────────────────────────────────────────────
+CREATIVE_IMAGE_BUCKET = "creative-images"
+
+# 소재별 성과 화면의 매체탭(기기 분리 후) → 이미지가 들어있는 원본 채널명 역매핑
+TAB_TO_ORIGIN_CHANNEL = {
+    "메타": "페이스북",
+    "구글(P-MAX)": "구글",
+    "크리테오": "크리테오",
+    "네이버 GFA PC": "GFA",
+    "네이버 GFA MO": "GFA",
+}
+
+
+def _creative_image_key(name) -> str:
+    """소재명 표기 차이를 무시하고 매칭하기 위한 정규화 키.
+    - 줄바꿈/공백 제거
+    - 크리테오처럼 성과표의 소재명 끝에 '(크리에이티브ID)'가 붙지만 이미지 캡션표에는
+      없는 경우가 있어, 끝에 붙은 '(숫자)'는 제거해서 매칭한다 ('(수정)'처럼 숫자가 아닌
+      괄호 표기는 그대로 남겨 다른 소재와 구분되도록 유지)."""
+    s = re.sub(r"\s+", "", str(name)).strip()
+    s = re.sub(r"\(\d+\)$", "", s)
+    return s
+
+
+def extract_creative_images(file, sheets_and_channels) -> dict:
+    """업로드된 엑셀 원본에서 시트별로 embedded 이미지를 찾아
+    {(원본채널, 정규화된 소재명): (이미지bytes, 확장자)} 형태로 반환한다.
+    시트 안에 '소재명(또는 광고소재/소재)'과 '이미지'가 같이 있는 헤더 행을 찾고,
+    그 아래 각 행에 앵커된 이미지를 같은 행의 소재명 값과 매칭한다."""
+    images = {}
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+    try:
+        wb = openpyxl.load_workbook(file, data_only=True)
+    except Exception:
+        return images
+    finally:
+        try:
+            file.seek(0)
+        except Exception:
+            pass
+
+    for sheet, origin_channel in sheets_and_channels:
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        imgs = getattr(ws, "_images", [])
+        if not imgs:
+            continue
+        try:
+            raw = pd.read_excel(file, sheet_name=sheet, header=None)
+        except Exception:
+            continue
+        finally:
+            try:
+                file.seek(0)
+            except Exception:
+                pass
+
+        # '소재명 | 이미지' 헤더 행(진짜 성과 상세표와는 별개, 항상 시트 맨 끝 쪽에 있음) 탐색
+        hdr = None
+        for i in range(len(raw)):
+            row_text = " ".join(str(x) for x in raw.iloc[i].tolist())
+            if "이미지" in row_text and any(tok in row_text for tok in ("소재명", "광고소재", "소재")):
+                hdr = i
+        if hdr is None:
+            continue
+
+        headers = [clean_col(h) for h in raw.iloc[hdr].tolist()]
+        name_idx = None
+        for cand in (["소재명"], ["광고소재"], ["소재"]):
+            name_idx = match_col_pos(headers, include_any=cand)
+            if name_idx is not None:
+                break
+        if name_idx is None:
+            continue
+
+        for img in imgs:
+            try:
+                row_i = img.anchor._from.row  # 0-indexed, header=None으로 읽은 raw의 행 인덱스와 동일
+                if row_i <= hdr or row_i >= len(raw):
+                    continue
+                name = str(raw.iloc[row_i, name_idx]).replace("\n", "").strip()
+                if not name or name.lower() == "nan":
+                    continue
+                data = img._data()
+                ext = (img.format or "png").lower()
+                images[(origin_channel, _creative_image_key(name))] = (data, ext)
+            except Exception:
+                continue
+
+    return images
+
+
+def upload_creative_images(images: dict) -> dict:
+    """추출된 이미지를 Supabase Storage(버킷: creative-images)에 업로드하고
+    {(원본채널, 정규화된 소재명): 공개 URL} 딕셔너리를 반환한다.
+    Supabase 미연결이거나 버킷이 없는 등 실패 시 조용히 건너뛴다(성과 저장 자체는 막지 않음)."""
+    client = get_supabase_client()
+    if client is None or not images:
+        return {}
+    urls = {}
+    for (origin_channel, name_key), (data, ext) in images.items():
+        safe_name = re.sub(r"[^0-9A-Za-z가-힣_\-]", "_", name_key)[:80] or "unnamed"
+        path = f"{origin_channel}/{safe_name}.{ext}"
+        try:
+            client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
+                path, data, {"content-type": f"image/{ext}", "upsert": "true"}
+            )
+            urls[(origin_channel, name_key)] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+        except Exception:
+            continue
+    return urls
+
+
+def attach_creative_images(creatives: pd.DataFrame, image_urls: dict) -> pd.DataFrame:
+    """소재별 성과 데이터프레임(channel=탭 라벨, creative=소재명)에 image_url 컬럼을 붙인다."""
+    if creatives is None or creatives.empty or not image_urls:
+        return creatives
+    creatives = creatives.copy()
+    creatives["image_url"] = creatives.apply(
+        lambda r: image_urls.get(
+            (TAB_TO_ORIGIN_CHANNEL.get(r["channel"], r["channel"]), _creative_image_key(r["creative"]))
+        ),
+        axis=1,
+    )
+    return creatives
+
+
 def parse_workbook(file, today: date):
     xls = pd.ExcelFile(file)
     result = {
@@ -890,6 +1027,8 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 KOR_COLS = {
     "channel": "매체",
     "creative": "소재명",
+    "creative_image": "소재",
+    "image_url": "소재이미지URL",
     "impressions": "노출수",
     "clicks": "클릭수",
     "cost_excl_vat": "광고비(VAT제외)",
@@ -1356,6 +1495,18 @@ def render_upload_panel():
             status.update(label="분석 완료", state="complete")
 
         if st.sidebar.button("💾 전체 저장하기", type="primary"):
+            creatives_df = result.get("creatives", pd.DataFrame())
+            if not creatives_df.empty:
+                with st.sidebar.status("🖼️ 소재 이미지 추출/업로드 중...", expanded=False):
+                    sheets_and_channels = [
+                        (s, _infer_channel_from_sheet(s)) for s in result.get("creative_sheets_found", [])
+                    ]
+                    images = extract_creative_images(file, sheets_and_channels)
+                    image_urls = upload_creative_images(images)
+                    creatives_df = attach_creative_images(creatives_df, image_urls)
+                    if images:
+                        st.write(f"소재 이미지 {len(images)}개 인식, {len(image_urls)}개 업로드 성공")
+
             n1 = save_table("weekly_overview", result["weekly"], "week_start", file.name)
             n2 = save_table("monthly_overview", result["monthly"], "report_month", file.name)
             n3 = save_table("channel_monthly", result["channels"], "report_month,channel", file.name)
@@ -1363,7 +1514,7 @@ def render_upload_panel():
             n5 = save_table("ga_source", result["ga"], "as_of_date,source_medium", file.name)
             n6 = save_table("daily_overview", result["daily"], "report_date", file.name)
             n7 = save_table(
-                "creative_performance", result.get("creatives", pd.DataFrame()),
+                "creative_performance", creatives_df,
                 "as_of_date,channel,creative", file.name,
             )
             st.cache_data.clear()
@@ -1453,14 +1604,15 @@ def _render_creative_table(fc: pd.DataFrame):
         st.info("선택한 기간/매체에 데이터가 없습니다.")
         return
 
-    agg = (
-        fc.groupby(["channel", "creative"], as_index=False)
-        .agg(
-            impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-            cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
-            conversions=("conversions", "sum"), revenue=("revenue", "sum"),
-        )
+    has_image = "image_url" in fc.columns
+    agg_kwargs = dict(
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+        cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+        conversions=("conversions", "sum"), revenue=("revenue", "sum"),
     )
+    if has_image:
+        agg_kwargs["image_url"] = ("image_url", "first")
+    agg = fc.groupby(["channel", "creative"], as_index=False).agg(**agg_kwargs)
     agg = add_kpis(agg)
 
     MIN_SPEND = 50000  # 표본 기준: 광고비 5만원 미만은 판단 보류 (performance-marketing-analysis 스킬 기본값)
@@ -1483,14 +1635,31 @@ def _render_creative_table(fc: pd.DataFrame):
     agg = agg.sort_values("cost_incl_vat", ascending=False)
 
     st.caption(f"계정 평균 ROAS(선택 기간): {account_avg_roas:,.0f}% · 광고비 {MIN_SPEND:,}원 미만은 표본 부족으로 판단 보류 처리")
-    cols = ["channel", "creative", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
-            "conversions", "cvr", "cpa", "revenue", "roas", "판정"]
-    cols = [c for c in cols if c in agg.columns]
-    show = format_display(agg[cols])
+
+    display_cols = ["channel", "creative"]
+    if has_image:
+        # render_html_table은 셀 값을 그대로 <td>에 넣으므로 <img> 태그 문자열이 실제 썸네일로 렌더링된다.
+        agg["creative_image"] = agg["image_url"].map(
+            lambda u: (
+                f'<img src="{u}" style="height:44px;border-radius:6px;object-fit:cover;">'
+                if isinstance(u, str) and u else ""
+            )
+        )
+        display_cols.append("creative_image")
+    display_cols += ["impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
+                      "conversions", "cvr", "cpa", "revenue", "roas", "판정"]
+    display_cols = [c for c in display_cols if c in agg.columns]
+
+    show = format_display(agg[display_cols])
     render_html_table(korify(show))
+
+    # 엑셀 다운로드에는 이미지 썸네일(HTML) 대신 원본 URL을 남긴다.
+    dl_cols = [c for c in display_cols if c != "creative_image"]
+    if has_image and "image_url" in agg.columns and "image_url" not in dl_cols:
+        dl_cols.insert(dl_cols.index("creative") + 1, "image_url")
     st.download_button(
         "⬇️ 엑셀 다운로드 (소재별 성과)",
-        data=to_excel_bytes(korify(format_display(agg[cols]))),
+        data=to_excel_bytes(korify(format_display(agg[dl_cols]))),
         file_name="creative_performance.xlsx",
         key=f"dl_creative_{fc['channel'].iloc[0] if fc['channel'].nunique() == 1 else 'total'}",
     )
