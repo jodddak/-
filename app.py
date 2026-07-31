@@ -1713,6 +1713,13 @@ def _render_creative_table(fc: pd.DataFrame):
         return
 
     has_image = "image_url" in fc.columns
+
+    # 주간 리포트가 '해당 월 1일~업로드일까지 누적' 형태라, 같은 달 안에 여러 번(매주) 업로드하면
+    # 소재마다 as_of_date가 다른 여러 스냅샷이 쌓인다. 이걸 그대로 sum하면 매주 누적치를 또 더해서
+    # 몇 배로 부풀려지므로, 기간 내 '가장 최근 스냅샷' 한 건만 남기고(이미 그 시점까지의 누적값이라
+    # 합산이 아니라 대체) 집계한다.
+    fc_latest = fc.sort_values("as_of_date").drop_duplicates(subset=["channel", "creative"], keep="last")
+
     agg_kwargs = dict(
         impressions=("impressions", "sum"), clicks=("clicks", "sum"),
         cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
@@ -1720,7 +1727,7 @@ def _render_creative_table(fc: pd.DataFrame):
     )
     if has_image:
         agg_kwargs["image_url"] = ("image_url", "first")
-    agg = fc.groupby(["channel", "creative"], as_index=False).agg(**agg_kwargs)
+    agg = fc_latest.groupby(["channel", "creative"], as_index=False).agg(**agg_kwargs)
     agg = add_kpis(agg)
 
     MIN_SPEND = 50000  # 표본 기준: 광고비 5만원 미만은 판단 보류 (performance-marketing-analysis 스킬 기본값)
