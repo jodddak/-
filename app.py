@@ -15,6 +15,7 @@ STCO 온라인팀 광고/마케팅 성과 대시보드
     README.md 참고 (GitHub + Supabase + Streamlit Community Cloud)
 """
 
+import hashlib
 import io
 import re
 import urllib.parse
@@ -916,6 +917,18 @@ def extract_creative_images(file, sheets_and_channels) -> dict:
     return images
 
 
+def _safe_storage_name(name_key: str) -> str:
+    """Supabase Storage의 객체 키 검증(isValidKey)은 영문/숫자/일부 기호만 허용하고
+    한글 등 non-ASCII 문자는 URL 인코딩 여부와 무관하게 무조건 거부한다(서버가 디코딩한
+    키 자체를 검사하기 때문에 percent-encoding으로는 우회되지 않음).
+    그래서 한글은 아예 제거하고, 대신 원본 소재명의 해시를 붙여 서로 다른 소재끼리
+    충돌하지 않게 한다(같은 소재는 항상 같은 해시 → upsert로 정상적으로 덮어써짐)."""
+    ascii_part = re.sub(r"[^0-9A-Za-z_\-]", "", name_key)[:60]
+    digest = hashlib.md5(name_key.encode("utf-8")).hexdigest()[:10]
+    base = ascii_part or "creative"
+    return f"{base}_{digest}"
+
+
 def upload_creative_images(images: dict):
     """추출된 이미지를 Supabase Storage(버킷: creative-images)에 업로드하고
     ({(원본채널, 정규화된 소재명): 공개 URL} 딕셔너리, 에러 메시지 목록)을 반환한다.
@@ -926,11 +939,8 @@ def upload_creative_images(images: dict):
     urls = {}
     errors = []
     for (origin_channel, name_key), (data, ext) in images.items():
-        # 경로에 한글이 섞이면 일부 환경에서 업로드가 통째로 실패할 수 있어 폴더명/파일명 모두
-        # ASCII로만 구성한다 (폴더는 고정 영문명, 파일명은 소재명을 percent-encoding).
         folder = ORIGIN_CHANNEL_FOLDER.get(origin_channel, "etc")
-        safe_name = urllib.parse.quote(name_key, safe="")[:150] or "unnamed"
-        path = f"{folder}/{safe_name}.{ext}"
+        path = f"{folder}/{_safe_storage_name(name_key)}.{ext}"
         try:
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
                 path, data, {"content-type": f"image/{ext}", "upsert": "true"}
