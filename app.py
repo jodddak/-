@@ -51,6 +51,74 @@ THEME_COLORS = {
 }
 px.defaults.color_discrete_sequence = ["#3182f6", "#191f28", "#8b95a1", "#1b64da"]
 
+# 사이드바 '메뉴' 그룹 헤더 아이콘(사용자가 준 SVG, 초록 폴더+막대그래프)을 base64로 인라인 임베드.
+# 별도 이미지 파일을 GitHub에 같이 올릴 필요 없이 app.py 하나로 배포되게 하기 위함.
+NAV_GROUP_ICON_B64 = (
+    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgZmlsbD0ibm9uZSI+"
+    "PGcgZmlsdGVyPSJ1cmwoI2EpIj48cGF0aCBmaWxsPSIjMUY5OTU1IiBkPSJNMi42NDYgNS43N0EyLjc3IDIuNzcgMCAwIDEgNS40"
+    "MTUgM2g0LjJjLjUyNCAwIC45ODguMzM1IDEuMTU0LjgzLjExLjMzMi40Mi41NTUuNzY4LjU1NWg3LjcyNGMxLjAyIDAgMS44NDYu"
+    "ODI2IDEuODQ2IDEuODQ2djExLjA3N0EzLjY5IDMuNjkgMCAwIDEgMTcuNDE1IDIxSDYuMzM4YTMuNjkgMy42OSAwIDAgMS0zLjY5"
+    "Mi0zLjY5MnoiLz48L2c+PGcgZmlsdGVyPSJ1cmwoI2IpIj48cGF0aCBmaWxsPSIjMUY5OTU1IiBkPSJNNC4xNjUgOS45MDljLjE4"
+    "LTIuMDMyIDEuOTgtMy42NzggNC4wMi0zLjY3OGgxMC43MjljMS45OTQgMCAzLjQ4OCAxLjU3NyAzLjM3MyAzLjU2M2wtLjQyMyA3"
+    "LjM1NWMtLjEyIDIuMDc2LTEuOTQzIDMuNzkzLTQuMDI3IDMuNzkzSDYuODc3Yy0yLjA0IDAtMy41NDYtMS42NDctMy4zNjUtMy42"
+    "Nzh6Ii8+PC9nPjxnIGZpbHRlcj0idXJsKCNjKSI+PHJlY3Qgd2lkdGg9IjExLjA3NyIgaGVpZ2h0PSI3LjM4NSIgZmlsbD0iI0Uy"
+    "RTJFMiIgcng9IjEuODQ2IiB0cmFuc2Zvcm09Im1hdHJpeCgxIDAgLS4wODg1NCAuOTk2MDcgOC4xNDUgMTAuMzg1KSIvPjwvZz48"
+    "ZyBmaWxsPSIjMUY5OTU1IiBmaWx0ZXI9InVybCgjZCkiPjxwYXRoIGQ9Ik0xNC45MDIgMTUuOTAyaC0xLjM1MWwuMzI3LTMuNjc4"
+    "aDEuMzUxYzEuMTI3IDAgMS43Ni42OSAxLjY1NyAxLjgzOS0uMTAyIDEuMTQ4LS44NTcgMS44MzgtMS45ODQgMS44MzhtLS40MTgt"
+    "Ljc0MmguNDU0Yy42MzIgMCAxLjAwNS0uMyAxLjA3Ni0xLjA5Ny4wNzEtLjc5OC0uMjQ4LTEuMTAzLS44OTEtMS4xMDNoLS40NDR6"
+    "TTEwLjQ0IDE1LjkwMmgtLjkzOGwxLjU4Mi0zLjY3OGgxLjE1MmwuOTIzIDMuNjc4aC0uOTM0bC0uMTgtLjc4OEgxMC43NnptLjU4"
+    "OC0xLjQ0OGguODY3bC0uMy0xLjMyMWgtLjAzMXoiLz48L2c+PGRlZnM+PGZpbHRlciBpZD0iYSIgd2lkdGg9IjIwLjMwOCIgaGVp"
+    "Z2h0PSIxOS44NDYiIHg9IjIuMTg0IiB5PSIyLjUzOCIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIiBmaWx0ZXJV"
+    "bml0cz0idXNlclNwYWNlT25Vc2UiPjxmZUZsb29kIGZsb29kLW9wYWNpdHk9IjAiIHJlc3VsdD0iQmFja2dyb3VuZEltYWdlRml4"
+    "Ii8+PGZlQ29sb3JNYXRyaXggaW49IlNvdXJjZUFscGhhIiByZXN1bHQ9ImhhcmRBbHBoYSIgdmFsdWVzPSIwIDAgMCAwIDAgMCAw"
+    "IDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAxMjcgMCIvPjxmZU9mZnNldCBkeD0iLjQ2MiIgZHk9Ii40NjIiLz48ZmVHYXVzc2lhbkJs"
+    "dXIgc3RkRGV2aWF0aW9uPSIuNDYyIi8+PGZlQ29tcG9zaXRlIGluMj0iaGFyZEFscGhhIiBvcGVyYXRvcj0ib3V0Ii8+PGZlQ29s"
+    "b3JNYXRyaXggdmFsdWVzPSIwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwLjA4IDAiLz48ZmVCbGVuZCBpbjI9"
+    "IkJhY2tncm91bmRJbWFnZUZpeCIgcmVzdWx0PSJlZmZlY3QxX2Ryb3BTaGFkb3dfNzYxXzQxNzgyIi8+PGZlQmxlbmQgaW49IlNv"
+    "dXJjZUdyYXBoaWMiIGluMj0iZWZmZWN0MV9kcm9wU2hhZG93Xzc2MV80MTc4MiIgcmVzdWx0PSJzaGFwZSIvPjxmZUNvbG9yTWF0"
+    "cml4IGluPSJTb3VyY2VBbHBoYSIgcmVzdWx0PSJoYXJkQWxwaGEiIHZhbHVlcz0iMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAw"
+    "IDAgMCAwIDAgMTI3IDAiLz48ZmVPZmZzZXQgZHg9Ii40NjIiIGR5PSIuNDYyIi8+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlv"
+    "bj0iLjIzMSIvPjxmZUNvbXBvc2l0ZSBpbjI9ImhhcmRBbHBoYSIgazI9Ii0xIiBrMz0iMSIgb3BlcmF0b3I9ImFyaXRobWV0aWMi"
+    "Lz48ZmVDb2xvck1hdHJpeCB2YWx1ZXM9IjAgMCAwIDAgMSAwIDAgMCAwIDEgMCAwIDAgMCAxIDAgMCAwIDAuMiAwIi8+PGZlQmxl"
+    "bmQgaW4yPSJzaGFwZSIgcmVzdWx0PSJlZmZlY3QyX2lubmVyU2hhZG93Xzc2MV80MTc4MiIvPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9"
+    "ImIiIHdpZHRoPSIyMi4wMjciIGhlaWdodD0iMTYuNTU3IiB4PSIuNzI4IiB5PSI1LjMwOCIgY29sb3ItaW50ZXJwb2xhdGlvbi1m"
+    "aWx0ZXJzPSJzUkdCIiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiPjxmZUZsb29kIGZsb29kLW9wYWNpdHk9IjAiIHJlc3Vs"
+    "dD0iQmFja2dyb3VuZEltYWdlRml4Ii8+PGZlQ29sb3JNYXRyaXggaW49IlNvdXJjZUFscGhhIiByZXN1bHQ9ImhhcmRBbHBoYSIg"
+    "dmFsdWVzPSIwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAxMjcgMCIvPjxmZU9mZnNldCBkeD0iLTEuODQ2Ii8+"
+    "PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iLjQ2MiIvPjxmZUNvbXBvc2l0ZSBpbjI9ImhhcmRBbHBoYSIgb3BlcmF0b3I9"
+    "Im91dCIvPjxmZUNvbG9yTWF0cml4IHZhbHVlcz0iMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMC4yNSAwIi8+"
+    "PGZlQmxlbmQgaW4yPSJCYWNrZ3JvdW5kSW1hZ2VGaXgiIHJlc3VsdD0iZWZmZWN0MV9kcm9wU2hhZG93Xzc2MV80MTc4MiIvPjxm"
+    "ZUJsZW5kIGluPSJTb3VyY2VHcmFwaGljIiBpbjI9ImVmZmVjdDFfZHJvcFNoYWRvd183NjFfNDE3ODIiIHJlc3VsdD0ic2hhcGUi"
+    "Lz48ZmVDb2xvck1hdHJpeCBpbj0iU291cmNlQWxwaGEiIHJlc3VsdD0iaGFyZEFscGhhIiB2YWx1ZXM9IjAgMCAwIDAgMCAwIDAg"
+    "MCAwIDAgMCAwIDAgMCAwIDAgMCAwIDEyNyAwIi8+PGZlT2Zmc2V0IGR4PSIuNDYyIiBkeT0iLjQ2MiIvPjxmZUdhdXNzaWFuQmx1"
+    "ciBzdGREZXZpYXRpb249Ii4yMzEiLz48ZmVDb21wb3NpdGUgaW4yPSJoYXJkQWxwaGEiIGsyPSItMSIgazM9IjEiIG9wZXJhdG9y"
+    "PSJhcml0aG1ldGljIi8+PGZlQ29sb3JNYXRyaXggdmFsdWVzPSIwIDAgMCAwIDEgMCAwIDAgMCAxIDAgMCAwIDAgMSAwIDAgMCAw"
+    "LjIgMCIvPjxmZUJsZW5kIGluMj0ic2hhcGUiIHJlc3VsdD0iZWZmZWN0Ml9pbm5lclNoYWRvd183NjFfNDE3ODIiLz48L2ZpbHRl"
+    "cj48ZmlsdGVyIGlkPSJjIiB3aWR0aD0iMTUuMTExIiBoZWlnaHQ9IjExLjA0OCIgeD0iNS4wNjMiIHk9IjkiIGNvbG9yLWludGVy"
+    "cG9sYXRpb24tZmlsdGVycz0ic1JHQiIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIj48ZmVGbG9vZCBmbG9vZC1vcGFjaXR5"
+    "PSIwIiByZXN1bHQ9IkJhY2tncm91bmRJbWFnZUZpeCIvPjxmZUNvbG9yTWF0cml4IGluPSJTb3VyY2VBbHBoYSIgcmVzdWx0PSJo"
+    "YXJkQWxwaGEiIHZhbHVlcz0iMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMTI3IDAiLz48ZmVNb3JwaG9sb2d5"
+    "IGluPSJTb3VyY2VBbHBoYSIgb3BlcmF0b3I9ImRpbGF0ZSIgcmFkaXVzPSIuOTIzIiByZXN1bHQ9ImVmZmVjdDFfZHJvcFNoYWRv"
+    "d183NjFfNDE3ODIiLz48ZmVPZmZzZXQgZHg9Ii0uNzM4IiBkeT0iLjQ2MiIvPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249"
+    "Ii40NjIiLz48ZmVDb21wb3NpdGUgaW4yPSJoYXJkQWxwaGEiIG9wZXJhdG9yPSJvdXQiLz48ZmVDb2xvck1hdHJpeCB2YWx1ZXM9"
+    "IjAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAuMDQgMCIvPjxmZUJsZW5kIGluMj0iQmFja2dyb3VuZEltYWdl"
+    "Rml4IiByZXN1bHQ9ImVmZmVjdDFfZHJvcFNoYWRvd183NjFfNDE3ODIiLz48ZmVCbGVuZCBpbj0iU291cmNlR3JhcGhpYyIgaW4y"
+    "PSJlZmZlY3QxX2Ryb3BTaGFkb3dfNzYxXzQxNzgyIiByZXN1bHQ9InNoYXBlIi8+PGZlQ29sb3JNYXRyaXggaW49IlNvdXJjZUFs"
+    "cGhhIiByZXN1bHQ9ImhhcmRBbHBoYSIgdmFsdWVzPSIwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAxMjcgMCIv"
+    "PjxmZU9mZnNldCBkeD0iLjQ2MiIgZHk9Ii40NjIiLz48ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIuMjMxIi8+PGZlQ29t"
+    "cG9zaXRlIGluMj0iaGFyZEFscGhhIiBrMj0iLTEiIGszPSIxIiBvcGVyYXRvcj0iYXJpdGhtZXRpYyIvPjxmZUNvbG9yTWF0cml4"
+    "IHZhbHVlcz0iMCAwIDAgMCAxIDAgMCAwIDAgMSAwIDAgMCAwIDEgMCAwIDAgMSAwIi8+PGZlQmxlbmQgaW4yPSJzaGFwZSIgcmVz"
+    "dWx0PSJlZmZlY3QyX2lubmVyU2hhZG93Xzc2MV80MTc4MiIvPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9ImQiIHdpZHRoPSI3LjM5NSIg"
+    "aGVpZ2h0PSIzLjY3OCIgeD0iOS41MDIiIHk9IjEyLjIyNCIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIiBmaWx0"
+    "ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiPjxmZUZsb29kIGZsb29kLW9wYWNpdHk9IjAiIHJlc3VsdD0iQmFja2dyb3VuZEltYWdl"
+    "Rml4Ii8+PGZlQmxlbmQgaW49IlNvdXJjZUdyYXBoaWMiIGluMj0iQmFja2dyb3VuZEltYWdlRml4IiByZXN1bHQ9InNoYXBlIi8+"
+    "PGZlQ29sb3JNYXRyaXggaW49IlNvdXJjZUFscGhhIiByZXN1bHQ9ImhhcmRBbHBoYSIgdmFsdWVzPSIwIDAgMCAwIDAgMCAwIDAg"
+    "MCAwIDAgMCAwIDAgMCAwIDAgMCAxMjcgMCIvPjxmZU9mZnNldC8+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iLjIzMSIv"
+    "PjxmZUNvbXBvc2l0ZSBpbjI9ImhhcmRBbHBoYSIgazI9Ii0xIiBrMz0iMSIgb3BlcmF0b3I9ImFyaXRobWV0aWMiLz48ZmVDb2xv"
+    "ck1hdHJpeCB2YWx1ZXM9IjAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAuMyAwIi8+PGZlQmxlbmQgaW4yPSJz"
+    "aGFwZSIgcmVzdWx0PSJlZmZlY3QxX2lubmVyU2hhZG93Xzc2MV80MTc4MiIvPjwvZmlsdGVyPjwvZGVmcz48L3N2Zz4="
+)
+
 
 def theme_chart(fig):
     """Plotly 차트에 테마 톤(시스템 폰트, 화이트 배경, 옅은 그리드)을 적용."""
@@ -197,6 +265,18 @@ def inject_theme():
             font-size: 15px !important;
             color: {THEME_COLORS["foreground"]} !important;
             padding: 8px 4px !important;
+        }}
+        /* 그룹명 왼쪽에 커스텀 아이콘(SVG, 이모지 대신) 표시 */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary p::before {{
+            content: "";
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            margin-right: 6px;
+            vertical-align: -4px;
+            background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}");
+            background-size: contain;
+            background-repeat: no-repeat;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
             color: {THEME_COLORS["primary"]} !important;
@@ -2035,12 +2115,6 @@ NAV_GROUPS = {
     # "가이드": ["가이드"],
 }
 
-# 그룹명 옆에 붙는 아이콘 (네이버 광고관리자 좌측 메뉴 참고). 새 그룹을 추가하면 여기에도 아이콘을 추가해주세요.
-NAV_GROUP_ICONS = {
-    "성과 리포트": "📊",
-}
-
-
 def render_nav() -> str:
     st.sidebar.markdown("---")
     default_page = NAV_GROUPS["성과 리포트"][0]
@@ -2058,8 +2132,8 @@ def render_nav() -> str:
         nav_box = st.sidebar.container()
     with nav_box:
         for group, pages in NAV_GROUPS.items():
-            icon = NAV_GROUP_ICONS.get(group, "📁")
-            with st.expander(f"{icon}  {group}", expanded=True):
+            # 아이콘은 텍스트가 아니라 CSS(summary p::before)로 붙인다 — NAV_GROUP_ICON_B64 참고.
+            with st.expander(group, expanded=True):
                 for p in pages:
                     is_current = st.session_state["nav_page"] == p
                     if st.button(
