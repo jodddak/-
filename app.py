@@ -183,6 +183,48 @@ def inject_theme():
         }}
 
         hr {{ border-color: {THEME_COLORS["border"]}; }}
+
+        /* 사이드바 '메뉴' 내비게이션 전용 스타일 (네이버 광고관리자 스타일 참고):
+           그룹 헤더는 아이콘+굵은 글씨+expander 기본 화살표(펼침/접힘)만 남기고 박스/배경 제거,
+           페이지 항목은 버튼 박스가 아니라 '텍스트 링크'처럼 보이게(현재 페이지만 파란 굵은 글씨). */
+        div.st-key-stco_nav div[data-testid="stExpander"] {{
+            border: none !important;
+            box-shadow: none !important;
+            background: transparent !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary {{
+            font-weight: 700 !important;
+            font-size: 15px !important;
+            color: {THEME_COLORS["foreground"]} !important;
+            padding: 8px 4px !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
+            color: {THEME_COLORS["primary"]} !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpanderDetails"] {{
+            padding-left: 4px !important;
+        }}
+        div.st-key-stco_nav .stButton > button {{
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            padding: 6px 14px !important;
+            border-radius: 8px !important;
+            font-weight: 400 !important;
+            font-size: 14px !important;
+            color: {THEME_COLORS["body"]} !important;
+        }}
+        div.st-key-stco_nav .stButton > button[kind="primary"] {{
+            color: {THEME_COLORS["primary"]} !important;
+            font-weight: 700 !important;
+            background: transparent !important;
+        }}
+        div.st-key-stco_nav .stButton > button:hover {{
+            background: {THEME_COLORS["surface"]} !important;
+            color: {THEME_COLORS["primary"]} !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -1993,23 +2035,39 @@ NAV_GROUPS = {
     # "가이드": ["가이드"],
 }
 
+# 그룹명 옆에 붙는 아이콘 (네이버 광고관리자 좌측 메뉴 참고). 새 그룹을 추가하면 여기에도 아이콘을 추가해주세요.
+NAV_GROUP_ICONS = {
+    "성과 리포트": "📊",
+}
+
 
 def render_nav() -> str:
     st.sidebar.markdown("---")
-    st.sidebar.header("📁 메뉴")
     default_page = NAV_GROUPS["성과 리포트"][0]
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = default_page
-    for group, pages in NAV_GROUPS.items():
-        with st.sidebar.expander(group, expanded=True):
-            for p in pages:
-                is_current = st.session_state["nav_page"] == p
-                if st.button(
-                    p, key=f"nav_{p}", use_container_width=True,
-                    type="primary" if is_current else "secondary",
-                ):
-                    st.session_state["nav_page"] = p
-                    st.rerun()
+    # key="stco_nav"로 감싸면 Streamlit이 이 블록에 "st-key-stco_nav" 클래스를 붙여주는데,
+    # inject_theme()의 CSS가 그 클래스 안의 expander/button만 골라 '텍스트 링크' 스타일로 바꾼다
+    # (사이드바 위쪽의 업로드/저장 버튼 등 다른 버튼들은 기존 스타일 그대로 유지됨).
+    # container(key=...)는 비교적 최신 Streamlit에서만 지원하므로, 혹시 배포 환경 버전이 낮아
+    # TypeError가 나더라도 내비게이션 자체는 동작하도록 안전하게 폴백한다(이 경우 스타일만 예전
+    # 버튼 박스 모양으로 보임).
+    try:
+        nav_box = st.sidebar.container(key="stco_nav")
+    except TypeError:
+        nav_box = st.sidebar.container()
+    with nav_box:
+        for group, pages in NAV_GROUPS.items():
+            icon = NAV_GROUP_ICONS.get(group, "📁")
+            with st.expander(f"{icon}  {group}", expanded=True):
+                for p in pages:
+                    is_current = st.session_state["nav_page"] == p
+                    if st.button(
+                        p, key=f"nav_{p}", use_container_width=True,
+                        type="primary" if is_current else "secondary",
+                    ):
+                        st.session_state["nav_page"] = p
+                        st.rerun()
     return st.session_state["nav_page"]
 
 
