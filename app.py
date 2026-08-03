@@ -15,6 +15,7 @@ STCO 온라인팀 광고/마케팅 성과 대시보드
     README.md 참고 (GitHub + Supabase + Streamlit Community Cloud)
 """
 
+import base64
 import hashlib
 import io
 import re
@@ -27,8 +28,40 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
+from PIL import Image
 
-st.set_page_config(page_title="STCO 광고성과 대시보드", page_icon="📊", layout="wide")
+# 메인 타이틀 및 브라우저 탭 파비콘에 쓰는 막대그래프 아이콘(사용자가 준 PNG)을
+# base64로 인라인 임베드 — 별도 이미지 파일 없이 app.py 하나로 배포되게 하기 위함.
+# st.set_page_config()보다 먼저 정의해야 파비콘으로 바로 쓸 수 있다.
+PAGE_TITLE_ICON_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAADAAAAAuCAIAAADhvA07AAAACXBIWXMAAA7DAAAOwwHHb6hkAAADu0lEQVRYR+2Yz47TMBDG4yTebrd/"
+    "JC4sQkKIEwcQT8B78CwreAzeiTt3TtwQF1rBtk0T840nTRPHHm9IWO1ho1XqdeyZn78Ze9IqY0zykK70IcEQyyNQLCK5d8BdEksp5Z07"
+    "slM5vvEv98hMTNO+NxzyRB4mLKajEGxV9vr57WuS5vpqPZvPQyuG0VzPLhZrDGAH7z7+gGhoh6TLMvX25SrP1OcPldY6y7K+cQ9QWZYw"
+    "i9PAKGXC9nFaFMVBm0opsovFHEuTgjKzRD6ohnW73a5WqzTFcHfcGaiJlAVii+7o/oISUxnCUG9uIA9o0vks17mfKMWetgT7/X6xWHis"
+    "JYmrEEetHkrpZGAAYoTu9CxJEGWCUonO0wud4g64vr+mV8gz/y5zbLVtn9oEyW2CRtiAkBINRAJcnwY9ge7OWBnISoT0IIWQT6RGq039"
+    "LB45SxMIABjcx1yRk5qN2zvFjhy77Zb3GmUUUVghEsQKdL9XRKH7hSFvYYXoaCGJYkzRATED3eejFZqYR1SIk2jYAkePjioU2lx1/2gA"
+    "14CUQzaDqDTwJHvqcJvOpFPbtTjyf1kh69eefvx3ateM1BnP+mGEQYXg7FhV5ohiLlm83e0WSy2NGPgsCITF43WiMJVo0BTb7XJFr0RT"
+    "XR0gKtgKJdLGkdKnRAJBIKjVv2MICtz19TNqyDIOgT0DwSgSgup2lq1fvMYbhWCHuTHS+5IlTIw+chVieRhOnvw/aODRBbJBI5FkhRpu"
+    "jteEe60DRMXdXoNe8iekwfI65xBMQ5jOSz7lM3KXXgdtEp/beFIUe8yQIzv06VkhXiju55d8OhTtHms++m2cVcrz5WEoRzPeE7JW9ti"
+    "vFDVNZ+PjTLCv8XRO24+a9J85moly6ai1sd7YZ323D04FZDoaGA2f1CaBPJRTtnS0o9eJ5CmiFnGCK6pQOxa+9mSxqhcTVohkIYVweLc"
+    "W7jJhiFh8B2sWBILnEtWjxK5uPKLPbe92+ytb7afCEkJmimN1eyhvD8fTX79d/NpucLID6Mun9VwzVTCK9I02Bu4pHe1qL+xnK1dd7TE"
+    "lz/PnT9JXT7M/e3WB7/Y9xxj/u0ih+M3771ovai+9kHZ+sOJjGgcjLrmWNdUeHFzwgY7fNDabzeFwEJYBAPwytFwuLy8vMbfHQ78DnRXm"
+    "bQ4UNGSjMAQORuF6jB4soygKeSU8ESheGspFx3GDIgNx3rTvzVrlieSyH86WUC4QP4oajdptuRjW9AMNszHpaGHbT+rnzsYegWJS/QWf"
+    "cPB2ZPskBQAAAABJRU5ErkJggg=="
+)
+
+
+def _decode_page_icon():
+    """base64 PNG를 PIL Image로 디코드해 st.set_page_config(page_icon=...)에 바로 넘긴다
+    (emoji 문자열 대신 실제 이미지를 파비콘으로 쓰기 위함). 혹시 디코딩이 실패하면
+    기존 이모지로 조용히 폴백해서 앱 실행 자체가 막히지 않게 한다."""
+    try:
+        return Image.open(io.BytesIO(base64.b64decode(PAGE_TITLE_ICON_B64)))
+    except Exception:
+        return "📊"
+
+
+st.set_page_config(page_title="STCO 광고성과 대시보드", page_icon=_decode_page_icon(), layout="wide")
 
 # ── 디자인 톤 (색상/버튼/표는 Toss(TDS Mobile) 스타일, 폰트는 당근마켓 SEED 시스템폰트 스택) ──
 THEME_FONT_STACK = (
@@ -2343,7 +2376,15 @@ def render_ga4_page():
 # 메인
 # ──────────────────────────────────────────────────────────────
 def main():
-    st.title("📊 STCO 온라인팀 광고/마케팅 성과 대시보드")
+    # st.title()은 raw HTML(이미지)을 못 받아서, 이모지(📊) 대신 커스텀 아이콘을 쓰려면
+    # 직접 <h1>을 그려야 한다. inject_theme()의 전역 h1 스타일(글자크기/굵기/색)은
+    # 태그 자체를 그대로 쓰기 때문에 동일하게 적용된다.
+    st.markdown(
+        f'<h1 style="display:flex;align-items:center;gap:10px;margin:0 0 0.5rem 0;">'
+        f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" style="height:34px;width:auto;" />'
+        f'STCO 온라인팀 광고/마케팅 성과 대시보드</h1>',
+        unsafe_allow_html=True,
+    )
     render_upload_panel()
 
     weekly = load_table("weekly_overview")
