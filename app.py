@@ -2142,11 +2142,21 @@ def render_creative_performance(creatives: pd.DataFrame):
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
     "성과 리포트": ["종합 대시보드", "매체별 성과", "소재별 성과", "GA 유입경로", "GA4 라이브 리포트"],
-    # 트래커의 다른 시트를 대시보드에 들일 준비가 되면 아래처럼 그룹만 추가하면 됩니다.
-    # "퍼널 관리": ["퍼널 대시보드", "마일스톤"],
-    # "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
-    # "가이드": ["가이드"],
+    "퍼널 관리": ["퍼널 대시보드", "마일스톤"],
+    "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
+    "가이드": ["가이드"],
 }
+
+# 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
+# render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
+# main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
+NAV_PAGES_COMING_SOON = {"퍼널 대시보드", "마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
+
+
+def render_coming_soon(page_name: str):
+    st.subheader(page_name)
+    st.info(f"'{page_name}' 페이지는 아직 준비 중입니다. 데이터 연동이 되면 채워질 예정이에요.")
+
 
 def render_nav() -> str:
     st.sidebar.markdown("---")
@@ -2166,7 +2176,10 @@ def render_nav() -> str:
     with nav_box:
         for group, pages in NAV_GROUPS.items():
             # 아이콘은 텍스트가 아니라 CSS(summary p::before)로 붙인다 — NAV_GROUP_ICON_B64 참고.
-            with st.expander(group, expanded=True):
+            # 그룹이 여러 개가 되면 전부 펼쳐두면 사이드바가 너무 길어지니, 현재 선택된 페이지가
+            # 속한 그룹만 자동으로 펼치고 나머지는 접어둔다.
+            is_active_group = st.session_state["nav_page"] in pages
+            with st.expander(group, expanded=is_active_group):
                 for p in pages:
                     is_current = st.session_state["nav_page"] == p
                     if st.button(
@@ -2415,6 +2428,8 @@ def main():
         render_ga_page(ga)
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
+    elif page in NAV_PAGES_COMING_SOON:
+        render_coming_soon(page)
 
 
 if __name__ == "__main__":
