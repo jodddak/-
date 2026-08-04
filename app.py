@@ -354,6 +354,7 @@ TABLES = {
     "channel_snapshot": "channel_snapshot",
     "ga_source": "ga_source",
     "creative_performance": "creative_performance",
+    "channel_audience_snapshot": "channel_audience_snapshot",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -452,6 +453,24 @@ def delete_creative_performance_for_date(as_of_date_value):
         ).execute()
     except Exception as e:
         st.sidebar.warning(f"기존 소재별 성과 스냅샷 삭제 실패(무시하고 계속 진행합니다): {e}")
+
+
+def delete_channel_audience_for_date(as_of_date_value):
+    """퍼널 대시보드용 채널×오디언스(신규/리타겟팅) 스냅샷도 creative_performance와 동일한 이유로
+    저장 전에 같은 날짜의 이전 스냅샷을 지운다(upsert가 빠진 행을 알아서 지워주지 않아서)."""
+    client = get_supabase_client()
+    if client is None:
+        store = _local_store()
+        df = store.get("channel_audience_snapshot", pd.DataFrame())
+        if not df.empty and "as_of_date" in df.columns:
+            store["channel_audience_snapshot"] = df[df["as_of_date"].astype(str) != str(as_of_date_value)]
+        return
+    try:
+        client.table(TABLES["channel_audience_snapshot"]).delete().eq(
+            "as_of_date", str(as_of_date_value)
+        ).execute()
+    except Exception as e:
+        st.sidebar.warning(f"기존 채널×오디언스 스냅샷 삭제 실패(무시하고 계속 진행합니다): {e}")
 
 
 def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
@@ -929,6 +948,128 @@ def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> 
     return pd.Series([None] * len(idx), index=idx, dtype=object)
 
 
+# ──────────────────────────────────────────────────────────────
+# 채널 그룹(타겟팅 오디언스) 단위 파싱 — 퍼널 대시보드용 (신규)
+# 소재 상세표보다 앞에 나오는 '캠페인 분류 | 그룹 분류 | 노출수 ...' 집계표에서
+# 그룹(광고그룹/타겟팅 오디언스) 단위로 신규/리타겟팅을 분류해 저장한다.
+# ──────────────────────────────────────────────────────────────
+
+# 사용자가 정리해준 '260804_광고 매체 그룹별 타겟팅 분류.xlsx' 기준 매핑.
+# 키: (원본채널, 그룹명) 또는 [그룹 분류 컬럼이 없는 채널은] (원본채널, 캠페인분류명) → "신규"/"리타겟팅"
+AUDIENCE_TYPE_MAP = {
+    # 메타
+    ("페이스북", "의류관심타겟"): "신규",
+    ("페이스북", "패션관심타겟"): "신규",
+    ("페이스북", "방문자180일"): "리타겟팅",
+    # 네이버 GFA (자사몰 + 애드부스트)
+    ("GFA", "패션관심타겟"): "신규",
+    ("GFA", "쇼핑관심타겟"): "신규",
+    ("GFA", "방문자180일"): "리타겟팅",
+    ("GFA", "3050연령타겟"): "신규",
+    ("GFA", "3050남성타겟"): "신규",
+    # 크리테오 (그룹 분류 컬럼이 없어 캠페인 분류 자체가 그룹 역할)
+    ("크리테오", "다이나믹_신규"): "신규",
+    ("크리테오", "스태틱_신규"): "신규",
+    ("크리테오", "다이나믹_리텐션"): "리타겟팅",
+    ("크리테오", "스태틱_리텐션"): "리타겟팅",
+    # 구글 실적최대화 (그룹 분류 없음 → 캠페인분류 전체가 신규)
+    ("구글", "Pmax_온라인팀"): "신규",
+}
+
+
+def classify_audience_type(origin_channel: str, label) -> str:
+    """(원본채널, 그룹명/캠페인분류명) → '신규' / '리타겟팅' / '미분류'.
+    1) 사용자가 정리해준 매핑표를 먼저 조회
+    2) 못 찾으면 이름에 흔히 쓰이는 키워드로 최대한 추정
+    3) 그래도 애매하면 '미분류'로 남겨서 대시보드에서 바로 눈에 띄게 한다 (임의로 단정하지 않음).
+    새 캠페인/그룹이 추가되면 위 AUDIENCE_TYPE_MAP에 항목을 추가해주면 된다."""
+    name = str(label).strip()
+    key = (origin_channel, name)
+    if key in AUDIENCE_TYPE_MAP:
+        return AUDIENCE_TYPE_MAP[key]
+    if "재방문자제외" in name or "신규" in name or "관심타겟" in name:
+        return "신규"
+    if any(kw in name for kw in ["방문자", "리텐션", "리타겟"]):
+        return "리타겟팅"
+    return "미분류"
+
+
+def parse_channel_group_sheet(xls: pd.ExcelFile, sheet: str, today: date):
+    """소재 상세표보다 앞에 나오는 '캠페인 분류 | 그룹 분류 | 노출수 ...' 집계표를 파싱해서
+    그룹(타겟팅 오디언스) 단위 성과 + 신규/리타겟팅 분류를 반환한다.
+    그룹 분류 컬럼이 없는 채널(크리테오)은 캠페인 분류를 그룹처럼 취급한다."""
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+    hdr = find_header_row(raw, required=("노출수", "클릭수"), scan=30)
+    if hdr is None:
+        return None
+
+    headers = [clean_col(h) for h in raw.iloc[hdr].tolist()]
+    campaign_idx = match_col_pos(headers, include_any=["캠페인"])
+    group_idx = match_col_pos(headers, include_any=["그룹"])
+    if campaign_idx is None:
+        return None
+    label_idx = group_idx if group_idx is not None else campaign_idx
+
+    # 이 집계표 바로 아래에는 컬럼 배치가 다른 '소재 상세표'(캠페인|그룹|광고소재|...)가 또 나오는데,
+    # 헤더 텍스트가 똑같이 '노출수'+'클릭수'를 포함해서 그대로 이어 읽으면 소재명이 그룹명 자리에
+    # 잘못 섞여 들어간다. 그래서 다음 헤더가 나오는 지점 '직전'까지만 이 표의 데이터로 본다.
+    next_hdr = None
+    for i in range(hdr + 1, len(raw)):
+        row_text = " ".join(str(x) for x in raw.iloc[i].tolist())
+        if "노출수" in row_text and "클릭수" in row_text:
+            next_hdr = i
+            break
+    body = raw.iloc[hdr + 1 : next_hdr] if next_hdr is not None else raw.iloc[hdr + 1 :]
+    if body.empty:
+        return None
+
+    label_series = body.iloc[:, label_idx].astype(str).str.strip()
+    keep_mask = body.iloc[:, label_idx].notna() & (label_series != "") & (label_series.str.lower() != "nan")
+    keep_mask &= ~label_series.str.contains("합계|TOTAL|총계", case=False, na=False)
+    body = body[keep_mask]
+    label_series = label_series[keep_mask]
+    if body.empty:
+        return None
+
+    impr_idx = match_col_pos(headers, include_any=["노출"])
+    clicks_idx = match_col_pos(headers, include_any=["클릭"])
+    cost_ex_idx = match_col_pos(headers, include_all=["제외"], include_any=["광고비", "비용"], exclude=["포함"])
+    cost_in_idx = match_col_pos(headers, include_all=["포함"], include_any=["광고비", "비용"], exclude=["제외"])
+    if cost_ex_idx is None and cost_in_idx is None:
+        cost_generic_idx = match_col_pos(headers, include_any=["광고비", "비용"])
+        cost_ex_idx = cost_in_idx = cost_generic_idx
+    signup_idx = match_col_pos(headers, include_any=["가입"])
+    conv_idx = match_col_pos(headers, include_all=["전환"], exclude=["금액", "ga", "율"])
+    rev_idx = match_col_pos(headers, include_any=["매출", "전환금액"], exclude=["ga", "객단가"])
+
+    campaign_series = (
+        body.iloc[:, campaign_idx].astype(str).str.strip() if campaign_idx is not None else label_series
+    )
+
+    origin_channel = _infer_channel_from_sheet(sheet)
+
+    out = pd.DataFrame()
+    out["channel"] = _map_creative_channel(origin_channel, campaign_series).values
+    out["audience_type"] = [classify_audience_type(origin_channel, v) for v in label_series]
+    out["impressions"] = numcol_by_pos(body, impr_idx)
+    out["clicks"] = numcol_by_pos(body, clicks_idx)
+    out["cost_excl_vat"] = numcol_by_pos(body, cost_ex_idx)
+    out["cost_incl_vat"] = numcol_by_pos(body, cost_in_idx)
+    out["signups"] = numcol_by_pos(body, signup_idx)
+    out["conversions"] = numcol_by_pos(body, conv_idx)
+    out["revenue"] = numcol_by_pos(body, rev_idx)
+    out["as_of_date"] = today
+    # 현재 미운영 매체(채널 매핑이 None인 행)는 제외
+    out = out[out["channel"].notna()]
+    if out.empty:
+        return None
+    out = out[
+        (out["impressions"] > 0) | (out["clicks"] > 0) | (out["cost_incl_vat"] > 0)
+        | (out["conversions"] > 0) | (out["revenue"] > 0)
+    ]
+    return out.reset_index(drop=True)
+
+
 def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date, hidden_rows: set = None):
     """소재 단위 시트 하나를 파싱. 시트마다 컬럼 구성이 조금씩 달라
     '소재명/광고소재/행 레이블' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다.
@@ -1220,6 +1361,7 @@ def parse_workbook(file, today: date):
         "channels": pd.DataFrame(),
         "ga": pd.DataFrame(),
         "creatives": pd.DataFrame(),
+        "channel_audience": pd.DataFrame(),
         "channel_sheets_found": [],
         "channel_sheets_parsed": [],
         "creative_sheets_found": [],
@@ -1256,6 +1398,15 @@ def parse_workbook(file, today: date):
             creative_frames.append(df)
     result["creatives"] = pd.concat(creative_frames, ignore_index=True) if creative_frames else pd.DataFrame()
     result["creative_sheets_found"] = creative_sheets
+
+    # 퍼널 대시보드(신규고객 확보 vs ROAS)용 그룹(타겟팅 오디언스) 단위 데이터.
+    # 소재 파싱과 같은 시트 목록을 쓰되, 소재 상세표가 아니라 그 앞의 그룹 집계표를 읽는다.
+    audience_frames = []
+    for s in creative_sheets:
+        df = parse_channel_group_sheet(xls, s, today)
+        if df is not None and len(df):
+            audience_frames.append(df)
+    result["channel_audience"] = pd.concat(audience_frames, ignore_index=True) if audience_frames else pd.DataFrame()
 
     result["ga"] = parse_ga_raw(xls, today)
     return result
@@ -1309,6 +1460,8 @@ KOR_COLS = {
     "cost_excl_vat": "광고비(VAT제외)",
     "cost_incl_vat": "광고비(VAT포함)",
     "signups": "회원가입",
+    "signup_rate": "가입율(%)",
+    "audience_type": "구분(신규/리타겟팅)",
     "conversions": "전환수",
     "revenue": "매출",
     "ctr": "CTR(%)",
@@ -1443,7 +1596,7 @@ MONEY_COLS = {
     "cpc", "cpa", "revenue", "aov", "ga_conversions", "ga_revenue",
     "users", "new_users", "sessions", "transactions",
 }
-PCT2_COLS = {"ctr", "cvr", "bounce_rate", "ecommerce_cvr"}
+PCT2_COLS = {"ctr", "cvr", "bounce_rate", "ecommerce_cvr", "signup_rate"}
 PCT0_COLS = {"roas", "ga_roas"}
 
 
@@ -1909,6 +2062,16 @@ def render_upload_panel():
                 f"🎨 소재별 성과 인식: {len(result.get('creatives', []))}행 "
                 f"({', '.join(result.get('creative_sheets_found', [])) or '해당 시트 없음'})"
             )
+            audience_df = result.get("channel_audience", pd.DataFrame())
+            unclassified_n = (
+                int((audience_df["audience_type"] == "미분류").sum()) if not audience_df.empty else 0
+            )
+            st.write(f"🧭 퍼널 대시보드(신규/리타겟팅) 그룹 인식: {len(audience_df)}행")
+            if unclassified_n:
+                st.warning(
+                    f"'미분류'로 남은 그룹 {unclassified_n}행이 있습니다 — 새 캠페인/그룹이 추가된 것일 수 있어요. "
+                    "app.py의 AUDIENCE_TYPE_MAP에 분류를 추가해주세요."
+                )
             missing = set(result["channel_sheets_found"]) - set(result["channel_sheets_parsed"])
             if missing:
                 st.warning(f"인식 실패한 매체 시트: {', '.join(missing)}")
@@ -1940,9 +2103,15 @@ def render_upload_panel():
                 "creative_performance", creatives_df,
                 "as_of_date,channel,creative", file.name,
             )
+            delete_channel_audience_for_date(today)
+            n8 = save_table(
+                "channel_audience_snapshot", result.get("channel_audience", pd.DataFrame()),
+                "as_of_date,channel,audience_type", file.name,
+            )
             st.cache_data.clear()
             st.sidebar.success(
-                f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · GA {n5}건 · 소재 {n7}건"
+                f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · "
+                f"GA {n5}건 · 소재 {n7}건 · 퍼널(신규/리타겟) {n8}건"
             )
             st.rerun()
 
@@ -2150,7 +2319,7 @@ NAV_GROUPS = {
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
 # main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
-NAV_PAGES_COMING_SOON = {"퍼널 대시보드", "마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
+NAV_PAGES_COMING_SOON = {"마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
 
 
 def render_coming_soon(page_name: str):
@@ -2328,6 +2497,153 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True, hide_index=True)
 
 
+def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataFrame = None):
+    """신규고객 확보(노출→클릭→회원가입)와 광고 매출/ROAS 효율, 2가지 관점으로 보는 퍼널 대시보드.
+    캠페인 그룹명(타겟팅 오디언스)을 신규/리타겟팅으로 자동 분류해 매체별로 쪼개 보여준다.
+    '발굴/회수/수확' 역할 구분이나 CAC 중심 판정은 쓰지 않는다 — 대행사 운영 + 매체 예산이
+    이미 고정된 구조에는 그 프레임이 안 맞는다는 판단에 따른 것."""
+    if audience.empty and (creatives_fallback is None or creatives_fallback.empty):
+        st.info(
+            "아직 데이터가 없습니다. 주간 리포트를 업로드하면 캠페인 그룹명을 기준으로 "
+            "신규/리타겟팅이 자동 분류돼 채워집니다."
+        )
+        return
+
+    audience = audience.copy()
+    if not audience.empty:
+        audience["as_of_date"] = pd.to_datetime(audience["as_of_date"]).dt.date
+        min_d, max_d = audience["as_of_date"].min(), audience["as_of_date"].max()
+    else:
+        cf = creatives_fallback.copy()
+        cf["as_of_date"] = pd.to_datetime(cf["as_of_date"]).dt.date
+        min_d, max_d = cf["as_of_date"].min(), cf["as_of_date"].max()
+    start, end = period_filter(min_d, max_d, key="funnel")
+    fa = audience[(audience["as_of_date"] >= start) & (audience["as_of_date"] <= end)] if not audience.empty else audience
+    # 소재별 성과와 같은 이유로, 같은 달 안에 여러 번 업로드해도 채널×오디언스별 '최신 스냅샷'만 사용
+    # (누적 리포트를 그대로 더하면 몇 배로 부풀려짐).
+    if not fa.empty:
+        fa = fa.sort_values("as_of_date").drop_duplicates(subset=["channel", "audience_type"], keep="last")
+
+    # 구글(P-MAX)은 리포트 원본에 그룹(오디언스)별 집계 자체가 비어있어(전부 0) 위 표에는 안 잡힌다.
+    # 사용자가 확인해준 매핑상 PMax는 항상 전체 신규이므로, 이미 검증된 소재별 성과(creative_performance)
+    # 합계를 '신규'로 채워 넣는다 (회원가입 수는 이 표에서 안 잡히는 값이라 0으로 남는다).
+    if creatives_fallback is not None and not creatives_fallback.empty:
+        already_has_google = (not fa.empty) and (fa["channel"] == "구글(P-MAX)").any()
+        if not already_has_google:
+            g = creatives_fallback.copy()
+            g["as_of_date"] = pd.to_datetime(g["as_of_date"]).dt.date
+            g = g[(g["channel"] == "구글(P-MAX)") & (g["as_of_date"] >= start) & (g["as_of_date"] <= end)]
+            if not g.empty:
+                g_latest = g.sort_values("as_of_date").drop_duplicates(subset=["channel", "creative"], keep="last")
+                synth = pd.DataFrame([{
+                    "channel": "구글(P-MAX)", "audience_type": "신규",
+                    "impressions": g_latest["impressions"].sum(), "clicks": g_latest["clicks"].sum(),
+                    "cost_excl_vat": g_latest["cost_excl_vat"].sum(), "cost_incl_vat": g_latest["cost_incl_vat"].sum(),
+                    "signups": 0, "conversions": g_latest["conversions"].sum(), "revenue": g_latest["revenue"].sum(),
+                }])
+                fa = pd.concat([fa, synth], ignore_index=True) if not fa.empty else synth
+
+    if fa.empty:
+        st.info("선택한 기간에 데이터가 없습니다.")
+        return
+
+    unclassified = fa[fa["audience_type"] == "미분류"]
+    if not unclassified.empty:
+        st.warning(
+            f"'미분류'로 남은 그룹이 {len(unclassified)}건 있습니다(신규 캠페인/그룹이 추가됐을 수 있어요). "
+            "신규·리타겟팅 어느 쪽에도 안 잡히고 아래 표에 별도로만 표시됩니다."
+        )
+
+    agg = (
+        fa.groupby(["channel", "audience_type"], as_index=False)
+        .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+             cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+             signups=("signups", "sum"), conversions=("conversions", "sum"), revenue=("revenue", "sum"))
+    )
+    agg = add_kpis(agg)
+    agg["signup_rate"] = np.where(agg["clicks"] > 0, agg["signups"] / agg["clicks"] * 100, 0)
+
+    tab1, tab2 = st.tabs(["① 신규고객 확보", "② 광고 매출·ROAS 효율"])
+
+    with tab1:
+        st.caption("캠페인 그룹명(타겟팅 오디언스) 기준 '신규' 분류만 모았습니다. 리타겟팅 성과는 ②탭에서 확인하세요.")
+        new_df = agg[agg["audience_type"].isin(["신규", "미분류"])]
+        if new_df.empty:
+            st.info("선택 기간에 신규 분류 데이터가 없습니다.")
+        else:
+            nb = (
+                new_df.groupby("channel", as_index=False)
+                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+                     signups=("signups", "sum"), cost_incl_vat=("cost_incl_vat", "sum"))
+            )
+            nb["ctr"] = np.where(nb["impressions"] > 0, nb["clicks"] / nb["impressions"] * 100, 0)
+            nb["signup_rate"] = np.where(nb["clicks"] > 0, nb["signups"] / nb["clicks"] * 100, 0)
+            nb = nb.sort_values("signups", ascending=False)
+
+            cols1 = ["channel", "impressions", "clicks", "ctr", "signups", "signup_rate", "cost_incl_vat"]
+            show1 = format_display(nb[cols1])
+
+            total_row1 = {
+                "channel": "TOTAL",
+                "impressions": nb["impressions"].sum(), "clicks": nb["clicks"].sum(),
+                "signups": nb["signups"].sum(), "cost_incl_vat": nb["cost_incl_vat"].sum(),
+            }
+            total_row1["ctr"] = (total_row1["clicks"] / total_row1["impressions"] * 100) if total_row1["impressions"] else 0
+            total_row1["signup_rate"] = (total_row1["signups"] / total_row1["clicks"] * 100) if total_row1["clicks"] else 0
+            total_show1 = format_display(pd.DataFrame([total_row1])[cols1])
+            show1 = pd.concat([total_show1, show1], ignore_index=True)
+
+            render_html_table(korify(show1))
+            st.download_button(
+                "⬇️ 엑셀 다운로드 (신규고객 확보)",
+                data=to_excel_bytes(korify(format_display(nb[cols1]))),
+                file_name="funnel_new_customers.xlsx",
+            )
+
+    with tab2:
+        st.caption("매체별 전체 광고비 대비 매출 효율(ROAS)과 신규/리타겟팅 기여도를 함께 봅니다.")
+        by_channel = (
+            agg.groupby("channel", as_index=False)
+            .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+                 cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+                 conversions=("conversions", "sum"), revenue=("revenue", "sum"))
+        )
+        by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
+
+        fig = px.bar(
+            by_channel, x="channel", y="roas", title="채널별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
+            labels={"channel": "매체", "roas": "ROAS(%)"},
+        )
+        st.plotly_chart(theme_chart(fig), use_container_width=True)
+
+        cols2 = ["channel", "cost_incl_vat", "conversions", "revenue", "roas"]
+        show2 = format_display(by_channel[cols2])
+        total_row2 = {
+            "channel": "TOTAL",
+            "cost_incl_vat": by_channel["cost_incl_vat"].sum(),
+            "conversions": by_channel["conversions"].sum(),
+            "revenue": by_channel["revenue"].sum(),
+        }
+        total_row2["roas"] = (total_row2["revenue"] / total_row2["cost_incl_vat"] * 100) if total_row2["cost_incl_vat"] else 0
+        total_show2 = format_display(pd.DataFrame([total_row2])[cols2])
+        show2 = pd.concat([total_show2, show2], ignore_index=True)
+        render_html_table(korify(show2))
+
+        st.markdown("##### 매체별 신규 vs 리타겟팅 상세")
+        detail_cols = ["channel", "audience_type", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas"]
+        detail_sorted = agg.sort_values(["channel", "cost_incl_vat"], ascending=[True, False])
+        st.dataframe(korify(format_display(detail_sorted[detail_cols])), use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "⬇️ 엑셀 다운로드 (매체별 신규·리타겟팅 상세)",
+            data=to_excel_bytes(korify(format_display(
+                agg[["channel", "audience_type", "impressions", "clicks", "ctr", "cpc",
+                     "cost_incl_vat", "conversions", "revenue", "roas"]]
+            ))),
+            file_name="funnel_channel_audience_detail.xlsx",
+        )
+
+
 def render_ga_page(ga: pd.DataFrame):
     if not ga.empty:
         ga["as_of_date"] = pd.to_datetime(ga["as_of_date"]).dt.date
@@ -2407,6 +2723,7 @@ def main():
     snapshot = load_table("channel_snapshot")
     ga = load_table("ga_source")
     creatives = load_table("creative_performance")
+    audience = load_table("channel_audience_snapshot")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -2428,6 +2745,8 @@ def main():
         render_ga_page(ga)
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
+    elif page == "퍼널 대시보드":
+        render_funnel_dashboard(audience, creatives_fallback=creatives)
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
