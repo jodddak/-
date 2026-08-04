@@ -1070,6 +1070,92 @@ def parse_channel_group_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     return out.reset_index(drop=True)
 
 
+# 네이버 검색광고/쇼핑검색광고/브랜드검색광고 — 사용자 지시에 따라 캠페인/그룹 세부 분류 없이
+# "채널 전체 = 리타겟팅"으로 우선 분류한다(신규 유입보다는 이미 브랜드/검색 의도가 있는 사용자가
+# 대상이라는 판단). GFA/메타/크리테오처럼 그룹명 기준 신규·리타겟팅을 나누지 않고 시트 전체를
+# 채널 합계 1행으로 요약한다.
+#
+# 데이터 소스는 "(SA)/(SSP)/(브검) 네이버_data"(원본 raw 표)가 아니라 "_data"가 없는 요약 시트의
+# "■ 일일 데이터 → 당월 총합" 행을 쓴다. 두 시트가 같은 채널인데도 서로 다른 숫자를 담고 있는
+# 경우가 있고(예: 브랜드검색광고는 _data 시트에 광고비가 0으로 비어있음), 사용자가 실제 주간
+# 보고서에서 보는 숫자는 요약 시트의 "당월 총합"이라고 확인해줘서 그 쪽을 공식 소스로 쓴다.
+NAVER_SEARCH_SHEET_CHANNEL_MAP = {
+    "(SA)": "네이버 검색광고",
+    "(SSP)": "네이버 쇼핑검색광고",
+    "(브검)": "네이버 브랜드검색광고",
+}
+
+
+def _naver_search_channel_from_sheet(sheet: str):
+    """요약 시트("_data"가 붙지 않은)만 대상으로 한다 — 원본 raw 시트는 제외."""
+    if sheet.endswith("_data"):
+        return None
+    for prefix, label in NAVER_SEARCH_SHEET_CHANNEL_MAP.items():
+        if sheet.startswith(prefix):
+            return label
+    return None
+
+
+def parse_naver_search_sheet(xls: pd.ExcelFile, sheet: str, today: date):
+    """(SA)/(SSP)/(브검) 네이버 요약 시트의 "■ 일일 데이터 → 당월 총합" 행 하나를
+    채널 합계로 반환한다."""
+    channel_label = _naver_search_channel_from_sheet(sheet)
+    if channel_label is None:
+        return None
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+
+    total_row = None
+    for i in range(len(raw)):
+        row_text = " ".join(str(x) for x in raw.iloc[i].tolist())
+        if "당월" in row_text and "총합" in row_text:
+            total_row = i
+            break
+    if total_row is None:
+        return None
+
+    hdr = None
+    for i in range(total_row - 1, -1, -1):
+        row_text = " ".join(str(x) for x in raw.iloc[i].tolist())
+        if "노출수" in row_text and "클릭수" in row_text:
+            hdr = i
+            break
+    if hdr is None:
+        return None
+
+    headers = [clean_col(h) for h in raw.iloc[hdr].tolist()]
+    impr_idx = match_col_pos(headers, include_any=["노출"])
+    clicks_idx = match_col_pos(headers, include_any=["클릭"])
+    # 일부 시트는 "광고비(VAT제외)"처럼 '제외'가 명시돼 있고, 일부는 그냥 "광고비"(제외 의미)만
+    # 있고 옆에 "광고비(VAT포함)"가 따로 있어 '제외' 키워드 없이도 구분해야 한다.
+    cost_ex_idx = match_col_pos(headers, include_any=["광고비", "비용"], exclude=["포함"])
+    cost_in_idx = match_col_pos(headers, include_all=["포함"], include_any=["광고비", "비용"])
+    signup_idx = match_col_pos(headers, include_any=["가입"])
+    conv_idx = match_col_pos(headers, include_all=["전환"], exclude=["금액", "ga", "율"])
+    rev_idx = match_col_pos(headers, include_any=["매출", "전환금액"], exclude=["ga", "객단가"])
+
+    row = raw.iloc[total_row]
+
+    def _val(idx):
+        if idx is None or idx >= len(row):
+            return 0.0
+        v = pd.to_numeric(row.iloc[idx], errors="coerce")
+        return 0.0 if pd.isna(v) else float(v)
+
+    out = pd.DataFrame([{
+        "channel": channel_label,
+        "audience_type": "리타겟팅",
+        "impressions": _val(impr_idx),
+        "clicks": _val(clicks_idx),
+        "cost_excl_vat": _val(cost_ex_idx),
+        "cost_incl_vat": _val(cost_in_idx),
+        "signups": _val(signup_idx),
+        "conversions": _val(conv_idx),
+        "revenue": _val(rev_idx),
+        "as_of_date": today,
+    }])
+    return out
+
+
 def parse_creative_sheet(xls: pd.ExcelFile, sheet: str, today: date, hidden_rows: set = None):
     """소재 단위 시트 하나를 파싱. 시트마다 컬럼 구성이 조금씩 달라
     '소재명/광고소재/행 레이블' 컬럼과 노출/클릭/광고비/전환/매출 컬럼을 유연하게 매칭한다.
@@ -1404,6 +1490,13 @@ def parse_workbook(file, today: date):
     audience_frames = []
     for s in creative_sheets:
         df = parse_channel_group_sheet(xls, s, today)
+        if df is not None and len(df):
+            audience_frames.append(df)
+    # 네이버 검색광고/쇼핑검색광고/브랜드검색광고 — (SA)/(SSP)/(브검) 시트는 '광고소재' 컬럼이
+    # 없어 creative_sheets 목록에 안 잡히므로 별도로 찾아서 리타겟팅 채널로 추가한다.
+    naver_search_sheets = [s for s in xls.sheet_names if _naver_search_channel_from_sheet(s)]
+    for s in naver_search_sheets:
+        df = parse_naver_search_sheet(xls, s, today)
         if df is not None and len(df):
             audience_frames.append(df)
     result["channel_audience"] = pd.concat(audience_frames, ignore_index=True) if audience_frames else pd.DataFrame()
@@ -2563,10 +2656,16 @@ def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataF
     agg = add_kpis(agg)
     agg["signup_rate"] = np.where(agg["clicks"] > 0, agg["signups"] / agg["clicks"] * 100, 0)
 
-    tab1, tab2 = st.tabs(["① 신규고객 확보", "② 광고 매출·ROAS 효율"])
+    # 그룹(오디언스) 데이터가 원래 신규 단일 채널만 있는 매체 — 신규고객 확보 쪽에만 넣고,
+    # 광고 매출·ROAS 효율 비교(신규/리타겟팅이 둘 다 있는 채널들끼리 비교)에서는 뺀다.
+    # 나중에 네이버(검색광고 등)도 신규 단일로 받으면 여기 추가하면 된다.
+    FUNNEL_NEW_ONLY_CHANNELS = {"구글(P-MAX)"}
 
-    with tab1:
-        st.caption("캠페인 그룹명(타겟팅 오디언스) 기준 '신규' 분류만 모았습니다. 리타겟팅 성과는 ②탭에서 확인하세요.")
+    col_new, col_roas = st.columns(2)
+
+    with col_new:
+        st.markdown("##### ① 신규고객 확보")
+        st.caption("캠페인 그룹명(타겟팅 오디언스) 기준 '신규' 분류만 모았습니다.")
         new_df = agg[agg["audience_type"].isin(["신규", "미분류"])]
         if new_df.empty:
             st.info("선택 기간에 신규 분류 데이터가 없습니다.")
@@ -2574,22 +2673,27 @@ def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataF
             nb = (
                 new_df.groupby("channel", as_index=False)
                 .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-                     signups=("signups", "sum"), cost_incl_vat=("cost_incl_vat", "sum"))
+                     signups=("signups", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
             )
             nb["ctr"] = np.where(nb["impressions"] > 0, nb["clicks"] / nb["impressions"] * 100, 0)
             nb["signup_rate"] = np.where(nb["clicks"] > 0, nb["signups"] / nb["clicks"] * 100, 0)
+            nb["roas"] = np.where(nb["cost_incl_vat"] > 0, nb["revenue"] / nb["cost_incl_vat"] * 100, 0)
             nb = nb.sort_values("signups", ascending=False)
 
-            cols1 = ["channel", "impressions", "clicks", "ctr", "signups", "signup_rate", "cost_incl_vat"]
+            cols1 = ["channel", "impressions", "clicks", "ctr", "signups", "signup_rate",
+                     "cost_incl_vat", "conversions", "revenue", "roas"]
             show1 = format_display(nb[cols1])
 
             total_row1 = {
                 "channel": "TOTAL",
                 "impressions": nb["impressions"].sum(), "clicks": nb["clicks"].sum(),
                 "signups": nb["signups"].sum(), "cost_incl_vat": nb["cost_incl_vat"].sum(),
+                "conversions": nb["conversions"].sum(), "revenue": nb["revenue"].sum(),
             }
             total_row1["ctr"] = (total_row1["clicks"] / total_row1["impressions"] * 100) if total_row1["impressions"] else 0
             total_row1["signup_rate"] = (total_row1["signups"] / total_row1["clicks"] * 100) if total_row1["clicks"] else 0
+            total_row1["roas"] = (total_row1["revenue"] / total_row1["cost_incl_vat"] * 100) if total_row1["cost_incl_vat"] else 0
             total_show1 = format_display(pd.DataFrame([total_row1])[cols1])
             show1 = pd.concat([total_show1, show1], ignore_index=True)
 
@@ -2600,48 +2704,47 @@ def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataF
                 file_name="funnel_new_customers.xlsx",
             )
 
-    with tab2:
-        st.caption("매체별 전체 광고비 대비 매출 효율(ROAS)과 신규/리타겟팅 기여도를 함께 봅니다.")
-        by_channel = (
-            agg.groupby("channel", as_index=False)
-            .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-                 cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
-                 conversions=("conversions", "sum"), revenue=("revenue", "sum"))
-        )
-        by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
+    with col_roas:
+        st.markdown("##### ② 광고 매출·ROAS 효율")
+        st.caption("신규/리타겟팅이 함께 있는 채널들의 광고비 대비 매출 효율(ROAS)을 봅니다.")
+        agg_roas = agg[~agg["channel"].isin(FUNNEL_NEW_ONLY_CHANNELS)]
+        if agg_roas.empty:
+            st.info("신규/리타겟팅이 함께 있는 채널 데이터가 아직 없습니다.")
+        else:
+            by_channel = (
+                agg_roas.groupby("channel", as_index=False)
+                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+                     cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
+            )
+            by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
 
-        fig = px.bar(
-            by_channel, x="channel", y="roas", title="채널별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
-            labels={"channel": "매체", "roas": "ROAS(%)"},
-        )
-        st.plotly_chart(theme_chart(fig), use_container_width=True)
+            cols2 = ["channel", "cost_incl_vat", "conversions", "revenue", "roas"]
+            show2 = format_display(by_channel[cols2])
+            total_row2 = {
+                "channel": "TOTAL",
+                "cost_incl_vat": by_channel["cost_incl_vat"].sum(),
+                "conversions": by_channel["conversions"].sum(),
+                "revenue": by_channel["revenue"].sum(),
+            }
+            total_row2["roas"] = (total_row2["revenue"] / total_row2["cost_incl_vat"] * 100) if total_row2["cost_incl_vat"] else 0
+            total_show2 = format_display(pd.DataFrame([total_row2])[cols2])
+            show2 = pd.concat([total_show2, show2], ignore_index=True)
+            render_html_table(korify(show2))
 
-        cols2 = ["channel", "cost_incl_vat", "conversions", "revenue", "roas"]
-        show2 = format_display(by_channel[cols2])
-        total_row2 = {
-            "channel": "TOTAL",
-            "cost_incl_vat": by_channel["cost_incl_vat"].sum(),
-            "conversions": by_channel["conversions"].sum(),
-            "revenue": by_channel["revenue"].sum(),
-        }
-        total_row2["roas"] = (total_row2["revenue"] / total_row2["cost_incl_vat"] * 100) if total_row2["cost_incl_vat"] else 0
-        total_show2 = format_display(pd.DataFrame([total_row2])[cols2])
-        show2 = pd.concat([total_show2, show2], ignore_index=True)
-        render_html_table(korify(show2))
+            st.markdown("###### 매체별 신규 vs 리타겟팅 상세")
+            detail_cols = ["channel", "audience_type", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas"]
+            detail_sorted = agg_roas.sort_values(["channel", "cost_incl_vat"], ascending=[True, False])
+            st.dataframe(korify(format_display(detail_sorted[detail_cols])), use_container_width=True, hide_index=True)
 
-        st.markdown("##### 매체별 신규 vs 리타겟팅 상세")
-        detail_cols = ["channel", "audience_type", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas"]
-        detail_sorted = agg.sort_values(["channel", "cost_incl_vat"], ascending=[True, False])
-        st.dataframe(korify(format_display(detail_sorted[detail_cols])), use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "⬇️ 엑셀 다운로드 (매체별 신규·리타겟팅 상세)",
-            data=to_excel_bytes(korify(format_display(
-                agg[["channel", "audience_type", "impressions", "clicks", "ctr", "cpc",
-                     "cost_incl_vat", "conversions", "revenue", "roas"]]
-            ))),
-            file_name="funnel_channel_audience_detail.xlsx",
-        )
+            st.download_button(
+                "⬇️ 엑셀 다운로드 (매체별 신규·리타겟팅 상세)",
+                data=to_excel_bytes(korify(format_display(
+                    agg_roas[["channel", "audience_type", "impressions", "clicks", "ctr", "cpc",
+                              "cost_incl_vat", "conversions", "revenue", "roas"]]
+                ))),
+                file_name="funnel_channel_audience_detail.xlsx",
+            )
 
 
 def render_ga_page(ga: pd.DataFrame):
