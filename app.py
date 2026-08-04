@@ -2719,23 +2719,77 @@ def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataF
             )
             by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
 
-            cols2 = ["channel", "cost_incl_vat", "conversions", "revenue", "roas"]
+            cols2 = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat", "conversions", "revenue", "roas"]
             show2 = format_display(by_channel[cols2])
             total_row2 = {
                 "channel": "TOTAL",
+                "impressions": by_channel["impressions"].sum(),
+                "clicks": by_channel["clicks"].sum(),
                 "cost_incl_vat": by_channel["cost_incl_vat"].sum(),
                 "conversions": by_channel["conversions"].sum(),
                 "revenue": by_channel["revenue"].sum(),
             }
+            total_row2["ctr"] = (total_row2["clicks"] / total_row2["impressions"] * 100) if total_row2["impressions"] else 0
+            total_row2["cpc"] = (total_row2["cost_incl_vat"] / total_row2["clicks"]) if total_row2["clicks"] else 0
             total_row2["roas"] = (total_row2["revenue"] / total_row2["cost_incl_vat"] * 100) if total_row2["cost_incl_vat"] else 0
             total_show2 = format_display(pd.DataFrame([total_row2])[cols2])
             show2 = pd.concat([total_show2, show2], ignore_index=True)
             render_html_table(korify(show2))
 
+            # 신규 vs 리타겟팅 비교 — 채널을 다 섞은 flat 리스트 대신, 구분(오디언스)별로 먼저
+            # 합계를 나란히 보여줘서 "신규에 쓴 돈/매출" vs "리타겟팅에 쓴 돈/매출"을 한눈에 비교.
+            st.markdown("###### 신규 vs 리타겟팅 비교")
+            AUDIENCE_ORDER = ["신규", "리타겟팅", "미분류"]
+            audience_summary = (
+                agg_roas.groupby("audience_type", as_index=False)
+                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+                     cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
+            )
+            audience_summary = add_kpis(audience_summary)
+            audience_summary["_order"] = audience_summary["audience_type"].apply(
+                lambda x: AUDIENCE_ORDER.index(x) if x in AUDIENCE_ORDER else 99
+            )
+            audience_summary = audience_summary.sort_values("_order")
+            summary_cols = ["audience_type", "impressions", "clicks", "ctr", "cost_incl_vat", "conversions", "revenue", "roas"]
+            show_summary = format_display(audience_summary[summary_cols])
+            total_row_summary = {
+                "audience_type": "TOTAL",
+                "impressions": audience_summary["impressions"].sum(),
+                "clicks": audience_summary["clicks"].sum(),
+                "cost_incl_vat": audience_summary["cost_incl_vat"].sum(),
+                "conversions": audience_summary["conversions"].sum(),
+                "revenue": audience_summary["revenue"].sum(),
+            }
+            total_row_summary["ctr"] = (
+                total_row_summary["clicks"] / total_row_summary["impressions"] * 100
+            ) if total_row_summary["impressions"] else 0
+            total_row_summary["roas"] = (
+                total_row_summary["revenue"] / total_row_summary["cost_incl_vat"] * 100
+            ) if total_row_summary["cost_incl_vat"] else 0
+            total_show_summary = format_display(pd.DataFrame([total_row_summary])[summary_cols])
+            show_summary = pd.concat([show_summary, total_show_summary], ignore_index=True)
+            render_html_table(korify(show_summary))
+
+            # 매체별 상세도 채널 알파벳/입력 순서로 섞지 않고 신규 그룹 → 리타겟팅 그룹 순서로
+            # 묶어서 보여주고, 그룹마다 소계 행을 붙인다.
             st.markdown("###### 매체별 신규 vs 리타겟팅 상세")
             detail_cols = ["channel", "audience_type", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas"]
-            detail_sorted = agg_roas.sort_values(["channel", "cost_incl_vat"], ascending=[True, False])
-            st.dataframe(korify(format_display(detail_sorted[detail_cols])), use_container_width=True, hide_index=True)
+            detail_rows = []
+            for aud in [a for a in AUDIENCE_ORDER if a in agg_roas["audience_type"].unique()]:
+                sub = agg_roas[agg_roas["audience_type"] == aud].sort_values("cost_incl_vat", ascending=False)
+                detail_rows.append(format_display(sub[detail_cols]))
+                subtotal = {
+                    "channel": f"── {aud} 소계",
+                    "audience_type": "",
+                    "impressions": sub["impressions"].sum(), "clicks": sub["clicks"].sum(),
+                    "cost_incl_vat": sub["cost_incl_vat"].sum(), "conversions": sub["conversions"].sum(),
+                    "revenue": sub["revenue"].sum(),
+                }
+                subtotal["roas"] = (subtotal["revenue"] / subtotal["cost_incl_vat"] * 100) if subtotal["cost_incl_vat"] else 0
+                detail_rows.append(format_display(pd.DataFrame([subtotal])[detail_cols]))
+            detail_show = pd.concat(detail_rows, ignore_index=True)
+            render_html_table(korify(detail_show))
 
             st.download_button(
                 "⬇️ 엑셀 다운로드 (매체별 신규·리타겟팅 상세)",
