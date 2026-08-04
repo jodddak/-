@@ -165,6 +165,10 @@ def theme_chart(fig):
         legend_title_font_color=THEME_COLORS["muted"],
         margin=dict(l=10, r=10, t=50, b=10),
     )
+    # title 텍스트를 따로 지정하지 않은 차트는 title 객체에 font만 있고 text가 없어
+    # 화면에 "undefined"라는 글자가 그대로 렌더링되는 경우가 있어, 빈 문자열로 명시해둔다.
+    if fig.layout.title.text is None:
+        fig.update_layout(title_text="")
     fig.update_xaxes(gridcolor=THEME_COLORS["surface"], zerolinecolor=THEME_COLORS["border"], linecolor=THEME_COLORS["border"])
     fig.update_yaxes(gridcolor=THEME_COLORS["surface"], zerolinecolor=THEME_COLORS["border"], linecolor=THEME_COLORS["border"])
     return fig
@@ -199,7 +203,8 @@ def inject_theme():
         h4 {{ font-size: 17px !important; font-weight: 600 !important; }}
         p, span, label, div {{ color: {THEME_COLORS["body"]}; }}
         [data-testid="stCaptionContainer"], .stCaption, small {{
-            color: {THEME_COLORS["muted"]} !important;
+            color: {THEME_COLORS["body"]} !important;
+            font-weight: 600 !important;
         }}
 
         [data-testid="stMetric"] {{
@@ -1765,6 +1770,7 @@ def render_html_table(table: pd.DataFrame):
     <style>
     .stco-table-wrap {{
         overflow-x:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px; background:{THEME_COLORS["canvas"]};
+        margin-bottom:18px;
     }}
     .stco-table {{
         width:100%; table-layout:auto; border-collapse:collapse; font-size:14px;
@@ -2723,7 +2729,11 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
     audience_summary["channel"] = audience_summary["channel"].map(AUDIENCE_LABEL).fillna(audience_summary["channel"])
     show_top = format_display(audience_summary[TARGETING_CORE_COLS])
     total_top = format_display(_targeting_total_row(audience_summary, "TOTAL"))
-    render_html_table(korify(pd.concat([total_top, show_top], ignore_index=True)))
+    # ②의 신규/리타겟팅 매체 표와 같은 폭으로 보이도록 동일하게 2단 컬럼의 절반 폭에 맞춘다
+    # (표 하나만 있다고 전체 페이지 폭으로 늘어나면 컬럼 간 간격이 과하게 벌어져 보인다).
+    top_col, _spacer_col = st.columns(2)
+    with top_col:
+        render_html_table(korify(pd.concat([total_top, show_top], ignore_index=True)))
     st.caption("TOTAL = 신규 타겟팅 + 리타겟팅 (겹치지 않는 완전 분리 기준)")
 
     st.markdown("##### ② 타겟팅별 매체별 성과 비교")
@@ -2782,8 +2792,9 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
         st.caption("신규 타겟팅 매체별 ROAS(%)")
         if not new_df.empty:
             new_chart_df = new_df.sort_values("roas", ascending=False)
+            new_chart_df["roas_label"] = new_chart_df["roas"].map(lambda v: f"{v:.0f}%")
             fig_new = px.bar(
-                new_chart_df, x="channel", y="roas", text_auto=".1f",
+                new_chart_df, x="channel", y="roas", text="roas_label",
                 labels={"channel": "매체", "roas": "ROAS(%)"},
             )
             st.plotly_chart(theme_chart(fig_new), use_container_width=True)
@@ -2791,8 +2802,9 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
         st.caption("리타겟팅 매체별 ROAS(%) (자사몰 + 네이버 스토어)")
         if not retarget_df.empty:
             re_chart_df = retarget_df.sort_values("roas", ascending=False)
+            re_chart_df["roas_label"] = re_chart_df["roas"].map(lambda v: f"{v:.0f}%")
             fig_re = px.bar(
-                re_chart_df, x="channel", y="roas", text_auto=".1f",
+                re_chart_df, x="channel", y="roas", text="roas_label",
                 labels={"channel": "매체", "roas": "ROAS(%)"},
             )
             st.plotly_chart(theme_chart(fig_re), use_container_width=True)
