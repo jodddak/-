@@ -2564,13 +2564,17 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         )
         by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
 
+        by_channel_chart = by_channel.copy()
+        by_channel_chart["roas_label"] = by_channel_chart["roas"].map(lambda v: f"{v:.0f}%")
         fig = px.bar(
-            by_channel, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text_auto=".1f",
+            by_channel_chart, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text="roas_label",
             labels={"channel": "매체", "roas": "ROAS(%)"},
         )
         st.plotly_chart(theme_chart(fig), use_container_width=True)
 
-        bc_cols = list(by_channel.columns)
+        # 광고비(VAT제외)는 CPA 계산에만 쓰고 화면/엑셀에는 광고비(VAT+)만 노출 — 컬럼이 많아
+        # 표 폭이 들쭉날쭉해지는 것도 줄어든다.
+        bc_cols = [c for c in by_channel.columns if c != "cost_excl_vat"]
         bc_table = format_display(by_channel[bc_cols])
         bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
         if bc_total:
@@ -2578,7 +2582,7 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         render_html_table(korify(bc_table))
         st.download_button(
             "⬇️ 엑셀 다운로드 (매체별·월별)",
-            data=to_excel_bytes(korify(format_display(by_channel))), file_name="channel_performance.xlsx",
+            data=to_excel_bytes(korify(format_display(by_channel[bc_cols]))), file_name="channel_performance.xlsx",
         )
 
         render_channel_mix(fc)  # ← 신규: 채널믹스 목표 대비
