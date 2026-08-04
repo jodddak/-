@@ -2789,7 +2789,10 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
     st.markdown("##### ③ 매체별 ROAS 성과 비교")
     chart_new, chart_re = st.columns(2)
     with chart_new:
-        st.caption("신규 타겟팅 매체별 ROAS(%)")
+        st.markdown(
+            f"<div style='font-size:16px;font-weight:700;color:{THEME_COLORS['foreground']};margin-bottom:6px;'>신규 타겟팅 매체별 ROAS(%)</div>",
+            unsafe_allow_html=True,
+        )
         if not new_df.empty:
             new_chart_df = new_df.sort_values("roas", ascending=False)
             new_chart_df["roas_label"] = new_chart_df["roas"].map(lambda v: f"{v:.0f}%")
@@ -2799,7 +2802,10 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
             )
             st.plotly_chart(theme_chart(fig_new), use_container_width=True)
     with chart_re:
-        st.caption("리타겟팅 매체별 ROAS(%) (자사몰 + 네이버 스토어)")
+        st.markdown(
+            f"<div style='font-size:16px;font-weight:700;color:{THEME_COLORS['foreground']};margin-bottom:6px;'>리타겟팅 매체별 ROAS(%) (자사몰 + 네이버 스토어)</div>",
+            unsafe_allow_html=True,
+        )
         if not retarget_df.empty:
             re_chart_df = retarget_df.sort_values("roas", ascending=False)
             re_chart_df["roas_label"] = re_chart_df["roas"].map(lambda v: f"{v:.0f}%")
