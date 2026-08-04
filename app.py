@@ -456,7 +456,7 @@ def delete_creative_performance_for_date(as_of_date_value):
 
 
 def delete_channel_audience_for_date(as_of_date_value):
-    """퍼널 대시보드용 채널×오디언스(신규/리타겟팅) 스냅샷도 creative_performance와 동일한 이유로
+    """타겟팅별 성과용 채널×오디언스(신규/리타겟팅) 스냅샷도 creative_performance와 동일한 이유로
     저장 전에 같은 날짜의 이전 스냅샷을 지운다(upsert가 빠진 행을 알아서 지워주지 않아서)."""
     client = get_supabase_client()
     if client is None:
@@ -949,7 +949,7 @@ def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> 
 
 
 # ──────────────────────────────────────────────────────────────
-# 채널 그룹(타겟팅 오디언스) 단위 파싱 — 퍼널 대시보드용 (신규)
+# 채널 그룹(타겟팅 오디언스) 단위 파싱 — 타겟팅별 성과용 (신규)
 # 소재 상세표보다 앞에 나오는 '캠페인 분류 | 그룹 분류 | 노출수 ...' 집계표에서
 # 그룹(광고그룹/타겟팅 오디언스) 단위로 신규/리타겟팅을 분류해 저장한다.
 # ──────────────────────────────────────────────────────────────
@@ -1485,7 +1485,7 @@ def parse_workbook(file, today: date):
     result["creatives"] = pd.concat(creative_frames, ignore_index=True) if creative_frames else pd.DataFrame()
     result["creative_sheets_found"] = creative_sheets
 
-    # 퍼널 대시보드(신규고객 확보 vs ROAS)용 그룹(타겟팅 오디언스) 단위 데이터.
+    # 타겟팅별 성과(신규 타겟팅 vs 리타겟팅)용 그룹(타겟팅 오디언스) 단위 데이터.
     # 소재 파싱과 같은 시트 목록을 쓰되, 소재 상세표가 아니라 그 앞의 그룹 집계표를 읽는다.
     audience_frames = []
     for s in creative_sheets:
@@ -2159,7 +2159,7 @@ def render_upload_panel():
             unclassified_n = (
                 int((audience_df["audience_type"] == "미분류").sum()) if not audience_df.empty else 0
             )
-            st.write(f"🧭 퍼널 대시보드(신규/리타겟팅) 그룹 인식: {len(audience_df)}행")
+            st.write(f"🧭 타겟팅별 성과(신규/리타겟팅) 그룹 인식: {len(audience_df)}행")
             if unclassified_n:
                 st.warning(
                     f"'미분류'로 남은 그룹 {unclassified_n}행이 있습니다 — 새 캠페인/그룹이 추가된 것일 수 있어요. "
@@ -2403,16 +2403,16 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
-    "성과 리포트": ["종합 대시보드", "매체별 성과", "소재별 성과", "GA 유입경로", "GA4 라이브 리포트"],
-    "퍼널 관리": ["퍼널 대시보드", "마일스톤"],
-    "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
+    "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과"],
+    "GA 유입 리포트": ["GA 유입경로", "GA4 라이브 리포트", "채널별 유입 분석"],
+    "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
     "가이드": ["가이드"],
 }
 
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
 # main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
-NAV_PAGES_COMING_SOON = {"마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
+NAV_PAGES_COMING_SOON = {"마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드", "채널별 유입 분석"}
 
 
 def render_coming_soon(page_name: str):
@@ -2590,9 +2590,43 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         st.dataframe(korify(format_display(snap_latest[cols].sort_values("cost_incl_vat", ascending=False))), use_container_width=True, hide_index=True)
 
 
-def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataFrame = None):
-    """신규고객 확보(노출→클릭→회원가입)와 광고 매출/ROAS 효율, 2가지 관점으로 보는 퍼널 대시보드.
-    캠페인 그룹명(타겟팅 오디언스)을 신규/리타겟팅으로 자동 분류해 매체별로 쪼개 보여준다.
+# "리타겟팅 매체(자사몰)"이 아니라 "리타겟팅 매체(네이버 스토어)"로 따로 빼는 채널.
+# 네이버 쇼핑검색광고는 클릭 도착 페이지가 자사몰이 아니라 네이버 스토어(스마트스토어)라 구분한다.
+TARGETING_STORE_CHANNELS = {"네이버 쇼핑검색광고"}
+
+# 사용자가 정리해준 리포트 순서(비용순 정렬이 아니라 매체 관례상 고정 순서) — 목록에 없는
+# 채널은 뒤에 광고비 내림차순으로 붙는다.
+TARGETING_NEW_CHANNEL_ORDER = ["네이버 GFA PC", "네이버 GFA MO", "메타", "구글(P-MAX)", "네이버 맨즈탭"]
+TARGETING_RETARGET_OWN_CHANNEL_ORDER = ["네이버 검색광고", "네이버 브랜드검색광고", "네이버 GFA PC", "네이버 GFA MO", "메타", "크리테오"]
+
+TARGETING_CORE_COLS = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
+                        "signups", "signup_rate", "conversions", "revenue", "roas"]
+
+
+def _targeting_order_channels(df: pd.DataFrame, order_list: list) -> pd.DataFrame:
+    df = df.copy()
+    df["_ord"] = df["channel"].apply(lambda c: order_list.index(c) if c in order_list else len(order_list) + 1)
+    return df.sort_values(["_ord", "cost_incl_vat"], ascending=[True, False]).drop(columns="_ord")
+
+
+def _targeting_total_row(df: pd.DataFrame, label: str = "TOTAL") -> pd.DataFrame:
+    row = {
+        "channel": label,
+        "impressions": df["impressions"].sum(), "clicks": df["clicks"].sum(),
+        "cost_incl_vat": df["cost_incl_vat"].sum(), "signups": df["signups"].sum(),
+        "conversions": df["conversions"].sum(), "revenue": df["revenue"].sum(),
+    }
+    row["ctr"] = (row["clicks"] / row["impressions"] * 100) if row["impressions"] else 0
+    row["cpc"] = (row["cost_incl_vat"] / row["clicks"]) if row["clicks"] else 0
+    row["signup_rate"] = (row["signups"] / row["clicks"] * 100) if row["clicks"] else 0
+    row["roas"] = (row["revenue"] / row["cost_incl_vat"] * 100) if row["cost_incl_vat"] else 0
+    return pd.DataFrame([row])[TARGETING_CORE_COLS]
+
+
+def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback: pd.DataFrame = None):
+    """타겟팅별 성과 — 신규 타겟팅 vs 리타겟팅을 서로 겹치지 않게(mutually exclusive) 나눠서 본다.
+    ① TOTAL 비교(TOTAL = 신규 타겟팅 + 리타겟팅) → ② 매체별 성과(신규 타겟팅 매체(자사몰) /
+    리타겟팅 매체(자사몰) / 리타겟팅 매체(네이버 스토어)) → ③ 매체별 ROAS 비교, 3단 구성.
     '발굴/회수/수확' 역할 구분이나 CAC 중심 판정은 쓰지 않는다 — 대행사 운영 + 매체 예산이
     이미 고정된 구조에는 그 프레임이 안 맞는다는 판단에 따른 것."""
     if audience.empty and (creatives_fallback is None or creatives_fallback.empty):
@@ -2610,7 +2644,7 @@ def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataF
         cf = creatives_fallback.copy()
         cf["as_of_date"] = pd.to_datetime(cf["as_of_date"]).dt.date
         min_d, max_d = cf["as_of_date"].min(), cf["as_of_date"].max()
-    start, end = period_filter(min_d, max_d, key="funnel")
+    start, end = period_filter(min_d, max_d, key="targeting")
     fa = audience[(audience["as_of_date"] >= start) & (audience["as_of_date"] <= end)] if not audience.empty else audience
     # 소재별 성과와 같은 이유로, 같은 달 안에 여러 번 업로드해도 채널×오디언스별 '최신 스냅샷'만 사용
     # (누적 리포트를 그대로 더하면 몇 배로 부풀려짐).
@@ -2656,149 +2690,112 @@ def render_funnel_dashboard(audience: pd.DataFrame, creatives_fallback: pd.DataF
     agg = add_kpis(agg)
     agg["signup_rate"] = np.where(agg["clicks"] > 0, agg["signups"] / agg["clicks"] * 100, 0)
 
-    # 그룹(오디언스) 데이터가 원래 신규 단일 채널만 있는 매체 — 신규고객 확보 쪽에만 넣고,
-    # 광고 매출·ROAS 효율 비교(신규/리타겟팅이 둘 다 있는 채널들끼리 비교)에서는 뺀다.
-    # 나중에 네이버(검색광고 등)도 신규 단일로 받으면 여기 추가하면 된다.
-    FUNNEL_NEW_ONLY_CHANNELS = {"구글(P-MAX)"}
+    # 네이버 맨즈탭 — 아직 별도 리포트 연동 전이라 데이터가 없다. 항목은 항상 노출하되 0으로 표시
+    # (나중에 전용 리포트를 업로드받으면 이 자리에 실제 값이 채워지게 될 예정).
+    if "네이버 맨즈탭" not in agg["channel"].values:
+        placeholder = pd.DataFrame([{
+            "channel": "네이버 맨즈탭", "audience_type": "신규",
+            "impressions": 0.0, "clicks": 0.0, "cost_excl_vat": 0.0, "cost_incl_vat": 0.0,
+            "signups": 0.0, "conversions": 0.0, "revenue": 0.0,
+            "ctr": 0.0, "cpc": 0.0, "cpa": 0.0, "cvr": 0.0, "roas": 0.0, "aov": 0.0, "signup_rate": 0.0,
+        }])
+        agg = pd.concat([agg, placeholder], ignore_index=True)
 
-    col_new, col_roas = st.columns(2)
+    # ── ① 타겟팅별 성과 TOTAL 비교 (TOTAL = 신규 타겟팅 + 리타겟팅) ──
+    st.markdown("##### ① 타겟팅별 성과 TOTAL 비교")
+    AUDIENCE_ORDER = ["신규", "리타겟팅", "미분류"]
+    AUDIENCE_LABEL = {"신규": "신규 타겟팅", "리타겟팅": "리타겟팅", "미분류": "미분류"}
+    audience_summary = (
+        agg.groupby("audience_type", as_index=False)
+        .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+             cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
+             signups=("signups", "sum"), conversions=("conversions", "sum"), revenue=("revenue", "sum"))
+    )
+    audience_summary = add_kpis(audience_summary)
+    audience_summary["signup_rate"] = np.where(
+        audience_summary["clicks"] > 0, audience_summary["signups"] / audience_summary["clicks"] * 100, 0
+    )
+    audience_summary["_order"] = audience_summary["audience_type"].apply(
+        lambda x: AUDIENCE_ORDER.index(x) if x in AUDIENCE_ORDER else 99
+    )
+    audience_summary = audience_summary.sort_values("_order")
+    audience_summary = audience_summary.rename(columns={"audience_type": "channel"})
+    audience_summary["channel"] = audience_summary["channel"].map(AUDIENCE_LABEL).fillna(audience_summary["channel"])
+    show_top = format_display(audience_summary[TARGETING_CORE_COLS])
+    total_top = format_display(_targeting_total_row(audience_summary, "TOTAL"))
+    render_html_table(korify(pd.concat([total_top, show_top], ignore_index=True)))
+    st.caption("TOTAL = 신규 타겟팅 + 리타겟팅 (겹치지 않는 완전 분리 기준)")
+
+    st.markdown("##### ② 타겟팅별 매체별 성과 비교")
+    new_df = agg[agg["audience_type"].isin(["신규", "미분류"])]
+    retarget_df = agg[agg["audience_type"] == "리타겟팅"]
+    retarget_store_df = retarget_df[retarget_df["channel"].isin(TARGETING_STORE_CHANNELS)]
+    retarget_own_df = retarget_df[~retarget_df["channel"].isin(TARGETING_STORE_CHANNELS)]
+
+    col_new, col_re = st.columns(2)
 
     with col_new:
-        st.markdown("##### ① 신규고객 확보")
-        st.caption("캠페인 그룹명(타겟팅 오디언스) 기준 '신규' 분류만 모았습니다.")
-        new_df = agg[agg["audience_type"].isin(["신규", "미분류"])]
+        st.markdown("###### 1) 신규 타겟팅 매체 (자사몰)")
         if new_df.empty:
             st.info("선택 기간에 신규 분류 데이터가 없습니다.")
         else:
-            nb = (
-                new_df.groupby("channel", as_index=False)
-                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-                     signups=("signups", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
-                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
-            )
-            nb["ctr"] = np.where(nb["impressions"] > 0, nb["clicks"] / nb["impressions"] * 100, 0)
-            nb["signup_rate"] = np.where(nb["clicks"] > 0, nb["signups"] / nb["clicks"] * 100, 0)
-            nb["roas"] = np.where(nb["cost_incl_vat"] > 0, nb["revenue"] / nb["cost_incl_vat"] * 100, 0)
-            nb = nb.sort_values("signups", ascending=False)
-
-            cols1 = ["channel", "impressions", "clicks", "ctr", "signups", "signup_rate",
-                     "cost_incl_vat", "conversions", "revenue", "roas"]
-            show1 = format_display(nb[cols1])
-
-            total_row1 = {
-                "channel": "TOTAL",
-                "impressions": nb["impressions"].sum(), "clicks": nb["clicks"].sum(),
-                "signups": nb["signups"].sum(), "cost_incl_vat": nb["cost_incl_vat"].sum(),
-                "conversions": nb["conversions"].sum(), "revenue": nb["revenue"].sum(),
-            }
-            total_row1["ctr"] = (total_row1["clicks"] / total_row1["impressions"] * 100) if total_row1["impressions"] else 0
-            total_row1["signup_rate"] = (total_row1["signups"] / total_row1["clicks"] * 100) if total_row1["clicks"] else 0
-            total_row1["roas"] = (total_row1["revenue"] / total_row1["cost_incl_vat"] * 100) if total_row1["cost_incl_vat"] else 0
-            total_show1 = format_display(pd.DataFrame([total_row1])[cols1])
-            show1 = pd.concat([total_show1, show1], ignore_index=True)
-
-            render_html_table(korify(show1))
+            new_ordered = _targeting_order_channels(new_df, TARGETING_NEW_CHANNEL_ORDER)
+            show_new = format_display(new_ordered[TARGETING_CORE_COLS])
+            total_new = format_display(_targeting_total_row(new_ordered, "TOTAL"))
+            render_html_table(korify(pd.concat([total_new, show_new], ignore_index=True)))
             st.download_button(
-                "⬇️ 엑셀 다운로드 (신규고객 확보)",
-                data=to_excel_bytes(korify(format_display(nb[cols1]))),
-                file_name="funnel_new_customers.xlsx",
+                "⬇️ 엑셀 다운로드 (신규 타겟팅 매체)",
+                data=to_excel_bytes(korify(new_ordered[TARGETING_CORE_COLS])),
+                file_name="targeting_new.xlsx",
             )
 
-    with col_roas:
-        st.markdown("##### ② 광고 매출·ROAS 효율")
-        st.caption("신규/리타겟팅이 함께 있는 채널들의 광고비 대비 매출 효율(ROAS)을 봅니다.")
-        agg_roas = agg[~agg["channel"].isin(FUNNEL_NEW_ONLY_CHANNELS)]
-        if agg_roas.empty:
-            st.info("신규/리타겟팅이 함께 있는 채널 데이터가 아직 없습니다.")
+    with col_re:
+        st.markdown("###### 2-1) 리타겟팅 매체 (자사몰)")
+        if retarget_df.empty:
+            st.info("선택 기간에 리타겟팅 분류 데이터가 없습니다.")
         else:
-            by_channel = (
-                agg_roas.groupby("channel", as_index=False)
-                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-                     cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
-                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
-            )
-            by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
+            own_ordered = _targeting_order_channels(retarget_own_df, TARGETING_RETARGET_OWN_CHANNEL_ORDER)
+            show_own = format_display(own_ordered[TARGETING_CORE_COLS])
+            # TOTAL은 자사몰만이 아니라 리타겟팅 전체(자사몰 + 네이버 스토어) 합계 — 사용자가
+            # 확인해준 대로 ①의 TOTAL 비교 '리타겟팅' 행과 정확히 일치해야 한다.
+            total_re = format_display(_targeting_total_row(retarget_df, "TOTAL"))
+            render_html_table(korify(pd.concat([total_re, show_own], ignore_index=True)))
 
-            cols2 = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat", "conversions", "revenue", "roas"]
-            show2 = format_display(by_channel[cols2])
-            total_row2 = {
-                "channel": "TOTAL",
-                "impressions": by_channel["impressions"].sum(),
-                "clicks": by_channel["clicks"].sum(),
-                "cost_incl_vat": by_channel["cost_incl_vat"].sum(),
-                "conversions": by_channel["conversions"].sum(),
-                "revenue": by_channel["revenue"].sum(),
-            }
-            total_row2["ctr"] = (total_row2["clicks"] / total_row2["impressions"] * 100) if total_row2["impressions"] else 0
-            total_row2["cpc"] = (total_row2["cost_incl_vat"] / total_row2["clicks"]) if total_row2["clicks"] else 0
-            total_row2["roas"] = (total_row2["revenue"] / total_row2["cost_incl_vat"] * 100) if total_row2["cost_incl_vat"] else 0
-            total_show2 = format_display(pd.DataFrame([total_row2])[cols2])
-            show2 = pd.concat([total_show2, show2], ignore_index=True)
-            render_html_table(korify(show2))
+        st.markdown("###### 2-2) 리타겟팅 매체 (네이버 스토어)")
+        if retarget_store_df.empty:
+            st.info("아직 데이터가 없습니다.")
+        else:
+            store_ordered = retarget_store_df.sort_values("cost_incl_vat", ascending=False)
+            render_html_table(korify(format_display(store_ordered[TARGETING_CORE_COLS])))
 
-            # 신규 vs 리타겟팅 비교 — 채널을 다 섞은 flat 리스트 대신, 구분(오디언스)별로 먼저
-            # 합계를 나란히 보여줘서 "신규에 쓴 돈/매출" vs "리타겟팅에 쓴 돈/매출"을 한눈에 비교.
-            st.markdown("###### 신규 vs 리타겟팅 비교")
-            AUDIENCE_ORDER = ["신규", "리타겟팅", "미분류"]
-            audience_summary = (
-                agg_roas.groupby("audience_type", as_index=False)
-                .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
-                     cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
-                     conversions=("conversions", "sum"), revenue=("revenue", "sum"))
-            )
-            audience_summary = add_kpis(audience_summary)
-            audience_summary["_order"] = audience_summary["audience_type"].apply(
-                lambda x: AUDIENCE_ORDER.index(x) if x in AUDIENCE_ORDER else 99
-            )
-            audience_summary = audience_summary.sort_values("_order")
-            summary_cols = ["audience_type", "impressions", "clicks", "ctr", "cost_incl_vat", "conversions", "revenue", "roas"]
-            show_summary = format_display(audience_summary[summary_cols])
-            total_row_summary = {
-                "audience_type": "TOTAL",
-                "impressions": audience_summary["impressions"].sum(),
-                "clicks": audience_summary["clicks"].sum(),
-                "cost_incl_vat": audience_summary["cost_incl_vat"].sum(),
-                "conversions": audience_summary["conversions"].sum(),
-                "revenue": audience_summary["revenue"].sum(),
-            }
-            total_row_summary["ctr"] = (
-                total_row_summary["clicks"] / total_row_summary["impressions"] * 100
-            ) if total_row_summary["impressions"] else 0
-            total_row_summary["roas"] = (
-                total_row_summary["revenue"] / total_row_summary["cost_incl_vat"] * 100
-            ) if total_row_summary["cost_incl_vat"] else 0
-            total_show_summary = format_display(pd.DataFrame([total_row_summary])[summary_cols])
-            show_summary = pd.concat([show_summary, total_show_summary], ignore_index=True)
-            render_html_table(korify(show_summary))
-
-            # 매체별 상세도 채널 알파벳/입력 순서로 섞지 않고 신규 그룹 → 리타겟팅 그룹 순서로
-            # 묶어서 보여주고, 그룹마다 소계 행을 붙인다.
-            st.markdown("###### 매체별 신규 vs 리타겟팅 상세")
-            detail_cols = ["channel", "audience_type", "impressions", "clicks", "cost_incl_vat", "conversions", "revenue", "roas"]
-            detail_rows = []
-            for aud in [a for a in AUDIENCE_ORDER if a in agg_roas["audience_type"].unique()]:
-                sub = agg_roas[agg_roas["audience_type"] == aud].sort_values("cost_incl_vat", ascending=False)
-                detail_rows.append(format_display(sub[detail_cols]))
-                subtotal = {
-                    "channel": f"── {aud} 소계",
-                    "audience_type": "",
-                    "impressions": sub["impressions"].sum(), "clicks": sub["clicks"].sum(),
-                    "cost_incl_vat": sub["cost_incl_vat"].sum(), "conversions": sub["conversions"].sum(),
-                    "revenue": sub["revenue"].sum(),
-                }
-                subtotal["roas"] = (subtotal["revenue"] / subtotal["cost_incl_vat"] * 100) if subtotal["cost_incl_vat"] else 0
-                detail_rows.append(format_display(pd.DataFrame([subtotal])[detail_cols]))
-            detail_show = pd.concat(detail_rows, ignore_index=True)
-            render_html_table(korify(detail_show))
-
+        if not retarget_df.empty:
+            retarget_all = pd.concat([retarget_own_df, retarget_store_df], ignore_index=True)
             st.download_button(
-                "⬇️ 엑셀 다운로드 (매체별 신규·리타겟팅 상세)",
-                data=to_excel_bytes(korify(format_display(
-                    agg_roas[["channel", "audience_type", "impressions", "clicks", "ctr", "cpc",
-                              "cost_incl_vat", "conversions", "revenue", "roas"]]
-                ))),
-                file_name="funnel_channel_audience_detail.xlsx",
+                "⬇️ 엑셀 다운로드 (리타겟팅 매체, 자사몰+네이버 스토어)",
+                data=to_excel_bytes(korify(retarget_all[["channel"] + TARGETING_CORE_COLS[1:]])),
+                file_name="targeting_retarget.xlsx",
             )
+
+    st.markdown("##### ③ 매체별 ROAS 성과 비교")
+    chart_new, chart_re = st.columns(2)
+    with chart_new:
+        st.caption("신규 타겟팅 매체별 ROAS(%)")
+        if not new_df.empty:
+            new_chart_df = new_df.sort_values("roas", ascending=False)
+            fig_new = px.bar(
+                new_chart_df, x="channel", y="roas", text_auto=".1f",
+                labels={"channel": "매체", "roas": "ROAS(%)"},
+            )
+            st.plotly_chart(theme_chart(fig_new), use_container_width=True)
+    with chart_re:
+        st.caption("리타겟팅 매체별 ROAS(%) (자사몰 + 네이버 스토어)")
+        if not retarget_df.empty:
+            re_chart_df = retarget_df.sort_values("roas", ascending=False)
+            fig_re = px.bar(
+                re_chart_df, x="channel", y="roas", text_auto=".1f",
+                labels={"channel": "매체", "roas": "ROAS(%)"},
+            )
+            st.plotly_chart(theme_chart(fig_re), use_container_width=True)
 
 
 def render_ga_page(ga: pd.DataFrame):
@@ -2896,14 +2893,14 @@ def main():
         render_overview_page(weekly, monthly, daily)
     elif page == "매체별 성과":
         render_channel_page(channels, snapshot)
+    elif page == "타겟팅별 성과":
+        render_targeting_performance_page(audience, creatives_fallback=creatives)
     elif page == "소재별 성과":
         render_creative_performance(creatives)
     elif page == "GA 유입경로":
         render_ga_page(ga)
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
-    elif page == "퍼널 대시보드":
-        render_funnel_dashboard(audience, creatives_fallback=creatives)
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
