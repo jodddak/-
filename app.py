@@ -1721,17 +1721,41 @@ def format_display(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def render_html_table(table: pd.DataFrame):
+KOR_COLS_REV = {v: k for k, v in KOR_COLS.items()}
+
+
+def render_html_table(table: pd.DataFrame, raw: pd.DataFrame = None):
     """pandas Styler(jinja2 의존) 없이 순수 HTML로 표를 그린다.
-    ▲(상승)는 빨간색, ▼(하락)는 파란색 글씨로 표시하고, 인덱스는 표시하지 않는다."""
+    ▲(상승)는 빨간색, ▼(하락)는 파란색 글씨로 표시하고, 인덱스는 표시하지 않는다.
+    raw(원본 숫자 컬럼, TOTAL 행 제외 · table의 데이터 행과 같은 순서)를 넘기면 raw에 있는
+    숫자 컬럼에 한해 헤더를 클릭해 오름차순/내림차순 정렬할 수 있다(TOTAL 행은 항상 고정)."""
     if table.empty:
         st.caption("데이터가 아직 없습니다.")
         return
 
     cols = list(table.columns)
-    thead = "".join(f"<th>{c}</th>" for c in cols)
+
+    sortable_keys = {}
+    if raw is not None:
+        for c in cols:
+            orig = KOR_COLS_REV.get(c)
+            if orig and orig in raw.columns and pd.api.types.is_numeric_dtype(raw[orig]):
+                sortable_keys[c] = orig
+
+    if sortable_keys:
+        thead = "".join(
+            f'<th class="stco-sortable" data-key="{sortable_keys[c]}">{c} <span class="stco-sort-arrow">⇅</span></th>'
+            if c in sortable_keys else f"<th>{c}</th>"
+            for c in cols
+        )
+    else:
+        thead = "".join(f"<th>{c}</th>" for c in cols)
+
+    # TOTAL 행이 맨 위/맨 아래 중 어느 쪽에 있는지에 따라, 정렬 후에도 같은 위치에 고정한다.
+    total_pin = "top" if (not table.empty and str(table.iloc[0][cols[0]]).strip() == "TOTAL") else "bottom"
 
     row_htmls = []
+    raw_idx = 0  # table에서 TOTAL 행을 제외한 순번 == raw의 행 순번(raw가 있을 때)
     for _, row in table.iterrows():
         first_text = str(row[cols[0]]).strip()
         is_total = first_text == "TOTAL"
@@ -1762,11 +1786,19 @@ def render_html_table(table: pd.DataFrame):
                 style += "color:#d93025;"
             elif text.startswith("▼"):
                 style += "color:#1a73e8;"
-            cells.append(f'<td{colspan} style="{style}">{text}</td>')
+            data_attr = ""
+            if c in sortable_keys and not is_total and raw is not None and raw_idx < len(raw):
+                sort_col = sortable_keys[c]
+                raw_val = raw.iloc[raw_idx][sort_col]
+                if pd.notna(raw_val):
+                    data_attr = f' data-value="{float(raw_val)}"'
+            cells.append(f'<td{colspan} style="{style}"{data_attr}>{text}</td>')
         row_class = ' class="stco-total-row"' if is_total else ""
         row_htmls.append(f"<tr{row_class}>{''.join(cells)}</tr>")
+        if not is_total:
+            raw_idx += 1
 
-    html = f"""
+    table_style = f"""
     <style>
     .stco-table-wrap {{
         overflow-x:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px; background:{THEME_COLORS["canvas"]};
@@ -1794,15 +1826,93 @@ def render_html_table(table: pd.DataFrame):
         font-weight:700; border-top:2px solid {THEME_COLORS["border"]};
     }}
     .stco-table tr.stco-total-row:hover td {{ background:{THEME_COLORS["surface"]}; }}
+    .stco-sortable {{ cursor:pointer; user-select:none; }}
+    .stco-sortable:hover {{ color:{THEME_COLORS["foreground"]}; }}
+    .stco-sort-arrow {{ font-size:11px; margin-left:2px; }}
+    .stco-sortable.stco-sort-active {{ color:{THEME_COLORS["foreground"]}; }}
+    .stco-sortable.stco-sort-active .stco-sort-arrow {{ font-weight:700; }}
     </style>
+    """
+
+    if not sortable_keys:
+        # 정렬 기능이 필요 없는 표는 기존대로 st.markdown으로 그린다(고정 높이 없이 자연스럽게 흐름).
+        html = f"""
+        {table_style}
+        <div class="stco-table-wrap">
+        <table class="stco-table">
+          <thead><tr>{thead}</tr></thead>
+          <tbody>{''.join(row_htmls)}</tbody>
+        </table>
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
+        return
+
+    # 정렬 기능이 있는 표는 st.markdown이 <script>를 실행하지 않기 때문에 iframe(components.html)으로 그린다.
+    n_rows = len(table)
+    iframe_height = min(max(90 + n_rows * 41, 150), 900)
+    table_id = f"stco-table-{abs(hash(tuple(cols))) % 100000}"
+    html = f"""
+    <html><head>{table_style}</head>
+    <body style="margin:0; font-family:{THEME_FONT_STACK};">
     <div class="stco-table-wrap">
-    <table class="stco-table">
+    <table class="stco-table" id="{table_id}">
       <thead><tr>{thead}</tr></thead>
       <tbody>{''.join(row_htmls)}</tbody>
     </table>
     </div>
+    <script>
+    (function() {{
+        var table = document.getElementById("{table_id}");
+        var tbody = table.querySelector("tbody");
+        var headers = table.querySelectorAll("th.stco-sortable");
+        var pinTop = {str(total_pin == "top").lower()};
+        var state = {{ key: null, dir: 1 }};
+
+        headers.forEach(function(th) {{
+            th.addEventListener("click", function() {{
+                var key = th.getAttribute("data-key");
+                var colIndex = Array.prototype.indexOf.call(th.parentNode.children, th);
+                if (state.key === key) {{
+                    state.dir = -state.dir;
+                }} else {{
+                    state.key = key;
+                    state.dir = -1;  // 처음 클릭하면 내림차순(큰 값 먼저)
+                }}
+                headers.forEach(function(h) {{
+                    h.classList.remove("stco-sort-active");
+                    h.querySelector(".stco-sort-arrow").textContent = "⇅";
+                }});
+                th.classList.add("stco-sort-active");
+                th.querySelector(".stco-sort-arrow").textContent = state.dir === 1 ? "▲" : "▼";
+
+                var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
+                var totalRows = rows.filter(function(r) {{ return r.classList.contains("stco-total-row"); }});
+                var dataRows = rows.filter(function(r) {{ return !r.classList.contains("stco-total-row"); }});
+
+                dataRows.sort(function(a, b) {{
+                    var av = parseFloat(a.children[colIndex].getAttribute("data-value"));
+                    var bv = parseFloat(b.children[colIndex].getAttribute("data-value"));
+                    var aNum = isNaN(av) ? -Infinity : av;
+                    var bNum = isNaN(bv) ? -Infinity : bv;
+                    return (aNum - bNum) * state.dir;
+                }});
+
+                dataRows.forEach(function(r) {{ tbody.appendChild(r); }});
+                if (pinTop) {{
+                    for (var i = totalRows.length - 1; i >= 0; i--) {{
+                        tbody.insertBefore(totalRows[i], tbody.firstChild);
+                    }}
+                }} else {{
+                    totalRows.forEach(function(r) {{ tbody.appendChild(r); }});
+                }}
+            }});
+        }});
+    }})();
+    </script>
+    </body></html>
     """
-    st.markdown(html, unsafe_allow_html=True)
+    components.html(html, height=iframe_height, scrolling=True)
 
 
 # 소재별 성과 표에서 헤더 클릭으로 정렬 가능한 컬럼: 화면표시(한글) 헤더 → 정렬 기준이 되는 원본 컬럼 키.
@@ -2580,10 +2690,13 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         bc_cols = [c for c in BC_COL_ORDER if c in by_channel.columns]
         bc_cols += [c for c in by_channel.columns if c not in bc_cols and c != "cost_excl_vat"]
         bc_table = format_display(by_channel[bc_cols])
-        bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
+        # CPA는 광고비(VAT제외) 기준으로 계산되는데, bc_cols에서 그 컬럼을 표시에서 뺐다고
+        # TOTAL 합산용 원본까지 잘라버리면 cost_excl_vat이 0 취급돼 CPA가 0으로 나온다.
+        # 합산은 by_channel 전체 컬럼 기준으로 하고, 화면에 낼 항목만 bc_cols로 고른다.
+        bc_total = build_total_row(by_channel, bc_cols, "channel", label_text="TOTAL")
         if bc_total:
             bc_table = pd.concat([bc_table, pd.DataFrame([bc_total])], ignore_index=True)
-        render_html_table(korify(bc_table))
+        render_html_table(korify(bc_table), raw=by_channel[bc_cols])
         st.download_button(
             "⬇️ 엑셀 다운로드 (매체별·월별)",
             data=to_excel_bytes(korify(format_display(by_channel[bc_cols]))), file_name="channel_performance.xlsx",
