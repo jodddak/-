@@ -1551,7 +1551,7 @@ KOR_COLS = {
     "impressions": "노출수",
     "clicks": "클릭수",
     "cost_excl_vat": "광고비(VAT제외)",
-    "cost_incl_vat": "광고비(VAT포함)",
+    "cost_incl_vat": "광고비(VAT+)",
     "signups": "회원가입",
     "signup_rate": "가입율(%)",
     "audience_type": "구분(신규/리타겟팅)",
@@ -1767,17 +1767,17 @@ def render_html_table(table: pd.DataFrame):
         overflow-x:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px; background:{THEME_COLORS["canvas"]};
     }}
     .stco-table {{
-        width:auto; max-width:100%; border-collapse:collapse; font-size:14px;
+        width:auto; max-width:100%; border-collapse:collapse; font-size:13px;
         font-family: {THEME_FONT_STACK};
     }}
     .stco-table th {{
-        background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["muted"]}; font-weight:600; padding:8px 14px;
+        background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["muted"]}; font-weight:600; padding:6px 8px;
         text-align:right; border-bottom:1px solid {THEME_COLORS["border"]}; white-space:nowrap;
     }}
     .stco-table th:first-child {{ text-align:left; border-top-left-radius:10px; }}
     .stco-table th:last-child {{ border-top-right-radius:10px; }}
     .stco-table td {{
-        padding:8px 14px; text-align:right; color:{THEME_COLORS["foreground"]};
+        padding:6px 8px; text-align:right; color:{THEME_COLORS["foreground"]};
         border-bottom:1px solid {THEME_COLORS["border"]}; white-space:nowrap;
     }}
     .stco-table td:first-child {{ text-align:left; }}
