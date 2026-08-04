@@ -2573,8 +2573,12 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         st.plotly_chart(theme_chart(fig), use_container_width=True)
 
         # 광고비(VAT제외)는 CPA 계산에만 쓰고 화면/엑셀에는 광고비(VAT+)만 노출 — 컬럼이 많아
-        # 표 폭이 들쭉날쭉해지는 것도 줄어든다.
-        bc_cols = [c for c in by_channel.columns if c != "cost_excl_vat"]
+        # 표 폭이 들쭉날쭉해지는 것도 줄어든다. 컬럼 순서는 종합 대시보드/타겟팅별 성과와 동일하게
+        # 노출수 → 클릭수 → CTR → CPC → 광고비 순으로 맞춘다.
+        BC_COL_ORDER = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
+                        "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
+        bc_cols = [c for c in BC_COL_ORDER if c in by_channel.columns]
+        bc_cols += [c for c in by_channel.columns if c not in bc_cols and c != "cost_excl_vat"]
         bc_table = format_display(by_channel[bc_cols])
         bc_total = build_total_row(by_channel[bc_cols], bc_cols, "channel", label_text="TOTAL")
         if bc_total:
