@@ -2100,15 +2100,17 @@ def render_html_table(table: pd.DataFrame, raw: pd.DataFrame = None):
 
     if not sortable_keys:
         # 정렬 기능이 필요 없는 표는 기존대로 st.markdown으로 그린다(고정 높이 없이 자연스럽게 흐름).
-        html = f"""
-        {table_style}
-        <div class="stco-table-wrap">
-        <table class="stco-table">
-          <thead><tr>{thead}</tr></thead>
-          <tbody>{''.join(row_htmls)}</tbody>
-        </table>
-        </div>
-        """
+        # 주의: 문자열 내용이 4칸 이상 들여쓰기 되면 마크다운이 "코드 블록"으로 인식해 HTML을
+        # 렌더링하지 않고 태그를 그대로 텍스트로 보여준다 — 그래서 내용은 항상 왼쪽에 맞춰 쓴다.
+        html = (
+            table_style
+            + '<div class="stco-table-wrap">'
+            + '<table class="stco-table">'
+            + f"<thead><tr>{thead}</tr></thead>"
+            + f"<tbody>{''.join(row_htmls)}</tbody>"
+            + "</table>"
+            + "</div>"
+        )
         st.markdown(html, unsafe_allow_html=True)
         return
 
