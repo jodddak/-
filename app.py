@@ -568,16 +568,17 @@ def inject_theme():
             background-size: contain;
             background-repeat: no-repeat;
         }}
-        /* 그룹별 아이콘 지정 — NAV_GROUPS 딕셔너리 순서(성과 리포트 → GA 유입 리포트 →
-           운영 도구 → 가이드)와 사이드바에 렌더링되는 expander 순서가 같다는 전제로 nth-of-type을 쓴다.
-           GA 유입 리포트(2번째)는 새로 받은 아이콘이 없어서 위 기본값(NAV_GROUP_ICON_B64) 그대로 유지. */
-        div.st-key-stco_nav div[data-testid="stExpander"]:nth-of-type(1) summary p::before {{
+        /* 그룹별 아이콘 지정 — render_nav()에서 그룹마다 container(key=f"navgrp_xxx")로 한 번 더
+           감싸서 붙는 고유 클래스(st-key-navgrp_xxx)로 구분한다. :nth-of-type은 Streamlit이 위젯을
+           각각 별도 element-container로 감싸는 구조라 전부 "1번째"로 잡혀서 못 쓴다.
+           GA 유입 리포트는 별도 아이콘을 안 받아서 위 기본값(NAV_GROUP_ICON_B64) 그대로 유지. */
+        div.st-key-navgrp_report div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_PERFORMANCE_B64}");
         }}
-        div.st-key-stco_nav div[data-testid="stExpander"]:nth-of-type(3) summary p::before {{
+        div.st-key-navgrp_ops div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_OPERATIONS_B64}");
         }}
-        div.st-key-stco_nav div[data-testid="stExpander"]:nth-of-type(4) summary p::before {{
+        div.st-key-navgrp_guide div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
@@ -2791,6 +2792,15 @@ NAV_GROUPS = {
     "가이드": ["가이드"],
 }
 
+# 그룹별로 다른 CSS 클래스(st-key-navgrp_xxx)를 붙이기 위한 영문 키. GA 유입 리포트는
+# 별도 아이콘을 안 받아서 키를 안 주고(None) 공통 기본 아이콘(NAV_GROUP_ICON_B64)을 그대로 쓴다.
+NAV_GROUP_KEYS = {
+    "성과 리포트": "report",
+    "GA 유입 리포트": None,
+    "운영 도구": "ops",
+    "가이드": "guide",
+}
+
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
 # main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
@@ -2823,7 +2833,16 @@ def render_nav() -> str:
             # 그룹이 여러 개가 되면 전부 펼쳐두면 사이드바가 너무 길어지니, 현재 선택된 페이지가
             # 속한 그룹만 자동으로 펼치고 나머지는 접어둔다.
             is_active_group = st.session_state["nav_page"] in pages
-            with st.expander(group, expanded=is_active_group):
+            # 그룹별로 다른 아이콘을 쓰려면 CSS에서 그룹을 구분할 수 있어야 하는데, Streamlit은
+            # 위젯마다 개별 element-container로 감싸버려서 :nth-of-type으로는 구분이 안 된다
+            # (모든 expander가 "자기 부모 안에서는 1번째"라 전부 같은 규칙에 걸림). 그래서 그룹마다
+            # container(key=...)로 한 번 더 감싸 고유 CSS 클래스(st-key-{key})를 붙여준다.
+            group_key = NAV_GROUP_KEYS.get(group)
+            try:
+                group_box = st.container(key=f"navgrp_{group_key}") if group_key else st.container()
+            except TypeError:
+                group_box = st.container()
+            with group_box, st.expander(group, expanded=is_active_group):
                 for p in pages:
                     is_current = st.session_state["nav_page"] == p
                     if st.button(
