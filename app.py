@@ -625,6 +625,7 @@ TABLES = {
     "ga_source": "ga_source",
     "creative_performance": "creative_performance",
     "channel_audience_snapshot": "channel_audience_snapshot",
+    "inflow_revenue_daily": "inflow_revenue_daily",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -1140,6 +1141,84 @@ def parse_ga_raw(xls: pd.ExcelFile, today: date):
         if c != "source_medium":
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
     out["as_of_date"] = today
+    return out.reset_index(drop=True)
+
+
+INFLOW_REVENUE_SHEET = "일별 GA,어드민 지표 비교"
+
+# (엑셀 열 위치 0-based, 우리 컬럼명, 퍼센트 변환 배수) — 이름이 아니라 '위치'로 읽는 이유:
+# 시트 헤더가 4행이고 그 위에 병합된 그룹 헤더(GA/자체 분석 툴/매체 기준/GA 기준)가 있어서
+# "결제수·CVR·AOV·매출액·ROAS"가 두 번씩 반복되는데, pandas로 이름 기준 read_excel을 하면
+# 뒤에 나온 컬럼이 앞 컬럼을 덮어써버려 데이터가 사라진다. 열 위치 고정이 훨씬 안전하다.
+INFLOW_REVENUE_COL_MAP = [
+    (0, "report_date", None),
+    (1, "users", None),
+    (2, "new_users", None),
+    (3, "returning_users", None),
+    (4, "signups", None),
+    (5, "bounce_rate", 100),
+    (6, "avg_session_duration", None),
+    # 7번(인덱스7)은 "3분 26초" 형태 텍스트 중복 컬럼이라 건너뜀
+    (8, "pageviews", None),
+    (9, "admin_orders_total", None),
+    (10, "admin_orders_real", None),
+    (11, "admin_qty", None),
+    (12, "admin_revenue", None),          # 회사 내부(어드민) 기준 매출
+    (13, "price_rate", 100),
+    (14, "admin_aov", None),
+    (15, "admin_returns", None),
+    (16, "return_rate", 100),
+    # 17번(인덱스17)은 "매체 TOTAL" 아래 날짜 중복 컬럼이라 건너뜀
+    (18, "impressions", None),
+    (19, "clicks", None),
+    (20, "ctr", 100),
+    (21, "cpc", None),
+    (22, "cost_incl_vat", None),
+    (23, "conversions", None),            # 매체 리포트 기준 결제수
+    (24, "cvr", 100),
+    (25, "aov", None),
+    (26, "revenue", None),                # 매체 리포트(보고서) 기준 매출
+    (27, "roas", 100),
+    (28, "ga_conversions", None),
+    (29, "ga_cvr", 100),
+    (30, "ga_aov", None),
+    (31, "ga_revenue", None),             # GA 기준 매출
+    (32, "ga_roas", 100),
+    (33, "new_paying_customers", None),
+    (34, "cac", None),
+    # 35~39(인덱스)는 퍼널(1.유입~5.구매) 라벨 텍스트 칸이라 실데이터가 아니어서 제외
+]
+
+
+def parse_inflow_revenue_sheet(xls: pd.ExcelFile):
+    """형이 별도로 정리해서 준 '일별 GA,어드민 지표 비교' 파일 전용 파서.
+    5~11행에는 월별 요약행이 먼저 있고 그 아래(12행~)부터 실제 일별 데이터가 시작되는데,
+    요약행은 날짜 칸이 '2026년 1월' 같은 문자열이라 datetime 파싱이 실패하는 것으로 자연스럽게
+    걸러낸다. 아직 값이 없는 미래 날짜(연말까지 미리 만들어둔 빈 행)는 방문자수가 비어있는 것으로
+    걸러낸다."""
+    if INFLOW_REVENUE_SHEET not in xls.sheet_names:
+        return pd.DataFrame()
+    raw = pd.read_excel(xls, sheet_name=INFLOW_REVENUE_SHEET, header=None, skiprows=4)
+    if raw.empty:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(index=raw.index)
+    for idx, name, scale in INFLOW_REVENUE_COL_MAP:
+        if idx >= raw.shape[1]:
+            out[name] = pd.NA
+            continue
+        col = raw.iloc[:, idx]
+        if name == "report_date":
+            out[name] = col
+            continue
+        col = pd.to_numeric(col, errors="coerce")
+        if scale:
+            col = col * scale
+        out[name] = col
+
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce")
+    out = out.dropna(subset=["report_date", "users"]).copy()
+    out["report_date"] = out["report_date"].dt.date
     return out.reset_index(drop=True)
 
 
@@ -1855,6 +1934,23 @@ KOR_COLS = {
     "avg_session_duration": "평균 세션시간(초)",
     "ecommerce_cvr": "전자상거래 전환율(%)",
     "transactions": "거래수",
+    # ↓ 유입·매출 비교(일별 GA·어드민 지표 비교) 전용 컬럼
+    "returning_users": "재방문자",
+    "pageviews": "페이지뷰",
+    "admin_orders_total": "총 결제건수(어드민)",
+    "admin_orders_real": "실 결제건수(어드민)",
+    "admin_qty": "실 상품수량(어드민)",
+    "admin_revenue": "어드민 매출(회사 내부 기준)",
+    "price_rate": "판가율(%)",
+    "admin_aov": "평균 구매금액(어드민)",
+    "admin_returns": "반품건수",
+    "return_rate": "반품율(%)",
+    "ga_cvr": "GA-CVR(%)",
+    "ga_aov": "GA-객단가",
+    "new_paying_customers": "신규결제고객수",
+    "cac": "CAC(고객획득비용)",
+    "report_gap_pct": "보고서 매출 격차(%)",
+    "ga_gap_pct": "GA 매출 격차(%)",
 }
 
 
@@ -1958,8 +2054,10 @@ MONEY_COLS = {
     "impressions", "clicks", "signups", "conversions", "cost_excl_vat", "cost_incl_vat",
     "cpc", "cpa", "revenue", "aov", "ga_conversions", "ga_revenue",
     "users", "new_users", "sessions", "transactions",
+    "returning_users", "pageviews", "admin_orders_total", "admin_orders_real", "admin_qty",
+    "admin_revenue", "admin_aov", "admin_returns", "ga_aov", "new_paying_customers", "cac",
 }
-PCT2_COLS = {"ctr", "cvr", "bounce_rate", "ecommerce_cvr", "signup_rate"}
+PCT2_COLS = {"ctr", "cvr", "bounce_rate", "ecommerce_cvr", "signup_rate", "price_rate", "return_rate", "ga_cvr"}
 PCT0_COLS = {"roas", "ga_roas"}
 
 
@@ -2592,6 +2690,33 @@ def render_upload_panel():
             st.rerun()
 
     st.sidebar.markdown("---")
+    inflow_file = st.sidebar.file_uploader(
+        "② 유입·매출 비교 데이터 업로드 (일별 GA·어드민 지표 비교 xlsx)", type=["xlsx", "xls"],
+        key="inflow_revenue_uploader",
+    )
+    if inflow_file is not None:
+        with st.sidebar.status("파일 분석 중...", expanded=True) as status2:
+            inflow_xls = pd.ExcelFile(inflow_file)
+            inflow_df = parse_inflow_revenue_sheet(inflow_xls)
+            if inflow_df.empty:
+                st.warning(
+                    f"'{INFLOW_REVENUE_SHEET}' 시트를 찾지 못했거나 일별 데이터가 없습니다. "
+                    "시트명이 정확한지 확인해주세요."
+                )
+            else:
+                st.write(
+                    f"🚶 일별 유입·매출 데이터 인식: {len(inflow_df)}일 "
+                    f"({inflow_df['report_date'].min()} ~ {inflow_df['report_date'].max()})"
+                )
+            status2.update(label="분석 완료", state="complete")
+
+        if st.sidebar.button("💾 유입·매출 데이터 저장하기", type="primary", key="inflow_save_btn"):
+            n_inflow = save_table("inflow_revenue_daily", inflow_df, "report_date", inflow_file.name)
+            st.cache_data.clear()
+            st.sidebar.success(f"저장 완료! 유입·매출 비교 {n_inflow}일")
+            st.rerun()
+
+    st.sidebar.markdown("---")
     wk = load_table("weekly_overview")
     st.sidebar.metric("누적 주간 데이터", f"{len(wk):,} 주")
     if st.sidebar.button("🔄 새로고침 (캐시 비우기)"):
@@ -2787,7 +2912,7 @@ def render_creative_performance(creatives: pd.DataFrame):
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과"],
-    "GA 유입 리포트": ["GA 유입경로", "GA4 라이브 리포트", "채널별 유입 분석"],
+    "GA 유입 리포트": ["GA 유입경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
     "가이드": ["가이드"],
 }
@@ -2804,7 +2929,7 @@ NAV_GROUP_KEYS = {
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
 # main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
-NAV_PAGES_COMING_SOON = {"마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드", "채널별 유입 분석"}
+NAV_PAGES_COMING_SOON = {"마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
 
 
 def render_coming_soon(page_name: str):
@@ -3241,6 +3366,124 @@ def render_ga_page(ga: pd.DataFrame):
         st.info("GA 유입경로 데이터가 아직 없습니다.")
 
 
+def render_inflow_revenue_page(df: pd.DataFrame):
+    """유입·매출 비교 — 형이 별도로 정리해서 준 '일별 GA·어드민 지표 비교' 파일 기반.
+    채널별이 아니라 사이트 전체 일별 합산 기준. ① 방문자 추이(GA 총/신규) ② 매출 비교
+    (어드민=회사 내부 기준 vs 보고서=매체 리포트 기준 vs GA 기준, 어드민 대비 격차%)로 구성."""
+    if df.empty:
+        st.info(
+            "아직 데이터가 없습니다. 왼쪽 사이드바 '② 유입·매출 비교 데이터 업로드'에서 "
+            "'일별 GA,어드민 지표 비교' 시트가 있는 파일을 올려주세요."
+        )
+        return
+
+    df = df.copy()
+    df["report_date"] = pd.to_datetime(df["report_date"]).dt.date
+    st.subheader("🔎 기간 필터")
+    min_d, max_d = df["report_date"].min(), df["report_date"].max()
+    start, end = period_filter(min_d, max_d, key="inflow", default_preset="이번달")
+    fd = df[(df["report_date"] >= start) & (df["report_date"] <= end)].sort_values("report_date")
+
+    if fd.empty:
+        st.info("선택한 기간에 데이터가 없습니다.")
+        return
+
+    # ── ① 방문자 추이 (GA 기준) ──
+    st.markdown("##### ① 방문자 추이 (GA 기준)")
+    users_sum = fd["users"].sum()
+    new_users_sum = fd["new_users"].sum()
+    new_ratio = (new_users_sum / users_sum * 100) if users_sum else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("총 방문자 합계", f"{users_sum:,.0f} 명")
+    c2.metric("신규 방문자 합계", f"{new_users_sum:,.0f} 명")
+    c3.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
+
+    visit_chart_df = fd.melt(
+        id_vars=["report_date"], value_vars=["users", "new_users"],
+        var_name="구분", value_name="방문자수",
+    )
+    visit_chart_df["구분"] = visit_chart_df["구분"].map({"users": "총 방문자", "new_users": "신규 방문자"})
+    fig_visit = px.line(
+        visit_chart_df, x="report_date", y="방문자수", color="구분", markers=True,
+        labels={"report_date": "일자"},
+    )
+    st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
+
+    # ── ② 매출 비교 (어드민 vs 보고서 vs GA) ──
+    st.markdown("##### ② 매출 비교")
+    st.caption("어드민 = 회사 내부(카페24 등 백엔드) 기준 매출 · 보고서 = 매체 리포트(광고 플랫폼) 기준 매출 · GA = GA 기준 매출")
+    admin_sum = fd["admin_revenue"].sum()
+    report_sum = fd["revenue"].sum()
+    ga_sum = fd["ga_revenue"].sum()
+    cost_sum = fd["cost_incl_vat"].sum()
+    gap_report = ((report_sum - admin_sum) / admin_sum * 100) if admin_sum else 0
+    gap_ga = ((ga_sum - admin_sum) / admin_sum * 100) if admin_sum else 0
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("어드민 매출(회사 내부 기준)", f"{admin_sum:,.0f} 원")
+    r2.metric("보고서 기준 매출", f"{report_sum:,.0f} 원", f"{gap_report:+.1f}% vs 어드민")
+    r3.metric("GA 기준 매출", f"{ga_sum:,.0f} 원", f"{gap_ga:+.1f}% vs 어드민")
+    st.caption(
+        "격차(%)는 어드민(회사 내부 기준) 매출 대비 초과/미달 비율입니다. "
+        "GA-매출은 쇼핑검색·GFA 외부몰 등 일부 데이터가 미집계될 수 있어 참고용으로 보는 걸 권장합니다."
+    )
+
+    revenue_chart_df = fd.melt(
+        id_vars=["report_date"], value_vars=["admin_revenue", "revenue", "ga_revenue"],
+        var_name="구분", value_name="매출",
+    )
+    revenue_chart_df["구분"] = revenue_chart_df["구분"].map({
+        "admin_revenue": "어드민(회사 내부)", "revenue": "보고서(매체 리포트)", "ga_revenue": "GA 기준",
+    })
+    fig_rev = px.line(
+        revenue_chart_df, x="report_date", y="매출", color="구분", markers=True,
+        labels={"report_date": "일자"},
+    )
+    st.plotly_chart(theme_chart(fig_rev), use_container_width=True)
+
+    # ── 일자별 상세 표 (정렬 가능) ──
+    detail_cols = ["report_date", "users", "new_users", "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas"]
+    detail = fd[detail_cols].copy()
+    detail["report_gap_pct"] = np.where(
+        detail["admin_revenue"] > 0, (detail["revenue"] - detail["admin_revenue"]) / detail["admin_revenue"] * 100, 0
+    )
+    detail["ga_gap_pct"] = np.where(
+        detail["admin_revenue"] > 0, (detail["ga_revenue"] - detail["admin_revenue"]) / detail["admin_revenue"] * 100, 0
+    )
+    final_cols = detail_cols + ["report_gap_pct", "ga_gap_pct"]
+
+    show = format_display(detail[detail_cols])
+    def _fmt_gap(v):
+        # 매체 리포트/GA 데이터가 아직 안 올라온 최근 며칠은 NaN이라 "-"로 표시 (0%로 오해하지 않도록).
+        if pd.isna(v):
+            return "-"
+        return f"{'▲' if v >= 0 else '▼'}{v:+.1f}%"
+
+    show["report_gap_pct"] = detail["report_gap_pct"].map(_fmt_gap)
+    show["ga_gap_pct"] = detail["ga_gap_pct"].map(_fmt_gap)
+
+    total_row = {
+        "report_date": "TOTAL",
+        "users": f"{users_sum:,.0f}",
+        "new_users": f"{new_users_sum:,.0f}",
+        "admin_revenue": f"{admin_sum:,.0f}",
+        "revenue": f"{report_sum:,.0f}",
+        "ga_revenue": f"{ga_sum:,.0f}",
+        "roas": f"{(report_sum / cost_sum * 100) if cost_sum else 0:.0f}%",
+        "ga_roas": f"{(ga_sum / cost_sum * 100) if cost_sum else 0:.0f}%",
+        "report_gap_pct": f"{'▲' if gap_report >= 0 else '▼'}{gap_report:+.1f}%",
+        "ga_gap_pct": f"{'▲' if gap_ga >= 0 else '▼'}{gap_ga:+.1f}%",
+    }
+    table = pd.concat([pd.DataFrame([total_row])[final_cols], show[final_cols]], ignore_index=True)
+    render_html_table(korify(table), raw=detail[["users", "new_users", "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas"]])
+
+    st.download_button(
+        "⬇️ 엑셀 다운로드 (유입·매출 비교)",
+        data=to_excel_bytes(korify(format_display(detail[detail_cols]))),
+        file_name="inflow_revenue_daily.xlsx",
+    )
+
+
 def render_ga4_page():
     looker_view_url = (
         "https://lookerstudio.google.com/u/0/reporting/"
@@ -3302,6 +3545,7 @@ def main():
     ga = load_table("ga_source")
     creatives = load_table("creative_performance")
     audience = load_table("channel_audience_snapshot")
+    inflow_revenue = load_table("inflow_revenue_daily")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -3325,6 +3569,8 @@ def main():
         render_ga_page(ga)
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
+    elif page == "유입·매출 비교":
+        render_inflow_revenue_page(inflow_revenue)
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
