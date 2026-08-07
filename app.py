@@ -3107,36 +3107,46 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
 
         kpi_cards(fw)
         st.markdown("### 주간 추이")
-        week_label_order = kor_date_labels(fw["week_start"], "day")
-        fw = fw.assign(주=week_label_order)
-        c1, c2 = st.columns(2)
-        with c1:
-            chart_df = fw.rename(columns={"cost_incl_vat": "광고비(VAT포함)", "revenue": "매출"})
-            fig = px.bar(
-                chart_df, x="주", y=["광고비(VAT포함)", "매출"], barmode="group",
-                title="주간 비용(VAT포함) vs 매출",
-                labels={"value": "금액(원)", "variable": "구분"},
-                category_orders={"주": week_label_order},
-            )
-            fig.update_yaxes(tickformat=",.0f")
-            fig.for_each_trace(
-                lambda t: t.update(
-                    hovertemplate=f"구분={t.name}<br>주 시작일=%{{x}}<br>금액(원)=%{{y:,.0f}}원<extra></extra>"
+        if fw.empty:
+            st.caption("선택한 기간(주간 기준)에 해당하는 데이터가 없습니다.")
+        else:
+            week_label_order = kor_date_labels(fw["week_start"], "day")
+            fw = fw.assign(주=week_label_order)
+            c1, c2 = st.columns(2)
+            with c1:
+                chart_df = fw.rename(columns={"cost_incl_vat": "광고비(VAT포함)", "revenue": "매출"})
+                fig = px.bar(
+                    chart_df, x="주", y=["광고비(VAT포함)", "매출"], barmode="group",
+                    title="주간 비용(VAT포함) vs 매출",
+                    labels={"value": "금액(원)", "variable": "구분"},
+                    category_orders={"주": week_label_order},
                 )
-            )
-            st.plotly_chart(theme_chart(fig), use_container_width=True)
-        with c2:
-            fig2 = px.line(
-                fw, x="주", y="roas", markers=True, title="주간 ROAS 추이 (%)",
-                labels={"roas": "ROAS(%)"},
-                category_orders={"주": week_label_order},
-            )
-            st.plotly_chart(theme_chart(fig2), use_container_width=True)
+                fig.update_yaxes(tickformat=",.0f")
+                fig.for_each_trace(
+                    lambda t: t.update(
+                        hovertemplate=f"구분={t.name}<br>주 시작일=%{{x}}<br>금액(원)=%{{y:,.0f}}원<extra></extra>"
+                    )
+                )
+                st.plotly_chart(theme_chart(fig), use_container_width=True)
+            with c2:
+                fig2 = px.line(
+                    fw, x="주", y="roas", markers=True, title="주간 ROAS 추이 (%)",
+                    labels={"roas": "ROAS(%)"},
+                    category_orders={"주": week_label_order},
+                )
+                st.plotly_chart(theme_chart(fig2), use_container_width=True)
 
-        if not monthly.empty:
+        # 플레이스홀더로 미리 만들어둔 빈 월(광고비 0원)까지 그리면 옛날~올해가 다 이어진 밋밋한
+        # 0선이 껴서 정작 보고 싶은 최근 구간이 눌려 보인다 — 실제로 집행된(광고비>0) 달만 그린다.
+        monthly_real = (
+            monthly[monthly["cost_incl_vat"] > 0]
+            if not monthly.empty and "cost_incl_vat" in monthly.columns
+            else monthly
+        )
+        if not monthly_real.empty:
             st.markdown("---")
             st.markdown("### 월별 GA-ROAS vs 플랫폼 ROAS")
-            fm_chart = add_kpis(monthly).sort_values("report_month").rename(
+            fm_chart = add_kpis(monthly_real).sort_values("report_month").rename(
                 columns={"roas": "플랫폼 ROAS", "ga_roas": "GA ROAS"}
             )
             month_label_order = kor_date_labels(fm_chart["report_month"], "month")
@@ -3148,7 +3158,7 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
                 category_orders={"월": month_label_order},
             )
             st.plotly_chart(theme_chart(fig3), use_container_width=True)
-            st.caption("* GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
+            st.caption("* 광고비가 집행된 달만 표시합니다 (미집행 빈 달 제외). GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
 
         st.markdown("---")
         st.markdown("## 📚 누적 데이터")
