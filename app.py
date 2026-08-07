@@ -3693,15 +3693,40 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     else:
         st.caption("※ '매체'(채널 그룹핑) 매핑은 아직 반영 전이라 전부 비어있습니다 — 매핑 완료 파일을 다시 올리면 채워집니다.")
 
+    # ── ① 방문자 추이 (GA 기준) — '유입·매출 비교' 페이지와 동일한 카드 구성 ──
+    st.markdown("##### ① 방문자 추이 (GA 기준)")
     users_sum = fd["users"].sum()
     new_users_sum = fd["new_users"].sum()
-    conv_sum = fd["conversions"].sum()
-    rev_sum = fd["revenue"].sum()
-    c1, c2, c3, c4 = st.columns(4)
+    returning_users_sum = fd["returning_users"].sum()
+    new_ratio = (new_users_sum / users_sum * 100) if users_sum else 0
+    returning_ratio = (returning_users_sum / users_sum * 100) if users_sum else 0
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("총 방문자 합계", f"{users_sum:,.0f} 명")
     c2.metric("신규 방문자 합계", f"{new_users_sum:,.0f} 명")
-    c3.metric("구매 합계", f"{conv_sum:,.0f} 건")
-    c4.metric("매출 합계", f"{rev_sum:,.0f} 원")
+    c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
+    c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
+    c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
+
+    # 소스/매체별로 나뉜 데이터를 날짜 기준으로 다시 합쳐서(전체 소스/매체 합산) 일별 추이를 그린다.
+    daily_trend = fd.groupby("report_date", as_index=False).agg(users=("users", "sum"), new_users=("new_users", "sum"))
+    visit_chart_df = daily_trend.melt(
+        id_vars=["report_date"], value_vars=["users", "new_users"],
+        var_name="구분", value_name="방문자수",
+    )
+    visit_chart_df["구분"] = visit_chart_df["구분"].map({"users": "총 방문자", "new_users": "신규 방문자"})
+    fig_visit = px.line(
+        visit_chart_df, x="report_date", y="방문자수", color="구분", markers=True,
+        labels={"report_date": "일자"},
+    )
+    st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
+
+    # ── ② 구매·매출 합계 ──
+    st.markdown("##### ② 구매·매출 합계")
+    conv_sum = fd["conversions"].sum()
+    rev_sum = fd["revenue"].sum()
+    r1, r2 = st.columns(2)
+    r1.metric("구매 합계", f"{conv_sum:,.0f} 건")
+    r2.metric("매출 합계", f"{rev_sum:,.0f} 원")
 
     # 선택 기간 안에서 소스/매체 단위로 합산(방문자·조회수·구매·매출은 합, 이탈률·체류시간은 평균).
     agg = (
@@ -3721,15 +3746,15 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
         .reset_index(drop=True)
     )
 
-    st.markdown("##### ① 소스/매체별 방문자 TOP 15")
-    top15 = agg.head(15)
+    st.markdown("##### ③ 소스/매체별 방문자 TOP 5")
+    top5 = agg.head(5)
     fig_top = px.bar(
-        top15, x="source_medium", y="users",
+        top5, x="source_medium", y="users",
         labels={"source_medium": "세션 소스/매체", "users": "총 방문자"},
     )
     st.plotly_chart(theme_chart(fig_top), use_container_width=True)
 
-    st.markdown("##### ② 소스/매체별 상세 표")
+    st.markdown("##### ④ 소스/매체별 상세 표")
     st.caption("TOTAL 행은 현재 페이지가 아니라 선택한 기간 전체(모든 소스/매체) 기준 합계입니다.")
 
     total = len(agg)
