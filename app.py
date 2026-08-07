@@ -2087,11 +2087,13 @@ def format_display(df: pd.DataFrame) -> pd.DataFrame:
 KOR_COLS_REV = {v: k for k, v in KOR_COLS.items()}
 
 
-def render_html_table(table: pd.DataFrame, raw: pd.DataFrame = None):
+def render_html_table(table: pd.DataFrame, raw: pd.DataFrame = None, raw_label_map: dict = None):
     """pandas Styler(jinja2 의존) 없이 순수 HTML로 표를 그린다.
     ▲(상승)는 빨간색, ▼(하락)는 파란색 글씨로 표시하고, 인덱스는 표시하지 않는다.
     raw(원본 숫자 컬럼, TOTAL 행 제외 · table의 데이터 행과 같은 순서)를 넘기면 raw에 있는
-    숫자 컬럼에 한해 헤더를 클릭해 오름차순/내림차순 정렬할 수 있다(TOTAL 행은 항상 고정)."""
+    숫자 컬럼에 한해 헤더를 클릭해 오름차순/내림차순 정렬할 수 있다(TOTAL 행은 항상 고정).
+    raw_label_map(화면표시 헤더 → 원본 컬럼명)을 따로 주면, 공용 KOR_COLS 대신 이 표 전용
+    라벨(예: "매체-매출")로 정렬 매칭을 한다 — 페이지마다 다른 이름을 쓰고 싶을 때 사용."""
     if table.empty:
         st.caption("데이터가 아직 없습니다.")
         return
@@ -2101,7 +2103,7 @@ def render_html_table(table: pd.DataFrame, raw: pd.DataFrame = None):
     sortable_keys = {}
     if raw is not None:
         for c in cols:
-            orig = KOR_COLS_REV.get(c)
+            orig = (raw_label_map or {}).get(c) or KOR_COLS_REV.get(c)
             if orig and orig in raw.columns and pd.api.types.is_numeric_dtype(raw[orig]):
                 sortable_keys[c] = orig
 
@@ -3445,8 +3447,32 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     )
     st.plotly_chart(theme_chart(fig_rev), use_container_width=True)
 
-    # ── 일자별 상세 표 (정렬 가능) ──
-    detail_cols = ["report_date", "users", "new_users", "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas"]
+    # ── 일자별 상세 표 (정렬 가능) — 형이 정리한 엑셀 양식(사용자→신규방문자→재방문자→이탈률→
+    # 페이지뷰→평균체류시간→어드민/매체/GA 매출→매체/GA-ROAS→어드민 대비 비교) 그대로 맞춘다.
+    # "매출"/"ROAS"/"어드민 매출" 같은 이름은 다른 페이지에서도 공용으로 쓰는 라벨이라 KOR_COLS를
+    # 바꾸면 거기까지 다 바뀌어버리므로, 이 표에서만 쓸 라벨을 따로 둔다.
+    INFLOW_DETAIL_LABELS = {
+        "report_date": "일자",
+        "users": "총 방문자",
+        "new_users": "신규방문자",
+        "returning_users": "재방문자",
+        "bounce_rate": "이탈률",
+        "pageviews": "페이지뷰",
+        "avg_session_duration": "평균 체류시간",
+        "admin_revenue": "어드민-매출",
+        "revenue": "매체-매출",
+        "ga_revenue": "GA-매출",
+        "roas": "매체-ROAS",
+        "ga_roas": "GA-ROAS",
+        "report_gap_pct": "어드민-매체 매출 비교",
+        "ga_gap_pct": "어드민-GA 매출 비교",
+    }
+    INFLOW_DETAIL_LABELS_REV = {v: k for k, v in INFLOW_DETAIL_LABELS.items()}
+
+    detail_cols = [
+        "report_date", "users", "new_users", "returning_users", "bounce_rate", "pageviews",
+        "avg_session_duration", "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas",
+    ]
     detail = fd[detail_cols].copy()
     detail["report_gap_pct"] = np.where(
         detail["admin_revenue"] > 0, (detail["revenue"] - detail["admin_revenue"]) / detail["admin_revenue"] * 100, 0
@@ -3457,6 +3483,7 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     final_cols = detail_cols + ["report_gap_pct", "ga_gap_pct"]
 
     show = format_display(detail[detail_cols])
+
     def _fmt_gap(v):
         # 매체 리포트/GA 데이터가 아직 안 올라온 최근 며칠은 NaN이라 "-"로 표시 (0%로 오해하지 않도록).
         if pd.isna(v):
@@ -3466,10 +3493,15 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     show["report_gap_pct"] = detail["report_gap_pct"].map(_fmt_gap)
     show["ga_gap_pct"] = detail["ga_gap_pct"].map(_fmt_gap)
 
+    returning_users_sum = fd["returning_users"].sum()  # (위 ①에서도 계산하지만 이 표 TOTAL 행에도 필요)
     total_row = {
         "report_date": "TOTAL",
         "users": f"{users_sum:,.0f}",
         "new_users": f"{new_users_sum:,.0f}",
+        "returning_users": f"{returning_users_sum:,.0f}",
+        "bounce_rate": f"{fd['bounce_rate'].mean():.2f}%" if fd["bounce_rate"].notna().any() else "-",
+        "pageviews": f"{fd['pageviews'].sum():,.0f}",
+        "avg_session_duration": f"{fd['avg_session_duration'].mean():,.0f}" if fd["avg_session_duration"].notna().any() else "-",
         "admin_revenue": f"{admin_sum:,.0f}",
         "revenue": f"{report_sum:,.0f}",
         "ga_revenue": f"{ga_sum:,.0f}",
@@ -3479,11 +3511,16 @@ def render_inflow_revenue_page(df: pd.DataFrame):
         "ga_gap_pct": f"{'▲' if gap_ga >= 0 else '▼'}{gap_ga:+.1f}%",
     }
     table = pd.concat([pd.DataFrame([total_row])[final_cols], show[final_cols]], ignore_index=True)
-    render_html_table(korify(table), raw=detail[["users", "new_users", "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas"]])
+    table = table.rename(columns=INFLOW_DETAIL_LABELS)
+    raw_numeric_cols = [
+        "users", "new_users", "returning_users", "bounce_rate", "pageviews", "avg_session_duration",
+        "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas",
+    ]
+    render_html_table(table, raw=detail[raw_numeric_cols], raw_label_map=INFLOW_DETAIL_LABELS_REV)
 
     st.download_button(
         "⬇️ 엑셀 다운로드 (유입·매출 비교)",
-        data=to_excel_bytes(korify(format_display(detail[detail_cols]))),
+        data=to_excel_bytes(format_display(detail[detail_cols]).rename(columns=INFLOW_DETAIL_LABELS)),
         file_name="inflow_revenue_daily.xlsx",
     )
 
