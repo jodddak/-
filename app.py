@@ -1971,12 +1971,15 @@ def korify(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=KOR_COLS)
 
 
-DATE_PRESETS = [
+# 종합 대시보드(주간 추이)만 예전처럼 전체 프리셋을 쓰고, 나머지 페이지는 아래 축약판을 쓴다
+# (형이 "오늘/어제/지난주/지난달/이번달/직접선택 6개만 남기고 줄여달라"고 요청 — 종합 대시보드는 제외).
+DATE_PRESETS_FULL = [
     "오늘", "어제", "이번주", "지난주",
     "최근 7일(오늘 포함)", "최근 7일(오늘 제외)",
     "이번달", "지난달",
     "최근 30일(오늘 포함)", "최근 30일(오늘 제외)",
 ]
+DATE_PRESETS_SHORT = ["오늘", "어제", "지난주", "지난달", "이번달"]
 
 
 def _preset_to_range(name: str, min_d: date, max_d: date):
@@ -2014,13 +2017,15 @@ def _preset_to_range(name: str, min_d: date, max_d: date):
     return s, e
 
 
-DATE_PERIOD_OPTIONS = DATE_PRESETS + ["전체", "직접선택"]
+DATE_PERIOD_OPTIONS_FULL = DATE_PRESETS_FULL + ["전체", "직접선택"]
+DATE_PERIOD_OPTIONS = DATE_PRESETS_SHORT + ["직접선택"]
 
 
-def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이번달"):
+def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이번달", options: list = None):
     """날짜 프리셋 버튼 목록(누적 표의 preset_button_picker와 동일한 방식) + 직접선택 달력.
-    버튼 아래에 실제로 적용된 날짜범위를 항상 캡션으로 보여준다. 반환값은 (start, end)."""
-    preset = preset_button_picker(DATE_PERIOD_OPTIONS, key=f"{key}_dateperiod", default=default_preset)
+    버튼 아래에 실제로 적용된 날짜범위를 항상 캡션으로 보여준다. 반환값은 (start, end).
+    options를 안 주면 축약판(오늘/어제/지난주/지난달/이번달/직접선택) 6개만 쓴다."""
+    preset = preset_button_picker(options or DATE_PERIOD_OPTIONS, key=f"{key}_dateperiod", default=default_preset)
 
     if preset == "전체":
         start, end = min_d, max_d
@@ -3001,7 +3006,7 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
     if not weekly.empty:
         st.subheader("🔎 기간 필터 (주간 기준)")
         min_d, max_d = weekly["week_start"].min(), weekly["week_end"].max()
-        start, end = period_filter(min_d, max_d, key="weekly")
+        start, end = period_filter(min_d, max_d, key="weekly", options=DATE_PERIOD_OPTIONS_FULL)
         fw = weekly[(weekly["week_start"] >= start) & (weekly["week_start"] <= end)]
         fw = add_kpis(fw).sort_values("week_start")
 
