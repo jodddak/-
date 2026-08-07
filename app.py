@@ -1157,8 +1157,9 @@ INFLOW_REVENUE_COL_MAP = [
     (3, "returning_users", None),
     (4, "signups", None),
     (5, "bounce_rate", 100),
-    (6, "avg_session_duration", None),
-    # 7번(인덱스7)은 "3분 26초" 형태 텍스트 중복 컬럼이라 건너뜀
+    # 6번(인덱스6, 숫자 초 단위)은 실제로는 대부분 비어있고(372행 중 31행만 값 존재),
+    # 7번(인덱스7, "3분 26초" 텍스트)이 거의 매일 채워져 있어서 이쪽을 파싱해서 쓴다 — 아래
+    # avg_session_duration 처리 참고. 6번은 그래서 COL_MAP에서 건너뛴다.
     (8, "pageviews", None),
     (9, "admin_orders_total", None),
     (10, "admin_orders_real", None),
@@ -1215,6 +1216,18 @@ def parse_inflow_revenue_sheet(xls: pd.ExcelFile):
         if scale:
             col = col * scale
         out[name] = col
+
+    # 평균 체류시간 — "3분 26초" 같은 텍스트(8번째 열, 인덱스7)를 초 단위 숫자로 변환.
+    if raw.shape[1] > 7:
+        dur_text = raw.iloc[:, 7].astype(str)
+        dur_match = dur_text.str.extract(r"(?:(\d+)\s*분)?\s*(?:(\d+)\s*초)?")
+        minutes = pd.to_numeric(dur_match[0], errors="coerce").fillna(0)
+        seconds = pd.to_numeric(dur_match[1], errors="coerce").fillna(0)
+        parsed = minutes * 60 + seconds
+        parsed[~dur_text.str.contains("분|초", na=False)] = pd.NA
+        out["avg_session_duration"] = parsed
+    else:
+        out["avg_session_duration"] = pd.NA
 
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce")
     out = out.dropna(subset=["report_date", "users"]).copy()
@@ -3482,7 +3495,15 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     )
     final_cols = detail_cols + ["report_gap_pct", "ga_gap_pct"]
 
+    def _fmt_duration(v):
+        # 초 단위 숫자를 "3분 26초" 형태로 되돌려 보여준다 (원본 엑셀 표기와 맞춤).
+        if pd.isna(v):
+            return "-"
+        v = int(round(v))
+        return f"{v // 60}분 {v % 60}초"
+
     show = format_display(detail[detail_cols])
+    show["avg_session_duration"] = detail["avg_session_duration"].map(_fmt_duration)
 
     def _fmt_gap(v):
         # 매체 리포트/GA 데이터가 아직 안 올라온 최근 며칠은 NaN이라 "-"로 표시 (0%로 오해하지 않도록).
@@ -3501,7 +3522,7 @@ def render_inflow_revenue_page(df: pd.DataFrame):
         "returning_users": f"{returning_users_sum:,.0f}",
         "bounce_rate": f"{fd['bounce_rate'].mean():.2f}%" if fd["bounce_rate"].notna().any() else "-",
         "pageviews": f"{fd['pageviews'].sum():,.0f}",
-        "avg_session_duration": f"{fd['avg_session_duration'].mean():,.0f}" if fd["avg_session_duration"].notna().any() else "-",
+        "avg_session_duration": _fmt_duration(fd["avg_session_duration"].mean()),
         "admin_revenue": f"{admin_sum:,.0f}",
         "revenue": f"{report_sum:,.0f}",
         "ga_revenue": f"{ga_sum:,.0f}",
@@ -3518,9 +3539,11 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     ]
     render_html_table(table, raw=detail[raw_numeric_cols], raw_label_map=INFLOW_DETAIL_LABELS_REV)
 
+    dl_df = format_display(detail[detail_cols])
+    dl_df["avg_session_duration"] = detail["avg_session_duration"].map(_fmt_duration)
     st.download_button(
         "⬇️ 엑셀 다운로드 (유입·매출 비교)",
-        data=to_excel_bytes(format_display(detail[detail_cols]).rename(columns=INFLOW_DETAIL_LABELS)),
+        data=to_excel_bytes(dl_df.rename(columns=INFLOW_DETAIL_LABELS)),
         file_name="inflow_revenue_daily.xlsx",
     )
 
