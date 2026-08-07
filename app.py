@@ -426,6 +426,15 @@ def theme_chart(fig):
     return fig
 
 
+def kor_date_labels(dates, unit="day"):
+    """date 값들을 한글 라벨(예: '8월 1일', '2026년 8월') 리스트로 변환.
+    Plotly에 date 타입을 그대로 x축으로 주면 기본 영문(예: 'Aug 1')으로 표시되므로,
+    차트를 그리기 전 이 라벨로 바꾸고 px.line/px.bar의 category_orders로 순서를 고정해서 쓴다."""
+    if unit == "month":
+        return [f"{d.year}년 {d.month}월" for d in dates]
+    return [f"{d.month}월 {d.day}일" for d in dates]
+
+
 def inject_theme():
     st.markdown(
         f"""
@@ -3098,13 +3107,16 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
 
         kpi_cards(fw)
         st.markdown("### 주간 추이")
+        week_label_order = kor_date_labels(fw["week_start"], "day")
+        fw = fw.assign(주=week_label_order)
         c1, c2 = st.columns(2)
         with c1:
             chart_df = fw.rename(columns={"cost_incl_vat": "광고비(VAT포함)", "revenue": "매출"})
             fig = px.bar(
-                chart_df, x="week_start", y=["광고비(VAT포함)", "매출"], barmode="group",
+                chart_df, x="주", y=["광고비(VAT포함)", "매출"], barmode="group",
                 title="주간 비용(VAT포함) vs 매출",
-                labels={"week_start": "주 시작일", "value": "금액(원)", "variable": "구분"},
+                labels={"value": "금액(원)", "variable": "구분"},
+                category_orders={"주": week_label_order},
             )
             fig.update_yaxes(tickformat=",.0f")
             fig.for_each_trace(
@@ -3115,8 +3127,9 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
             st.plotly_chart(theme_chart(fig), use_container_width=True)
         with c2:
             fig2 = px.line(
-                fw, x="week_start", y="roas", markers=True, title="주간 ROAS 추이 (%)",
-                labels={"week_start": "주 시작일", "roas": "ROAS(%)"},
+                fw, x="주", y="roas", markers=True, title="주간 ROAS 추이 (%)",
+                labels={"roas": "ROAS(%)"},
+                category_orders={"주": week_label_order},
             )
             st.plotly_chart(theme_chart(fig2), use_container_width=True)
 
@@ -3126,10 +3139,13 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
             fm_chart = add_kpis(monthly).sort_values("report_month").rename(
                 columns={"roas": "플랫폼 ROAS", "ga_roas": "GA ROAS"}
             )
+            month_label_order = kor_date_labels(fm_chart["report_month"], "month")
+            fm_chart = fm_chart.assign(월=month_label_order)
             fig3 = px.line(
-                fm_chart, x="report_month", y=["플랫폼 ROAS", "GA ROAS"], markers=True,
-                labels={"report_month": "월", "value": "ROAS(%)", "variable": "기준"},
+                fm_chart, x="월", y=["플랫폼 ROAS", "GA ROAS"], markers=True,
+                labels={"value": "ROAS(%)", "variable": "기준"},
                 title="플랫폼 리포팅 ROAS vs GA 기준 ROAS",
+                category_orders={"월": month_label_order},
             )
             st.plotly_chart(theme_chart(fig3), use_container_width=True)
             st.caption("* GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
@@ -3508,14 +3524,16 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
 
+    day_label_order = kor_date_labels(fd["report_date"], "day")
+    fd = fd.assign(일자=day_label_order)
     visit_chart_df = fd.melt(
-        id_vars=["report_date"], value_vars=["users", "new_users"],
+        id_vars=["일자"], value_vars=["users", "new_users"],
         var_name="구분", value_name="방문자수",
     )
     visit_chart_df["구분"] = visit_chart_df["구분"].map({"users": "총 방문자", "new_users": "신규 방문자"})
     fig_visit = px.line(
-        visit_chart_df, x="report_date", y="방문자수", color="구분", markers=True,
-        labels={"report_date": "일자"},
+        visit_chart_df, x="일자", y="방문자수", color="구분", markers=True,
+        category_orders={"일자": day_label_order},
     )
     st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
 
@@ -3539,15 +3557,15 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     )
 
     revenue_chart_df = fd.melt(
-        id_vars=["report_date"], value_vars=["admin_revenue", "revenue", "ga_revenue"],
+        id_vars=["일자"], value_vars=["admin_revenue", "revenue", "ga_revenue"],
         var_name="구분", value_name="매출",
     )
     revenue_chart_df["구분"] = revenue_chart_df["구분"].map({
         "admin_revenue": "어드민(회사 내부)", "revenue": "보고서(매체 리포트)", "ga_revenue": "GA 기준",
     })
     fig_rev = px.line(
-        revenue_chart_df, x="report_date", y="매출", color="구분", markers=True,
-        labels={"report_date": "일자"},
+        revenue_chart_df, x="일자", y="매출", color="구분", markers=True,
+        category_orders={"일자": day_label_order},
     )
     st.plotly_chart(theme_chart(fig_rev), use_container_width=True)
 
@@ -3708,15 +3726,19 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
 
     # 소스/매체별로 나뉜 데이터를 날짜 기준으로 다시 합쳐서(전체 소스/매체 합산) 일별 추이를 그린다.
-    daily_trend = fd.groupby("report_date", as_index=False).agg(users=("users", "sum"), new_users=("new_users", "sum"))
+    daily_trend = fd.groupby("report_date", as_index=False).agg(
+        users=("users", "sum"), new_users=("new_users", "sum")
+    ).sort_values("report_date")
+    date_label_order = kor_date_labels(daily_trend["report_date"], "day")
+    daily_trend["일자"] = date_label_order
     visit_chart_df = daily_trend.melt(
-        id_vars=["report_date"], value_vars=["users", "new_users"],
+        id_vars=["일자"], value_vars=["users", "new_users"],
         var_name="구분", value_name="방문자수",
     )
     visit_chart_df["구분"] = visit_chart_df["구분"].map({"users": "총 방문자", "new_users": "신규 방문자"})
     fig_visit = px.line(
-        visit_chart_df, x="report_date", y="방문자수", color="구분", markers=True,
-        labels={"report_date": "일자"},
+        visit_chart_df, x="일자", y="방문자수", color="구분", markers=True,
+        category_orders={"일자": date_label_order},
     )
     st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
 
