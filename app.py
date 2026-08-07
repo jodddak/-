@@ -3674,6 +3674,14 @@ GA_CHANNEL_DETAIL_COLS = [
     "source_medium", "channel", "users", "new_users", "returning_users",
     "bounce_rate", "pageviews", "avg_session_duration", "conversions", "revenue",
 ]
+# ③ TOP 10 탭에서 쓰는 (컬럼명, 탭 라벨) 순서 — 형이 요청한 순서(총방문자→신규→재방문→구매→매출) 그대로.
+GA_CHANNEL_TOP_METRICS = [
+    ("users", "총 방문자"),
+    ("new_users", "신규 방문자"),
+    ("returning_users", "재방문자"),
+    ("conversions", "구매"),
+    ("revenue", "매출"),
+]
 
 
 def _fmt_duration_padded(v):
@@ -3768,13 +3776,16 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
         .reset_index(drop=True)
     )
 
-    st.markdown("##### ③ 소스/매체별 방문자 TOP 5")
-    top5 = agg.head(5)
-    fig_top = px.bar(
-        top5, x="source_medium", y="users",
-        labels={"source_medium": "세션 소스/매체", "users": "총 방문자"},
-    )
-    st.plotly_chart(theme_chart(fig_top), use_container_width=True)
+    st.markdown("##### ③ 소스/매체별 TOP 10")
+    metric_tabs = st.tabs([label for _, label in GA_CHANNEL_TOP_METRICS])
+    for tab_widget, (metric_col, metric_label) in zip(metric_tabs, GA_CHANNEL_TOP_METRICS):
+        with tab_widget:
+            top10 = agg.sort_values(metric_col, ascending=False).head(10)
+            fig_top = px.bar(
+                top10, x="source_medium", y=metric_col,
+                labels={"source_medium": "세션 소스/매체", metric_col: metric_label},
+            )
+            st.plotly_chart(theme_chart(fig_top), use_container_width=True, key=f"ga_channel_top_{metric_col}")
 
     st.markdown("##### ④ 소스/매체별 상세 표")
     st.caption("TOTAL 행은 현재 페이지가 아니라 선택한 기간 전체(모든 소스/매체) 기준 합계입니다.")
