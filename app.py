@@ -626,6 +626,7 @@ TABLES = {
     "creative_performance": "creative_performance",
     "channel_audience_snapshot": "channel_audience_snapshot",
     "inflow_revenue_daily": "inflow_revenue_daily",
+    "ga_channel_inflow": "ga_channel_inflow",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -1232,6 +1233,64 @@ def parse_inflow_revenue_sheet(xls: pd.ExcelFile):
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce")
     out = out.dropna(subset=["report_date", "users"]).copy()
     out["report_date"] = out["report_date"].dt.date
+    return out.reset_index(drop=True)
+
+
+# (엑셀 열 위치 0-based, 우리 컬럼명, 퍼센트 변환 배수) — 형이 준 'GA 매체별 유입 경로' 파일은
+# 뒤쪽에 빈 컬럼(Unnamed: 10)과 실수로 헤더 칸에 메모("평균체류시간은 0분 0초 이렇게 바꿔줄래?")가
+# 들어간 컬럼이 더 붙어있어서, 이름 기준이 아니라 위치 기준(앞 10개 컬럼만)으로 읽어야 안전하다.
+GA_CHANNEL_INFLOW_COL_MAP = [
+    (0, "report_date", None),
+    (1, "source_medium", None),
+    (2, "users", None),
+    (3, "new_users", None),
+    (4, "returning_users", None),
+    (5, "bounce_rate", 100),
+    (6, "pageviews", None),
+    (7, "avg_session_duration", None),  # 이 파일은 이미 초 단위 숫자라 텍스트 파싱이 필요 없음
+    (8, "conversions", None),
+    (9, "revenue", None),
+]
+
+
+def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile):
+    """형이 새로 준 'GA 매체별 유입 경로 (기간).xlsx' 파일 전용 파서.
+    날짜×세션 소스/매체 단위로 하루 단위 데이터가 들어있다(하루에 소스/매체별로 한 행씩).
+    '매체'(채널 그룹핑, 예: 네이버 검색광고/구글(P-MAX) 등)는 아직 UTM 매핑 전이라 파일에
+    아예 없는 상태 — 여기서는 channel을 전부 None으로 저장해두고, 나중에 매핑이 채워진
+    파일을 다시 올리면 그 값으로 갱신되게 한다."""
+    if not xls.sheet_names:
+        return pd.DataFrame()
+    sheet = xls.sheet_names[0]
+    raw = pd.read_excel(xls, sheet_name=sheet, header=0)
+    if raw.empty:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(index=raw.index)
+    for idx, name, scale in GA_CHANNEL_INFLOW_COL_MAP:
+        if idx >= raw.shape[1]:
+            out[name] = pd.NA
+            continue
+        col = raw.iloc[:, idx]
+        if name in ("report_date", "source_medium"):
+            out[name] = col
+            continue
+        col = pd.to_numeric(col, errors="coerce")
+        if scale:
+            col = col * scale
+        out[name] = col
+
+    # 날짜가 "2026. 1. 1." 같은 텍스트 포맷이라 고정 포맷으로 우선 파싱하고, 혹시 다른 형식이
+    # 섞여 들어와도 죽지 않도록 실패한 행만 일반 파싱으로 한 번 더 시도한다.
+    parsed = pd.to_datetime(out["report_date"], errors="coerce", format="%Y. %m. %d.")
+    fallback = parsed.isna()
+    if fallback.any():
+        parsed.loc[fallback] = pd.to_datetime(out.loc[fallback, "report_date"], errors="coerce")
+    out["report_date"] = parsed
+
+    out = out.dropna(subset=["report_date", "source_medium"]).copy()
+    out["report_date"] = out["report_date"].dt.date
+    out["channel"] = None
     return out.reset_index(drop=True)
 
 
@@ -2737,6 +2796,33 @@ def render_upload_panel():
             st.rerun()
 
     st.sidebar.markdown("---")
+    ga_channel_file = st.sidebar.file_uploader(
+        "③ GA 매체별 유입 경로 데이터 업로드 (GA 매체별 유입 경로 xlsx)", type=["xlsx", "xls"],
+        key="ga_channel_inflow_uploader",
+    )
+    if ga_channel_file is not None:
+        with st.sidebar.status("파일 분석 중...", expanded=True) as status3:
+            ga_channel_xls = pd.ExcelFile(ga_channel_file)
+            ga_channel_df = parse_ga_channel_inflow_sheet(ga_channel_xls)
+            if ga_channel_df.empty:
+                st.warning("데이터를 인식하지 못했습니다. 파일 형식(날짜/세션 소스/매체 컬럼 포함)을 확인해주세요.")
+            else:
+                st.write(
+                    f"🔎 GA 매체별 유입 경로 인식: {len(ga_channel_df)}행 "
+                    f"({ga_channel_df['report_date'].min()} ~ {ga_channel_df['report_date'].max()}, "
+                    f"소스/매체 {ga_channel_df['source_medium'].nunique()}종)"
+                )
+                if ga_channel_df["channel"].isna().all():
+                    st.caption("※ '매체'(채널 그룹핑) 컬럼은 아직 비어있습니다 — UTM 매핑이 반영된 파일을 다시 올리면 채워집니다.")
+            status3.update(label="분석 완료", state="complete")
+
+        if st.sidebar.button("💾 GA 매체별 유입 경로 저장하기", type="primary", key="ga_channel_save_btn"):
+            n_ga_channel = save_table("ga_channel_inflow", ga_channel_df, "report_date,source_medium", ga_channel_file.name)
+            st.cache_data.clear()
+            st.sidebar.success(f"저장 완료! GA 매체별 유입 경로 {n_ga_channel}행")
+            st.rerun()
+
+    st.sidebar.markdown("---")
     wk = load_table("weekly_overview")
     st.sidebar.metric("누적 주간 데이터", f"{len(wk):,} 주")
     if st.sidebar.button("🔄 새로고침 (캐시 비우기)"):
@@ -2932,7 +3018,7 @@ def render_creative_performance(creatives: pd.DataFrame):
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과"],
-    "GA 유입 리포트": ["GA 유입경로", "GA4 라이브 리포트", "유입·매출 비교"],
+    "GA 유입 리포트": ["GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
     "가이드": ["가이드"],
 }
@@ -3553,6 +3639,142 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     )
 
 
+GA_CHANNEL_LABELS = {
+    "source_medium": "세션 소스/매체",
+    "channel": "매체",
+    "users": "총 방문자",
+    "new_users": "신규 방문자",
+    "returning_users": "재 방문자",
+    "bounce_rate": "이탈률",
+    "pageviews": "조회수",
+    "avg_session_duration": "평균 체류 시간",
+    "conversions": "구매",
+    "revenue": "매출",
+}
+GA_CHANNEL_LABELS_REV = {v: k for k, v in GA_CHANNEL_LABELS.items()}
+GA_CHANNEL_DETAIL_COLS = [
+    "source_medium", "channel", "users", "new_users", "returning_users",
+    "bounce_rate", "pageviews", "avg_session_duration", "conversions", "revenue",
+]
+
+
+def _fmt_duration_padded(v):
+    # "00분 00초" 형태로 0을 채워서 보여준다 (형이 요청한 포맷).
+    if pd.isna(v):
+        return "-"
+    v = int(round(v))
+    return f"{v // 60:02d}분 {v % 60:02d}초"
+
+
+def render_ga_channel_inflow_page(df: pd.DataFrame):
+    """GA 매체별 유입 경로 — 세션 소스/매체 단위 일별 데이터를 기간 합산해서 보여준다.
+    '매체'(채널 그룹핑, 예: 네이버 검색광고/구글(P-MAX) 등)는 형이 UTM 매핑을 완료해서
+    다시 올리기 전까지는 비어있는 게 정상이다."""
+    if df.empty:
+        st.info(
+            "아직 데이터가 없습니다. 왼쪽 사이드바 '③ GA 매체별 유입 경로 데이터 업로드'에서 "
+            "파일을 올려주세요."
+        )
+        return
+
+    df = df.copy()
+    df["report_date"] = pd.to_datetime(df["report_date"]).dt.date
+    st.subheader("🔎 기간 필터")
+    min_d, max_d = df["report_date"].min(), df["report_date"].max()
+    start, end = period_filter(min_d, max_d, key="ga_channel", default_preset="이번달")
+    fd = df[(df["report_date"] >= start) & (df["report_date"] <= end)]
+
+    if fd.empty:
+        st.info("선택한 기간에 데이터가 없습니다.")
+        return
+
+    if fd["channel"].notna().any():
+        st.caption("※ '매체' 컬럼은 UTM 매핑이 반영된 소스/매체만 채워져 있습니다.")
+    else:
+        st.caption("※ '매체'(채널 그룹핑) 매핑은 아직 반영 전이라 전부 비어있습니다 — 매핑 완료 파일을 다시 올리면 채워집니다.")
+
+    users_sum = fd["users"].sum()
+    new_users_sum = fd["new_users"].sum()
+    conv_sum = fd["conversions"].sum()
+    rev_sum = fd["revenue"].sum()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("총 방문자 합계", f"{users_sum:,.0f} 명")
+    c2.metric("신규 방문자 합계", f"{new_users_sum:,.0f} 명")
+    c3.metric("구매 합계", f"{conv_sum:,.0f} 건")
+    c4.metric("매출 합계", f"{rev_sum:,.0f} 원")
+
+    # 선택 기간 안에서 소스/매체 단위로 합산(방문자·조회수·구매·매출은 합, 이탈률·체류시간은 평균).
+    agg = (
+        fd.groupby("source_medium", as_index=False)
+        .agg(
+            channel=("channel", "first"),
+            users=("users", "sum"),
+            new_users=("new_users", "sum"),
+            returning_users=("returning_users", "sum"),
+            bounce_rate=("bounce_rate", "mean"),
+            pageviews=("pageviews", "sum"),
+            avg_session_duration=("avg_session_duration", "mean"),
+            conversions=("conversions", "sum"),
+            revenue=("revenue", "sum"),
+        )
+        .sort_values("users", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    st.markdown("##### ① 소스/매체별 방문자 TOP 15")
+    top15 = agg.head(15)
+    fig_top = px.bar(
+        top15, x="source_medium", y="users",
+        labels={"source_medium": "세션 소스/매체", "users": "총 방문자"},
+    )
+    st.plotly_chart(theme_chart(fig_top), use_container_width=True)
+
+    st.markdown("##### ② 소스/매체별 상세 표")
+    st.caption("TOTAL 행은 현재 페이지가 아니라 선택한 기간 전체(모든 소스/매체) 기준 합계입니다.")
+
+    total = len(agg)
+    narrow_ps_col, _ps_spacer = st.columns([2, 10])
+    with narrow_ps_col:
+        page_size = st.selectbox("페이지당 표시", PAGE_SIZE_OPTIONS, index=1, key="ga_channel_pagesize")
+    total_pages = max(1, -(-total // page_size))
+    page = render_pager(total_pages, key="ga_channel_pager") if total_pages > 1 else 1
+    start_i, end_i = (page - 1) * page_size, page * page_size
+    view = agg.iloc[start_i:end_i].copy()
+
+    show = format_display(view[GA_CHANNEL_DETAIL_COLS])
+    show["avg_session_duration"] = view["avg_session_duration"].map(_fmt_duration_padded)
+    show["channel"] = view["channel"].fillna("미분류")
+
+    total_row = {
+        "source_medium": "TOTAL",
+        "channel": "",
+        "users": f"{users_sum:,.0f}",
+        "new_users": f"{new_users_sum:,.0f}",
+        "returning_users": f"{fd['returning_users'].sum():,.0f}",
+        "bounce_rate": f"{fd['bounce_rate'].mean():.2f}%" if fd["bounce_rate"].notna().any() else "-",
+        "pageviews": f"{fd['pageviews'].sum():,.0f}",
+        "avg_session_duration": _fmt_duration_padded(fd["avg_session_duration"].mean()),
+        "conversions": f"{conv_sum:,.0f}",
+        "revenue": f"{rev_sum:,.0f}",
+    }
+    table = pd.concat([pd.DataFrame([total_row])[GA_CHANNEL_DETAIL_COLS], show[GA_CHANNEL_DETAIL_COLS]], ignore_index=True)
+    table = table.rename(columns=GA_CHANNEL_LABELS)
+    raw_numeric_cols = [
+        "users", "new_users", "returning_users", "bounce_rate", "pageviews",
+        "avg_session_duration", "conversions", "revenue",
+    ]
+    render_html_table(table, raw=view[raw_numeric_cols], raw_label_map=GA_CHANNEL_LABELS_REV)
+
+    dl_df = format_display(agg[GA_CHANNEL_DETAIL_COLS])
+    dl_df["avg_session_duration"] = agg["avg_session_duration"].map(_fmt_duration_padded)
+    dl_df["channel"] = agg["channel"].fillna("미분류")
+    st.download_button(
+        "⬇️ 엑셀 다운로드 (GA 매체별 유입 경로)",
+        data=to_excel_bytes(dl_df.rename(columns=GA_CHANNEL_LABELS)),
+        file_name="ga_channel_inflow.xlsx",
+    )
+
+
 def render_ga4_page():
     looker_view_url = (
         "https://lookerstudio.google.com/u/0/reporting/"
@@ -3615,6 +3837,7 @@ def main():
     creatives = load_table("creative_performance")
     audience = load_table("channel_audience_snapshot")
     inflow_revenue = load_table("inflow_revenue_daily")
+    ga_channel_inflow = load_table("ga_channel_inflow")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -3634,8 +3857,8 @@ def main():
         render_targeting_performance_page(audience, creatives_fallback=creatives)
     elif page == "소재별 성과":
         render_creative_performance(creatives)
-    elif page == "GA 유입경로":
-        render_ga_page(ga)
+    elif page == "GA 매체별 유입 경로":
+        render_ga_channel_inflow_page(ga_channel_inflow)
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
     elif page == "유입·매출 비교":
