@@ -3392,11 +3392,15 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     st.markdown("##### ① 방문자 추이 (GA 기준)")
     users_sum = fd["users"].sum()
     new_users_sum = fd["new_users"].sum()
+    returning_users_sum = fd["returning_users"].sum()
     new_ratio = (new_users_sum / users_sum * 100) if users_sum else 0
-    c1, c2, c3 = st.columns(3)
+    returning_ratio = (returning_users_sum / users_sum * 100) if users_sum else 0
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("총 방문자 합계", f"{users_sum:,.0f} 명")
     c2.metric("신규 방문자 합계", f"{new_users_sum:,.0f} 명")
-    c3.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
+    c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
+    c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
+    c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
 
     visit_chart_df = fd.melt(
         id_vars=["report_date"], value_vars=["users", "new_users"],
