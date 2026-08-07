@@ -3535,6 +3535,10 @@ def render_inflow_revenue_page(df: pd.DataFrame):
         visit_chart_df, x="일자", y="방문자수", color="구분", markers=True,
         category_orders={"일자": day_label_order},
     )
+    fig_visit.update_yaxes(tickformat=",.0f")
+    fig_visit.for_each_trace(
+        lambda t: t.update(hovertemplate=f"구분={t.name}<br>일자=%{{x}}<br>방문자수=%{{y:,.0f}}명<extra></extra>")
+    )
     st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
 
     # ── ② 매출 비교 (어드민 vs 보고서 vs GA) ──
@@ -3566,6 +3570,10 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     fig_rev = px.line(
         revenue_chart_df, x="일자", y="매출", color="구분", markers=True,
         category_orders={"일자": day_label_order},
+    )
+    fig_rev.update_yaxes(tickformat=",.0f")
+    fig_rev.for_each_trace(
+        lambda t: t.update(hovertemplate=f"구분={t.name}<br>일자=%{{x}}<br>매출=%{{y:,.0f}}원<extra></extra>")
     )
     st.plotly_chart(theme_chart(fig_rev), use_container_width=True)
 
@@ -3748,6 +3756,10 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
         visit_chart_df, x="일자", y="방문자수", color="구분", markers=True,
         category_orders={"일자": date_label_order},
     )
+    fig_visit.update_yaxes(tickformat=",.0f")
+    fig_visit.for_each_trace(
+        lambda t: t.update(hovertemplate=f"구분={t.name}<br>일자=%{{x}}<br>방문자수=%{{y:,.0f}}명<extra></extra>")
+    )
     st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
 
     # ── ② 구매·매출 합계 ──
@@ -3784,6 +3796,11 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
             fig_top = px.bar(
                 top10, x="source_medium", y=metric_col,
                 labels={"source_medium": "세션 소스/매체", metric_col: metric_label},
+            )
+            fig_top.update_yaxes(tickformat=",.0f")
+            unit = "원" if metric_col == "revenue" else ("건" if metric_col == "conversions" else "명")
+            fig_top.update_traces(
+                hovertemplate=f"세션 소스/매체=%{{x}}<br>{metric_label}=%{{y:,.0f}}{unit}<extra></extra>"
             )
             st.plotly_chart(theme_chart(fig_top), use_container_width=True, key=f"ga_channel_top_{metric_col}")
 
