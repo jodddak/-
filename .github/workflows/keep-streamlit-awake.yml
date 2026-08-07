@@ -1,1 +1,43 @@
+name: keep-streamlit-awake
 
+on:
+  schedule:
+    - cron: "0 */8 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Visit dashboard (and click wake-up button if it's asleep)
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          URL = "https://stco-performance-dashboard.streamlit.app"
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              page.goto(URL, wait_until="networkidle", timeout=60000)
+              page.wait_for_timeout(3000)
+
+              btn = page.get_by_text("Yes, get this app back up!")
+              if btn.count() > 0:
+                  print("App was asleep — clicking wake-up button")
+                  btn.first.click()
+                  page.wait_for_timeout(30000)
+              else:
+                  print("App was already awake")
+
+              browser.close()
+          PY
