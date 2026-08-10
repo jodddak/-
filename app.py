@@ -4264,6 +4264,47 @@ def _ops_top_mover_sentence(
     return bits[0] + ", " + bits[1] + "."
 
 
+def _ops_channel_efficiency_driver_sentence(
+    df: pd.DataFrame, key_col: str, period_col: str, cur_period, prev_period,
+    cost_col: str = "cost_incl_vat", conv_col: str = "conversions", clicks_col: str = "clicks",
+    rev_col: str = "revenue",
+) -> str:
+    """광고비·매출 증감(위 _ops_top_mover_sentence)만으로는 설명이 안 되는 ROAS 변화 —
+    즉 광고비·매출이 둘 다 줄었는데도 ROAS는 오히려 오른 경우처럼, '효율' 쪽에서 원인을 찾아야
+    할 때 쓴다. 두 기간 모두 광고비가 있었던 매체 중 ROAS(%)가 가장 많이 오른/내린 매체를 찾아
+    CVR·객단가 변화로 설명한다."""
+    if df is None or df.empty:
+        return ""
+    cur_g = df[df[period_col] == cur_period].groupby(key_col)[[cost_col, conv_col, clicks_col, rev_col]].sum()
+    prev_g = df[df[period_col] == prev_period].groupby(key_col)[[cost_col, conv_col, clicks_col, rev_col]].sum()
+    common = [k for k in cur_g.index.intersection(prev_g.index)
+              if cur_g.loc[k, cost_col] > 0 and prev_g.loc[k, cost_col] > 0]
+    if not common:
+        return ""
+    best_k, best_d_roas, best_stats = None, 0, None
+    for k in common:
+        cur_roas = cur_g.loc[k, rev_col] / cur_g.loc[k, cost_col] * 100
+        prev_roas = prev_g.loc[k, rev_col] / prev_g.loc[k, cost_col] * 100
+        d_roas = cur_roas - prev_roas
+        if best_k is None or abs(d_roas) > abs(best_d_roas):
+            cur_cvr = cur_g.loc[k, conv_col] / cur_g.loc[k, clicks_col] * 100 if cur_g.loc[k, clicks_col] else 0
+            prev_cvr = prev_g.loc[k, conv_col] / prev_g.loc[k, clicks_col] * 100 if prev_g.loc[k, clicks_col] else 0
+            cur_aov = cur_g.loc[k, rev_col] / cur_g.loc[k, conv_col] if cur_g.loc[k, conv_col] else 0
+            prev_aov = prev_g.loc[k, rev_col] / prev_g.loc[k, conv_col] if prev_g.loc[k, conv_col] else 0
+            best_k, best_d_roas = k, d_roas
+            best_stats = {"d_cvr": cur_cvr - prev_cvr, "d_aov": cur_aov - prev_aov}
+    if best_k is None or abs(best_d_roas) < 1:
+        return ""
+    bits = []
+    if abs(best_stats["d_cvr"]) >= 0.01:
+        bits.append(f"CVR이 {abs(best_stats['d_cvr']):.1f}%p {'상승' if best_stats['d_cvr'] >= 0 else '하락'}")
+    if abs(best_stats["d_aov"]) >= 1:
+        bits.append(f"객단가가 {abs(best_stats['d_aov']):,.0f}원 {'상승' if best_stats['d_aov'] >= 0 else '하락'}")
+    eff = ", ".join(bits) if bits else "효율 지표가 개선"
+    verb = "오른" if best_d_roas >= 0 else "내린"
+    return f"이 중 {best_k}에서 {eff}하며 ROAS가 {abs(best_d_roas):.0f}%p {verb} 것이 전체 ROAS 변동의 주요 요인으로 보입니다."
+
+
 WEEKDAY_KOR = ["월", "화", "수", "목", "금", "토", "일"]
 
 _WEEKLY_ZERO_CHECK_COLS = ["impressions", "clicks", "cost_excl_vat", "cost_incl_vat", "conversions", "revenue"]
@@ -4350,6 +4391,12 @@ def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 
             )
             if mover:
                 body.append(mover)
+            eff_mover = _ops_channel_efficiency_driver_sentence(
+                ch, key_col="channel", period_col="report_month",
+                cur_period=cur["report_month"], prev_period=prev["report_month"],
+            )
+            if eff_mover:
+                body.append(eff_mover)
     if body:
         st.markdown(" ".join(body), unsafe_allow_html=True)
 
@@ -4415,6 +4462,12 @@ def render_ops_comment_weekly(
             )
             if mover:
                 st.markdown(mover)
+            eff_mover = _ops_channel_efficiency_driver_sentence(
+                cwk, key_col="channel", period_col="week_start",
+                cur_period=cur["week_start"], prev_period=prev["week_start"],
+            )
+            if eff_mover:
+                st.markdown(eff_mover)
             cur_ch = sorted(cwk.loc[cwk["week_start"] == cur["week_start"], "channel"].unique())
             prev_ch = sorted(cwk.loc[cwk["week_start"] == prev["week_start"], "channel"].unique())
             st.caption(
