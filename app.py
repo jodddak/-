@@ -1020,6 +1020,14 @@ def parse_weekly(raw: pd.DataFrame, bounds, today: date):
     if out.empty:
         return out
     out = out[out["week_end"] <= today]
+    out = out.sort_values("week_start").reset_index(drop=True)
+    # parse_daily와 동일한 이유: 리포트 템플릿이 아직 안 지난 미래 주차까지 행(라벨)을 미리
+    # 만들어두는 경우가 있어서, week_end<=today만으로는 다 안 걸러진다. 실제 값이 하나도 없는
+    # (전부 0인) 말미 주차는 '아직 보고 안 된 주'로 보고 잘라낸다.
+    metric_sum = out[["impressions", "clicks", "cost_excl_vat", "cost_incl_vat", "conversions", "revenue"]].sum(axis=1)
+    nonzero_idx = metric_sum[metric_sum > 0].index
+    if len(nonzero_idx):
+        out = out.loc[: nonzero_idx.max()]
     return out.reset_index(drop=True)
 
 
