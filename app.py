@@ -3115,15 +3115,29 @@ def _render_creative_table(fc: pd.DataFrame, channel_name: str = None):
 
     if channel_name:
         judged = agg[agg["판정"] != "판단 보류(표본 부족)"]
+        n_good = int((judged["판정"] == "우수").sum())
+        n_mid = int((judged["판정"] == "평균 수준").sum())
+        n_bad = int((judged["판정"] == "부진").sum())
+        n_hold = len(agg) - len(judged)
         if len(judged) >= 2:
             best = judged.loc[judged["roas"].idxmax()]
             worst = judged.loc[judged["roas"].idxmin()]
-            st.markdown(
-                f"{channel_name} 소재 중 **'{best['creative']}'**가 ROAS {best['roas']:,.0f}%로 가장 우수했고, "
-                f"**'{worst['creative']}'**가 ROAS {worst['roas']:,.0f}%로 가장 부진했습니다."
-            )
+            lines = [
+                f"{channel_name} 소재 {len(judged)}개 중 우수 {n_good}개 · 평균 수준 {n_mid}개 · 부진 {n_bad}개입니다"
+                + (f" (표본 부족 {n_hold}개는 판단 보류)." if n_hold else "."),
+                f"<b>{best['creative']}</b>가 광고비 {best['cost_incl_vat']:,.0f}원으로 ROAS {best['roas']:,.0f}%를 기록해 가장 우수했고, "
+                f"<b>{worst['creative']}</b>는 광고비 {worst['cost_incl_vat']:,.0f}원 대비 ROAS {worst['roas']:,.0f}%로 "
+                f"계정 평균({account_avg_roas:,.0f}%) 대비 크게 낮아 가장 부진했습니다.",
+            ]
+            if n_bad:
+                lines.append(_ops_next_action(f"부진 소재({n_bad}개)는 소재 교체 또는 예산 축소를 검토하는 것을 권장합니다."))
+            st.markdown("<br>".join(lines), unsafe_allow_html=True)
         elif len(judged) == 1:
-            st.markdown(f"{channel_name}은 판단 가능한(표본 충분) 소재가 **'{judged.iloc[0]['creative']}'** 1개뿐이라, 우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.")
+            st.markdown(
+                f"{channel_name}은 판단 가능한(표본 충분) 소재가 <b>{judged.iloc[0]['creative']}</b> 1개뿐이라, "
+                "우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.",
+                unsafe_allow_html=True,
+            )
         else:
             st.caption(f"{channel_name}은 아직 판단 가능한(표본 충분) 소재가 없습니다.")
 
