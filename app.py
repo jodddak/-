@@ -3066,8 +3066,10 @@ def render_channel_mix(fc: pd.DataFrame):
 CREATIVE_TABS = ["TOTAL", "네이버 GFA PC", "네이버 GFA MO", "메타", "구글(P-MAX)", "크리테오"]
 
 
-def _render_creative_table(fc: pd.DataFrame):
-    """선택된 탭(매체)의 필터링된 소재 데이터로 집계 테이블 + 판정 + 다운로드 버튼을 렌더링."""
+def _render_creative_table(fc: pd.DataFrame, channel_name: str = None):
+    """선택된 탭(매체)의 필터링된 소재 데이터로 집계 테이블 + 판정 + 다운로드 버튼을 렌더링.
+    channel_name이 주어지면(=TOTAL 탭이 아니면) 표 위에 그 매체의 우수/부진 소재를 짚어주는
+    코멘트를 한 줄 붙인다 — TOTAL 탭엔 매체가 섞여 있어 우수/부진 비교가 의미가 없어 생략한다."""
     if fc.empty:
         st.info("선택한 기간/매체에 데이터가 없습니다.")
         return
@@ -3110,6 +3112,20 @@ def _render_creative_table(fc: pd.DataFrame):
     agg = agg.sort_values("cost_incl_vat", ascending=False)
 
     st.caption(f"계정 평균 ROAS(선택 기간): {account_avg_roas:,.0f}% · 광고비 {MIN_SPEND:,}원 미만은 표본 부족으로 판단 보류 처리")
+
+    if channel_name:
+        judged = agg[agg["판정"] != "판단 보류(표본 부족)"]
+        if len(judged) >= 2:
+            best = judged.loc[judged["roas"].idxmax()]
+            worst = judged.loc[judged["roas"].idxmin()]
+            st.markdown(
+                f"{channel_name} 소재 중 **'{best['creative']}'**가 ROAS {best['roas']:,.0f}%로 가장 우수했고, "
+                f"**'{worst['creative']}'**가 ROAS {worst['roas']:,.0f}%로 가장 부진했습니다."
+            )
+        elif len(judged) == 1:
+            st.markdown(f"{channel_name}은 판단 가능한(표본 충분) 소재가 **'{judged.iloc[0]['creative']}'** 1개뿐이라, 우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.")
+        else:
+            st.caption(f"{channel_name}은 아직 판단 가능한(표본 충분) 소재가 없습니다.")
 
     display_cols = ["channel", "creative"]
     if has_image:
@@ -3179,7 +3195,7 @@ def render_creative_performance(creatives: pd.DataFrame):
     for tab_widget, tab_name in zip(tabs, CREATIVE_TABS):
         with tab_widget:
             tab_fc = fc if tab_name == "TOTAL" else fc[fc["channel"] == tab_name]
-            _render_creative_table(tab_fc)
+            _render_creative_table(tab_fc, channel_name=None if tab_name == "TOTAL" else tab_name)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -3460,6 +3476,32 @@ def _targeting_order_channels(df: pd.DataFrame, order_list: list) -> pd.DataFram
     return df.sort_values(["_ord", "cost_incl_vat"], ascending=[True, False]).drop(columns="_ord")
 
 
+def _ops_targeting_summary_comment(audience_summary: pd.DataFrame, total_row: pd.Series, start: date, end: date) -> str:
+    """타겟팅별 성과 ① TOTAL 비교 표 아래에 쓰는 코멘트. 신규/리타겟팅 어느 쪽이 매출·ROAS를
+    견인했는지 짚어준다. 표가 이미 선택된 기간(period_filter)을 기준으로 집계돼 있어, 코멘트도
+    같은 기간을 그대로 따른다 — '지난주'로 보고 싶으면 위 기간 선택에서 '지난주'를 고르면 된다."""
+    status = _ops_kpi_status(total_row["roas"])
+    bits = [
+        f"**{start:%Y-%m-%d}~{end:%Y-%m-%d} 기준 전체 ROAS {total_row['roas']:,.0f}%로 {status}**입니다 "
+        f"(KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%)."
+    ]
+    new_r = audience_summary[audience_summary["channel"] == "신규 타겟팅"]
+    re_r = audience_summary[audience_summary["channel"] == "리타겟팅"]
+    if not new_r.empty and not re_r.empty and total_row["revenue"]:
+        n, r = new_r.iloc[0], re_r.iloc[0]
+        if r["roas"] >= n["roas"]:
+            lead_label, lead, other_label, other = "리타겟팅", r, "신규 타겟팅", n
+        else:
+            lead_label, lead, other_label, other = "신규 타겟팅", n, "리타겟팅", r
+        rev_share = lead["revenue"] / total_row["revenue"] * 100
+        ratio_txt = f"{(lead['roas'] / other['roas']):.1f}배 높습니다." if other["roas"] else "훨씬 높습니다."
+        bits.append(
+            f"{lead_label}이 매출의 {rev_share:,.0f}%를 차지하며 계정 성과를 견인했고, "
+            f"ROAS도 {lead['roas']:,.0f}%로 {other_label}({other['roas']:,.0f}%) 대비 {ratio_txt}"
+        )
+    return " ".join(bits)
+
+
 def _targeting_total_row(df: pd.DataFrame, label: str = "TOTAL") -> pd.DataFrame:
     row = {
         "channel": label,
@@ -3580,6 +3622,8 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
     with top_col:
         render_html_table(korify(pd.concat([total_top, show_top], ignore_index=True)))
     st.caption("TOTAL = 신규 타겟팅 + 리타겟팅 (겹치지 않는 완전 분리 기준)")
+    total_row_raw = _targeting_total_row(audience_summary, "TOTAL").iloc[0]
+    st.markdown(_ops_targeting_summary_comment(audience_summary, total_row_raw, start, end), unsafe_allow_html=True)
 
     st.markdown("##### ② 타겟팅별 매체별 성과 비교")
     new_df = agg[agg["audience_type"].isin(["신규", "미분류"])]
