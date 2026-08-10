@@ -4100,9 +4100,9 @@ def _ops_fmt_pct(v: float) -> str:
 
 
 def _ops_next_action(text: str) -> str:
-    """'다음 액션' 라벨을 굵고 빨간 텍스트로 강조해서 눈에 띄게 한다.
+    """'다음 액션' 라벨과 그 뒤 제안 문장 전체를 굵게, 라벨은 빨간색으로 강조해서 눈에 띄게 한다.
     이 함수가 붙은 문장을 st.markdown()으로 렌더링할 땐 unsafe_allow_html=True가 필요하다."""
-    return f'<b style="color:#d93025;">다음 액션</b>: {text}'
+    return f'<b style="color:#d93025;">다음 액션</b>: <b>{text}</b>'
 
 
 WEEKDAY_KOR = ["월", "화", "수", "목", "금", "토", "일"]
