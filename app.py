@@ -3022,15 +3022,17 @@ def render_creative_performance(creatives: pd.DataFrame):
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과"],
+    "운영 코멘트": ["운영 코멘트"],
     "GA 유입 리포트": ["GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
     "가이드": ["가이드"],
 }
 
-# 그룹별로 다른 CSS 클래스(st-key-navgrp_xxx)를 붙이기 위한 영문 키. GA 유입 리포트는
+# 그룹별로 다른 CSS 클래스(st-key-navgrp_xxx)를 붙이기 위한 영문 키. GA 유입 리포트/운영 코멘트는
 # 별도 아이콘을 안 받아서 키를 안 주고(None) 공통 기본 아이콘(NAV_GROUP_ICON_B64)을 그대로 쓴다.
 NAV_GROUP_KEYS = {
     "성과 리포트": "report",
+    "운영 코멘트": None,
     "GA 유입 리포트": None,
     "운영 도구": "ops",
     "가이드": "guide",
@@ -3894,6 +3896,259 @@ def render_ga4_page():
 
 
 # ──────────────────────────────────────────────────────────────
+# 운영 코멘트 (신규) — 데이터를 바탕으로 자동 생성하는 실무 코멘트/제안
+# performance-marketing-analysis 스킬(코멘트 작성 순서·소재 필터링·예산재배분 원칙)과
+# 프로젝트 KPI 기준(판단 지표 GA-ROAS, 목표 200~300%)을 그대로 반영한 룰 기반 코멘트.
+# ──────────────────────────────────────────────────────────────
+OPS_KPI_ROAS_LOW = 200    # KPI 목표 하단(%) — GA 기준
+OPS_KPI_ROAS_HIGH = 300   # KPI 목표 상단(%), 300%+가 목표
+OPS_MIN_CHANNEL_SPEND = 100_000   # 매체 판단 보류 기준: 광고비 10만원 미만
+OPS_CREATIVE_MIN_SPEND = 50_000   # 소재 판단 보류 기준(performance-marketing-analysis 스킬 기본값과 동일)
+
+
+def _ops_kpi_status(roas: float) -> str:
+    if roas >= OPS_KPI_ROAS_HIGH:
+        return "목표 초과 달성"
+    if roas >= OPS_KPI_ROAS_LOW:
+        return "목표 구간 내"
+    return "목표 미달"
+
+
+def _ops_fmt_pp(v: float) -> str:
+    return f"{'▲' if v >= 0 else '▼'}{abs(v):,.0f}%p"
+
+
+def _ops_fmt_pct(v: float) -> str:
+    return f"{'▲' if v >= 0 else '▼'}{abs(v):,.1f}%"
+
+
+def render_operation_comment_page(
+    weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame,
+    channels: pd.DataFrame, snapshot: pd.DataFrame, creatives: pd.DataFrame,
+    audience: pd.DataFrame, inflow_revenue: pd.DataFrame, ga_channel_inflow: pd.DataFrame,
+):
+    """① 전체 총평 → ② 매체별 코멘트+예산재배분 제안 → ③ 소재별 제안 → ④ GA 유입 코멘트
+    순서로, 업로드된 데이터를 바탕으로 룰 기반 코멘트를 자동 생성한다. 어디까지나 1차 초안이라
+    최종 운영 판단은 직접 검토가 필요하다는 점을 상단에 명시한다."""
+    st.info(
+        f"아래 코멘트는 업로드된 데이터를 기준으로 자동 생성한 1차 초안입니다. "
+        f"판단 지표는 GA-ROAS, KPI 목표는 {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%입니다. "
+        "최종 운영 판단은 직접 검토 후 반영해주세요."
+    )
+
+    # ── ① 전체 총평 ──
+    st.markdown("## ① 전체 총평")
+    if monthly.empty:
+        st.caption("월별 데이터가 아직 없습니다.")
+    else:
+        m = monthly.copy()
+        m["report_month"] = pd.to_datetime(m["report_month"]).dt.date
+        m = add_kpis(m.sort_values("report_month")).reset_index(drop=True)
+        cur = m.iloc[-1]
+        prev = m.iloc[-2] if len(m) >= 2 else None
+        cur_label = f"{cur['report_month'].year}년 {cur['report_month'].month}월"
+        cur_roas, cur_garoas = cur.get("roas", 0), cur.get("ga_roas", 0)
+        status = _ops_kpi_status(cur_garoas)
+
+        st.markdown(f"#### {cur_label} GA-ROAS {cur_garoas:,.0f}%로 {status} (KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%)")
+
+        body = [f"자체 ROAS는 {cur_roas:,.0f}%입니다."]
+        if cur_roas and cur_garoas and abs(cur_roas - cur_garoas) / max(cur_garoas, 1) > 0.3:
+            body.append(
+                f"자체 ROAS와 GA-ROAS 격차가 {_ops_fmt_pp(cur_roas - cur_garoas)}로 큰 편이라, "
+                "두 지표 중 어느 쪽을 메인으로 볼지 다시 짚어볼 필요가 있습니다."
+            )
+        if prev is not None:
+            prev_label = f"{prev['report_month'].year}년 {prev['report_month'].month}월"
+            d_garoas = cur_garoas - prev.get("ga_roas", 0)
+            d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
+            d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
+            body.append(
+                f"전월({prev_label}) GA-ROAS {prev.get('ga_roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_garoas)} "
+                f"{'상승' if d_garoas >= 0 else '하락'}했고, 광고비는 전월 대비 {_ops_fmt_pct(d_cost_pct)} "
+                f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
+            )
+        if status == "목표 미달":
+            body.append("목표 미달 구간이라, 아래 ②③번에서 매체·소재 단위로 원인을 좁혀볼 필요가 있습니다.")
+        elif status == "목표 초과 달성":
+            body.append("목표를 안정적으로 상회하고 있어 예산 증액 여력을 검토할 시점입니다.")
+        else:
+            body.append("목표 구간 내에서 안정적으로 운영되고 있습니다.")
+        st.markdown(" ".join(body))
+
+    st.markdown("---")
+
+    # ── ② 매체별 코멘트 + 예산재배분 제안 ──
+    st.markdown("## ② 매체별 코멘트 + 예산재배분 제안")
+    if snapshot.empty:
+        st.caption("매체별 당월 스냅샷 데이터가 아직 없습니다 (① 주간 리포트 업로드 필요).")
+    else:
+        snap = snapshot.copy()
+        latest_month = snap["as_of_month"].max()
+        snap = add_kpis(snap[snap["as_of_month"] == latest_month]).reset_index(drop=True)
+        st.caption(f"기준월: {latest_month}")
+
+        judged = snap[snap["cost_incl_vat"] >= OPS_MIN_CHANNEL_SPEND].copy()
+        held = snap[snap["cost_incl_vat"] < OPS_MIN_CHANNEL_SPEND].copy()
+
+        def _bucket(roas):
+            if roas >= OPS_KPI_ROAS_HIGH:
+                return "목표 초과"
+            if roas >= OPS_KPI_ROAS_LOW:
+                return "목표 근접"
+            return "목표 미달"
+
+        if not judged.empty:
+            judged["구분"] = judged["ga_roas"].map(_bucket)
+            judged = judged.sort_values("ga_roas", ascending=False)
+
+            over = judged[judged["구분"] == "목표 초과"]
+            near = judged[judged["구분"] == "목표 근접"]
+            under = judged[judged["구분"] == "목표 미달"]
+
+            if not over.empty:
+                names = ", ".join(over["channel"].tolist())
+                st.markdown(
+                    f"**목표 초과 ({len(over)}개 매체)**: {names} — GA-ROAS "
+                    f"{over['ga_roas'].min():,.0f}~{over['ga_roas'].max():,.0f}%로 목표를 상회합니다. "
+                    "우선 10~20% 증액 후 재측정하는 것을 권장합니다."
+                )
+            if not near.empty:
+                names = ", ".join(near["channel"].tolist())
+                st.markdown(f"**목표 근접 ({len(near)}개 매체)**: {names} — 목표 구간 안쪽이라 현재 운영을 유지하며 지켜보는 것을 권장합니다.")
+            if not under.empty:
+                names = ", ".join(under["channel"].tolist())
+                st.markdown(
+                    f"**목표 미달 ({len(under)}개 매체)**: {names} — GA-ROAS "
+                    f"{under['ga_roas'].min():,.0f}~{under['ga_roas'].max():,.0f}%로 목표에 못 미칩니다. "
+                    "바로 축소하기보다 소재 교체를 먼저 시도하고, 개선이 없으면 총 예산의 10~15% 내에서 "
+                    "단계적으로 축소/이동하는 것을 권장합니다."
+                )
+
+            gap_flag = judged[
+                (judged["roas"] > 0) & (judged["ga_roas"] > 0)
+                & ((judged["roas"] - judged["ga_roas"]).abs() / judged["ga_roas"] > 0.3)
+            ]
+            if not gap_flag.empty:
+                st.caption(
+                    "⚠️ 자체 ROAS와 GA-ROAS 격차가 큰 매체: "
+                    + ", ".join(
+                        f"{r.channel}(자체 {r.roas:,.0f}% vs GA {r.ga_roas:,.0f}%)"
+                        for r in gap_flag.itertuples()
+                    )
+                )
+        if not held.empty:
+            st.caption(f"판단 보류(광고비 {OPS_MIN_CHANNEL_SPEND:,}원 미만, 표본 부족): {', '.join(held['channel'].tolist())}")
+
+        show_cols = ["channel", "cost_incl_vat", "roas", "ga_roas"]
+        show_cols = [c for c in show_cols if c in snap.columns]
+        table = format_display(snap[show_cols].sort_values("cost_incl_vat", ascending=False))
+        render_html_table(korify(table), raw=snap[show_cols])
+
+    st.markdown("---")
+
+    # ── ③ 소재별 제안 ──
+    st.markdown("## ③ 소재별 제안")
+    if creatives.empty:
+        st.caption("소재별 성과 데이터가 아직 없습니다.")
+    else:
+        cr = creatives.copy()
+        cr["as_of_date"] = pd.to_datetime(cr["as_of_date"]).dt.date
+        cr_latest = cr.sort_values("as_of_date").drop_duplicates(subset=["channel", "creative"], keep="last")
+        agg = cr_latest.groupby(["channel", "creative"], as_index=False).agg(
+            impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+            cost_incl_vat=("cost_incl_vat", "sum"), conversions=("conversions", "sum"),
+            revenue=("revenue", "sum"),
+        )
+        agg = add_kpis(agg)
+        total_cost, total_rev = agg["cost_incl_vat"].sum(), agg["revenue"].sum()
+        account_avg_roas = (total_rev / total_cost * 100) if total_cost else 0
+
+        def _judge(row):
+            if row["cost_incl_vat"] < OPS_CREATIVE_MIN_SPEND:
+                return "판단 보류"
+            if account_avg_roas <= 0:
+                return "판단 보류"
+            ratio = row["roas"] / account_avg_roas
+            if ratio >= 1.2:
+                return "우수"
+            if ratio <= 0.7:
+                return "부진"
+            return "평균 수준"
+
+        agg["판정"] = agg.apply(_judge, axis=1)
+        good = agg[agg["판정"] == "우수"].sort_values("roas", ascending=False)
+        bad = agg[agg["판정"] == "부진"].sort_values("roas")
+        held_n = int((agg["판정"] == "판단 보류").sum())
+
+        st.caption(f"계정 평균 ROAS: {account_avg_roas:,.0f}% · 광고비 {OPS_CREATIVE_MIN_SPEND:,}원 미만 {held_n}개 소재는 판단 보류")
+
+        if not good.empty:
+            st.markdown(f"**효율 우수 소재 ({len(good)}개)**: 계정 평균 대비 1.2배 이상 — 예산 증액/타 캠페인 확장 후보입니다.")
+            st.dataframe(
+                korify(format_display(good[["channel", "creative", "cost_incl_vat", "roas"]])),
+                use_container_width=True, hide_index=True,
+            )
+        if not bad.empty:
+            st.markdown(
+                f"**효율 부진 소재 ({len(bad)}개)**: 계정 평균 대비 0.7배 이하 — 소재 교체/축소 후보입니다. "
+                "다만 막 시작한 소재는 학습 기간(3~7일)을 감안해 성급히 끄지 않는 것을 권장합니다."
+            )
+            st.dataframe(
+                korify(format_display(bad[["channel", "creative", "cost_incl_vat", "roas"]])),
+                use_container_width=True, hide_index=True,
+            )
+        if good.empty and bad.empty:
+            st.caption("우수/부진으로 구분될 만큼 표본이 확보된 소재가 아직 없습니다.")
+
+    st.markdown("---")
+
+    # ── ④ GA 유입 코멘트 ──
+    st.markdown("## ④ GA 유입 코멘트")
+    if inflow_revenue.empty:
+        st.caption("유입·매출 비교 데이터가 아직 없습니다.")
+    else:
+        iv = inflow_revenue.copy()
+        iv["report_date"] = pd.to_datetime(iv["report_date"]).dt.date
+        iv["ym"] = iv["report_date"].map(lambda d: (d.year, d.month))
+        monthly_iv = iv.groupby("ym", as_index=False).agg(users=("users", "sum"), new_users=("new_users", "sum"))
+        monthly_iv = monthly_iv.sort_values("ym")
+        if len(monthly_iv):
+            cur_iv = monthly_iv.iloc[-1]
+            cur_y, cur_mo = cur_iv["ym"]
+            body = [f"{cur_y}년 {cur_mo}월 총 방문자 {cur_iv['users']:,.0f}명, 신규 방문자 {cur_iv['new_users']:,.0f}명입니다."]
+            if len(monthly_iv) >= 2:
+                prev_iv = monthly_iv.iloc[-2]
+                d_users = cur_iv["users"] - prev_iv["users"]
+                d_users_pct = (d_users / prev_iv["users"] * 100) if prev_iv["users"] else 0
+                py, pmo = prev_iv["ym"]
+                body.append(
+                    f"전월({py}년 {pmo}월) 대비 방문자수는 {_ops_fmt_pct(d_users_pct)} "
+                    f"({d_users:+,.0f}명) {'증가' if d_users >= 0 else '감소'}했습니다."
+                )
+            st.markdown(" ".join(body))
+
+        if not ga_channel_inflow.empty:
+            gc = ga_channel_inflow.copy()
+            gc["report_date"] = pd.to_datetime(gc["report_date"]).dt.date
+            max_d = gc["report_date"].max()
+            min_d = max_d - timedelta(days=29)
+            recent = gc[gc["report_date"] >= min_d]
+            top_src = (
+                recent.groupby("source_medium", as_index=False)["users"].sum()
+                .sort_values("users", ascending=False).head(3)
+            )
+            if not top_src.empty:
+                names = ", ".join(f"{r.source_medium}({r.users:,.0f}명)" for r in top_src.itertuples())
+                st.markdown(f"최근 30일 기준 유입 상위 소스/매체는 {names} 순입니다.")
+            if recent["channel"].isna().all():
+                st.caption(
+                    "※ '매체'(채널 그룹핑) 매핑이 아직 안 되어 있어 소스/매체 단위로만 코멘트했습니다. "
+                    "매핑 완료되면 채널 단위 코멘트로 보강할 수 있습니다."
+                )
+
+
+# ──────────────────────────────────────────────────────────────
 # 메인
 # ──────────────────────────────────────────────────────────────
 def main():
@@ -3937,6 +4192,11 @@ def main():
         render_targeting_performance_page(audience, creatives_fallback=creatives)
     elif page == "소재별 성과":
         render_creative_performance(creatives)
+    elif page == "운영 코멘트":
+        render_operation_comment_page(
+            weekly, monthly, daily, channels, snapshot, creatives, audience,
+            inflow_revenue, ga_channel_inflow,
+        )
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
     elif page == "GA4 라이브 리포트":
