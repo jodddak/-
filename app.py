@@ -3680,6 +3680,13 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     if abs(gap_report) >= 20:
         comment_body.append(f"보고서(매체 리포트) 매출은 어드민 대비 {_ops_fmt_pct(gap_report)} 차이가 나 격차가 큰 편이니 참고해주세요.")
     st.markdown(" ".join(comment_body))
+    if cost_sum > 0:
+        _next = {
+            "목표 초과 달성": "다음 기간엔 상위 매체 위주로 증액을 검토하는 것을 권장합니다.",
+            "목표 구간 내": "다음 기간에도 현재 운영 기조를 유지하는 것을 권장합니다.",
+            "목표 미달": "다음 기간엔 매체별·소재별 코멘트를 참고해 원인을 좁혀보는 것을 권장합니다.",
+        }[status]
+        st.markdown(f"**다음 액션**: {_next}")
 
     dl_df = format_display(detail[detail_cols])
     dl_df["avg_session_duration"] = detail["avg_session_duration"].map(_fmt_duration)
@@ -3874,6 +3881,11 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
         top1 = agg.iloc[0]
         comment_body.append(f"가장 유입이 많은 소스/매체는 {top1['source_medium']}({top1['users']:,.0f}명)입니다.")
     st.markdown(" ".join(comment_body))
+    if not agg.empty:
+        st.markdown(
+            f"**다음 액션**: {top1['source_medium']} 유입이 다음 기간에도 유지되는지 확인하고, "
+            "유입 대비 구매(전환)가 낮은 소스/매체가 있으면 랜딩페이지·타겟팅 점검을 권장합니다."
+        )
     if agg["channel"].isna().all() if not agg.empty else False:
         st.caption("※ '매체'(채널 그룹핑) 매핑 전이라 소스/매체 단위로만 코멘트했습니다.")
 
@@ -3976,24 +3988,48 @@ def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 
             f"자체 ROAS와 GA-ROAS 격차가 {_ops_fmt_pp(cur_roas - cur_garoas)}로 큰 편이라, "
             "두 지표 중 어느 쪽을 메인으로 볼지 다시 짚어볼 필요가 있습니다."
         )
+    trend_down = None
     if prev is not None:
         prev_label = f"{prev['report_month'].year}년 {prev['report_month'].month}월"
         d_garoas = cur_garoas - prev.get("ga_roas", 0)
+        trend_down = d_garoas < 0
         d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
         d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
+        d_rev = cur["revenue"] - prev["revenue"]
+        d_rev_pct = (d_rev / prev["revenue"] * 100) if prev["revenue"] else 0
         body.append(
             f"전월({prev_label}) GA-ROAS {prev.get('ga_roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_garoas)} "
-            f"{'상승' if d_garoas >= 0 else '하락'}했고, 광고비는 전월 대비 {_ops_fmt_pct(d_cost_pct)} "
-            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
+            f"{'상승' if d_garoas >= 0 else '하락'}했습니다. 광고비는 전월 대비 {_ops_fmt_pct(d_cost_pct)} "
+            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했고, 매출은 {_ops_fmt_pct(d_rev_pct)} "
+            f"({d_rev:+,.0f}원) {'증가' if d_rev >= 0 else '감소'}했습니다."
         )
-    if status == "목표 미달":
-        body.append("목표 미달 구간이라 매체·소재 단위로 원인을 좁혀볼 필요가 있습니다.")
-    elif status == "목표 초과 달성":
-        body.append("목표를 안정적으로 상회하고 있어 예산 증액 여력을 검토할 시점입니다.")
-    else:
-        body.append("목표 구간 내에서 안정적으로 운영되고 있습니다.")
+        if (d_cost >= 0) != (d_garoas >= 0) and abs(d_cost_pct) > 10:
+            body.append(
+                f"광고비가 {'늘었는데도' if d_cost >= 0 else '줄었는데도'} GA-ROAS는 "
+                f"{'하락' if trend_down else '상승'}해서, 지출 증감이 효율로 그대로 이어지지 않은 구간입니다."
+            )
     if body:
         st.markdown(" ".join(body))
+
+    if status == "목표 미달":
+        if trend_down:
+            body_next = (
+                "목표 미달에 하락세까지 겹쳤습니다. 이번 달 남은 기간엔 ②매체별·③소재별 코멘트를 먼저 "
+                "확인해 원인(매체/소재/타겟팅)을 좁히고, 다음 달 예산 조정 여부를 결정하는 것을 권장합니다."
+            )
+        else:
+            body_next = (
+                "목표 미달이지만 반등 조짐이 있어, 이번 달은 매체·소재 단위 원인 점검만 진행하고 "
+                "다음 달 초까지 개선 여부를 지켜본 뒤 예산 조정을 검토하세요."
+            )
+    elif status == "목표 초과 달성":
+        body_next = (
+            "목표를 안정적으로 상회하고 있어, 다음 달엔 ②매체별 코멘트에서 목표 초과로 분류된 매체 위주로 "
+            "10~20% 증액을 검토하는 것을 권장합니다."
+        )
+    else:
+        body_next = "목표 구간 내에서 안정적으로 운영되고 있어, 다음 달에도 현재 운영 기조(매체 비중·소재 구성)를 유지하는 것을 권장합니다."
+    st.markdown(f"**다음 액션**: {body_next}")
 
 
 def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 주간별 코멘트"):
@@ -4012,9 +4048,11 @@ def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 �
 
     st.markdown(f"**{cur_label} 자체 ROAS {cur_roas:,.0f}%로 {status}** (KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%, GA 비교는 월별 코멘트 참고)")
 
+    trend_down = None
     if prev is not None:
         prev_label = f"{prev['week_start']:%Y-%m-%d}~{prev['week_end']:%Y-%m-%d}"
         d_roas = cur_roas - prev.get("roas", 0)
+        trend_down = d_roas < 0
         d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
         d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
         st.markdown(
@@ -4023,10 +4061,23 @@ def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 �
             f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
         )
 
+    if trend_down is None:
+        next_action = "아직 비교할 전주 데이터가 없어 다음 주 데이터가 쌓이면 추세를 판단할 수 있습니다."
+    elif status == "목표 미달" and trend_down:
+        next_action = "목표 미달+하락세가 겹쳤습니다. 이번 주 안에 소재/타겟팅을 먼저 점검하고, 다음 주에도 개선이 없으면 예산 축소를 검토하세요."
+    elif status == "목표 미달":
+        next_action = "목표는 미달이지만 반등 조짐이 있어, 다음 주까지는 현재 설정을 유지하며 지켜보는 것을 권장합니다."
+    elif not trend_down and status != "목표 미달":
+        next_action = "상승 추세라 다음 주도 현재 운영을 유지하며 지켜보는 것을 권장합니다."
+    else:
+        next_action = "하락 추세이니 다음 주엔 원인(소재 소진·시즌성 등)을 점검해보는 것을 권장합니다."
+    st.markdown(f"**다음 액션**: {next_action}")
+
 
 def _ops_channel_bucket_lines(df: pd.DataFrame, roas_col: str) -> list:
     """매체별 df('channel','cost_incl_vat', roas_col 컬럼 필요)를 목표초과/근접/미달로 나눠
-    코멘트 문장 리스트를 만든다. 광고비가 OPS_MIN_CHANNEL_SPEND 미만인 매체는 판단 보류로 뺀다."""
+    코멘트 문장 리스트를 만든다. 광고비가 OPS_MIN_CHANNEL_SPEND 미만인 매체는 판단 보류로 뺀다.
+    그룹 전체의 min~max 범위 대신, 매체별 실제 수치를 각각 이름과 함께 보여준다."""
     if df.empty or roas_col not in df.columns:
         return []
     judged = df[df["cost_incl_vat"] >= OPS_MIN_CHANNEL_SPEND].copy()
@@ -4046,20 +4097,24 @@ def _ops_channel_bucket_lines(df: pd.DataFrame, roas_col: str) -> list:
         near = judged[judged["구분"] == "목표 근접"]
         under = judged[judged["구분"] == "목표 미달"]
 
+        def _names_with_roas(sub):
+            return ", ".join(f"{r.channel}({getattr(r, roas_col):,.0f}%)" for r in sub.itertuples())
+
         if not over.empty:
             lines.append(
-                f"**목표 초과 ({len(over)}개 매체)**: {', '.join(over['channel'])} — ROAS "
-                f"{over[roas_col].min():,.0f}~{over[roas_col].max():,.0f}%로 목표를 상회합니다. "
-                "우선 10~20% 증액 후 재측정하는 것을 권장합니다."
+                f"**목표 초과 ({len(over)}개 매체)**: {_names_with_roas(over)} — 목표를 상회합니다. "
+                "**다음 액션**: 이번 주 중 10~20% 증액을 적용해보고, 다음 주 재측정 후 유지·추가 증액 여부를 결정하는 것을 권장합니다."
             )
         if not near.empty:
-            lines.append(f"**목표 근접 ({len(near)}개 매체)**: {', '.join(near['channel'])} — 목표 구간 안쪽이라 현재 운영을 유지하며 지켜보는 것을 권장합니다.")
+            lines.append(
+                f"**목표 근접 ({len(near)}개 매체)**: {_names_with_roas(near)} — 목표 구간 안쪽입니다. "
+                "**다음 액션**: 현재 예산·소재를 유지하며 다음 주까지 추세를 지켜보는 것을 권장합니다."
+            )
         if not under.empty:
             lines.append(
-                f"**목표 미달 ({len(under)}개 매체)**: {', '.join(under['channel'])} — ROAS "
-                f"{under[roas_col].min():,.0f}~{under[roas_col].max():,.0f}%로 목표에 못 미칩니다. "
-                "바로 축소하기보다 소재 교체를 먼저 시도하고, 개선이 없으면 총 예산의 10~15% 내에서 "
-                "단계적으로 축소/이동하는 것을 권장합니다."
+                f"**목표 미달 ({len(under)}개 매체)**: {_names_with_roas(under)} — 목표에 못 미칩니다. "
+                "**다음 액션**: 이번 주엔 소재 교체를 먼저 시도하고, 다음 주에도 개선이 없으면 총 예산의 10~15% "
+                "내에서 목표 초과 매체 쪽으로 단계적으로 이동하는 것을 권장합니다."
             )
     if not held.empty:
         lines.append(f"판단 보류(광고비 {OPS_MIN_CHANNEL_SPEND:,}원 미만, 표본 부족): {', '.join(held['channel'])}")
@@ -4172,15 +4227,21 @@ def render_operation_comment_page(
         st.caption(f"계정 평균 ROAS: {account_avg_roas:,.0f}% · 광고비 {OPS_CREATIVE_MIN_SPEND:,}원 미만 {held_n}개 소재는 판단 보류")
 
         if not good.empty:
-            st.markdown(f"**효율 우수 소재 ({len(good)}개)**: 계정 평균 대비 1.2배 이상 — 예산 증액/타 캠페인 확장 후보입니다.")
+            top_good = ", ".join(f"{r.creative}({r.roas:,.0f}%)" for r in good.head(3).itertuples())
+            st.markdown(
+                f"**효율 우수 소재 ({len(good)}개)**: 계정 평균 대비 1.2배 이상 — 상위로는 {top_good} 등입니다. "
+                "**다음 액션**: 이번 주 중 예산을 증액하거나 동일 소재를 타 캠페인/타겟팅으로 확장 적용해보는 것을 권장합니다."
+            )
             st.dataframe(
                 korify(format_display(good[["channel", "creative", "cost_incl_vat", "roas"]])),
                 use_container_width=True, hide_index=True,
             )
         if not bad.empty:
+            worst_bad = ", ".join(f"{r.creative}({r.roas:,.0f}%)" for r in bad.head(3).itertuples())
             st.markdown(
-                f"**효율 부진 소재 ({len(bad)}개)**: 계정 평균 대비 0.7배 이하 — 소재 교체/축소 후보입니다. "
-                "다만 막 시작한 소재는 학습 기간(3~7일)을 감안해 성급히 끄지 않는 것을 권장합니다."
+                f"**효율 부진 소재 ({len(bad)}개)**: 계정 평균 대비 0.7배 이하 — 하위로는 {worst_bad} 등입니다. "
+                "다만 막 시작한 소재는 학습 기간(3~7일)을 감안해 성급히 끄지 않는 것을 권장합니다. "
+                "**다음 액션**: 이번 주엔 문구/이미지 교체를 먼저 시도하고, 다음 주까지 개선이 없으면 축소/OFF를 검토하세요."
             )
             st.dataframe(
                 korify(format_display(bad[["channel", "creative", "cost_incl_vat", "roas"]])),
@@ -4229,6 +4290,11 @@ def render_operation_comment_page(
             if not top_src.empty:
                 names = ", ".join(f"{r.source_medium}({r.users:,.0f}명)" for r in top_src.itertuples())
                 st.markdown(f"최근 30일 기준 유입 상위 소스/매체는 {names} 순입니다.")
+                st.markdown(
+                    f"**다음 액션**: 상위 소스인 {top_src.iloc[0]['source_medium']} 유입을 다음 주에도 "
+                    "유지되는지 확인하고, 유입은 있는데 구매로 안 이어지는 소스/매체가 있으면 랜딩페이지·"
+                    "타겟팅을 점검하는 것을 권장합니다."
+                )
             if recent["channel"].isna().all():
                 st.caption(
                     "※ '매체'(채널 그룹핑) 매핑이 아직 안 되어 있어 소스/매체 단위로만 코멘트했습니다. "
