@@ -3170,6 +3170,7 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
             date_col="report_month", show_cols=month_show_cols, numeric_cols=month_numeric_cols,
             title="1) 월별 누적", key="monthly_cum", mode="month",
         )
+        render_ops_comment_monthly(monthly)
 
         wk = weekly.copy()
         if not wk.empty:
@@ -3183,6 +3184,7 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
             date_col="week_start", show_cols=week_show_cols, numeric_cols=week_numeric_cols,
             title="2) 주간별 누적", key="weekly_cum", mode="week",
         )
+        render_ops_comment_weekly(weekly)
 
         day_show_cols = ["report_date", "impressions", "clicks", "ctr", "cpc", "cost_excl_vat", "cost_incl_vat",
                           "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
@@ -3239,6 +3241,10 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         st.download_button(
             "⬇️ 엑셀 다운로드 (매체별·월별)",
             data=to_excel_bytes(korify(format_display(by_channel[bc_cols]))), file_name="channel_performance.xlsx",
+        )
+        render_ops_comment_channel_narrative(
+            by_channel, "roas",
+            footnote="※ 선택 기간 합산·자체 ROAS 기준입니다. GA-ROAS 비교는 아래 '당월 매체별 GA 비교' 참고.",
         )
 
         render_channel_mix(fc)  # ← 신규: 채널믹스 목표 대비
@@ -3663,6 +3669,18 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     ]
     render_html_table(table, raw=detail[raw_numeric_cols], raw_label_map=INFLOW_DETAIL_LABELS_REV)
 
+    st.markdown("#### 💬 코멘트")
+    if cost_sum > 0:
+        period_garoas = ga_sum / cost_sum * 100
+        status = _ops_kpi_status(period_garoas)
+        st.markdown(f"**선택 기간 GA-ROAS {period_garoas:,.0f}%로 {status}** (KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%)")
+    comment_body = [
+        f"총 방문자 {users_sum:,.0f}명(신규 비중 {new_ratio:.1f}%), 어드민 매출 대비 GA 매출 격차는 {_ops_fmt_pct(gap_ga)}입니다."
+    ]
+    if abs(gap_report) >= 20:
+        comment_body.append(f"보고서(매체 리포트) 매출은 어드민 대비 {_ops_fmt_pct(gap_report)} 차이가 나 격차가 큰 편이니 참고해주세요.")
+    st.markdown(" ".join(comment_body))
+
     dl_df = format_display(detail[detail_cols])
     dl_df["avg_session_duration"] = detail["avg_session_duration"].map(_fmt_duration)
     st.download_button(
@@ -3847,6 +3865,18 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     ]
     render_html_table(table, raw=view[raw_numeric_cols], raw_label_map=GA_CHANNEL_LABELS_REV)
 
+    st.markdown("#### 💬 코멘트")
+    comment_body = [
+        f"선택 기간 총 방문자 {users_sum:,.0f}명(신규 비중 {new_ratio:.1f}%, 재방문 비중 {returning_ratio:.1f}%), "
+        f"구매 {conv_sum:,.0f}건, 매출 {rev_sum:,.0f}원입니다."
+    ]
+    if not agg.empty:
+        top1 = agg.iloc[0]
+        comment_body.append(f"가장 유입이 많은 소스/매체는 {top1['source_medium']}({top1['users']:,.0f}명)입니다.")
+    st.markdown(" ".join(comment_body))
+    if agg["channel"].isna().all() if not agg.empty else False:
+        st.caption("※ '매체'(채널 그룹핑) 매핑 전이라 소스/매체 단위로만 코멘트했습니다.")
+
     dl_df = format_display(agg[GA_CHANNEL_DETAIL_COLS])
     dl_df["avg_session_duration"] = agg["avg_session_duration"].map(_fmt_duration_padded)
     dl_df["channel"] = agg["channel"].fillna("미분류")
@@ -3922,6 +3952,136 @@ def _ops_fmt_pct(v: float) -> str:
     return f"{'▲' if v >= 0 else '▼'}{abs(v):,.1f}%"
 
 
+def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 월별 코멘트"):
+    """월별 총평 코멘트 — 종합 대시보드의 '1) 월별 누적' 표 아래와, 운영 코멘트 탭의 ①에서
+    공용으로 쓴다. GA-ROAS를 KPI 판단 기준(200~300%)으로 쓰고, 자체 ROAS는 참고로 같이 보여준다."""
+    st.markdown(heading)
+    if monthly.empty:
+        st.caption("월별 데이터가 아직 없습니다.")
+        return
+    m = monthly.copy()
+    m["report_month"] = pd.to_datetime(m["report_month"]).dt.date
+    m = add_kpis(m.sort_values("report_month")).reset_index(drop=True)
+    cur = m.iloc[-1]
+    prev = m.iloc[-2] if len(m) >= 2 else None
+    cur_label = f"{cur['report_month'].year}년 {cur['report_month'].month}월"
+    cur_roas, cur_garoas = cur.get("roas", 0), cur.get("ga_roas", 0)
+    status = _ops_kpi_status(cur_garoas)
+
+    st.markdown(f"**{cur_label} GA-ROAS {cur_garoas:,.0f}%로 {status}** (자체 ROAS {cur_roas:,.0f}%, KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%)")
+
+    body = []
+    if cur_roas and cur_garoas and abs(cur_roas - cur_garoas) / max(cur_garoas, 1) > 0.3:
+        body.append(
+            f"자체 ROAS와 GA-ROAS 격차가 {_ops_fmt_pp(cur_roas - cur_garoas)}로 큰 편이라, "
+            "두 지표 중 어느 쪽을 메인으로 볼지 다시 짚어볼 필요가 있습니다."
+        )
+    if prev is not None:
+        prev_label = f"{prev['report_month'].year}년 {prev['report_month'].month}월"
+        d_garoas = cur_garoas - prev.get("ga_roas", 0)
+        d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
+        d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
+        body.append(
+            f"전월({prev_label}) GA-ROAS {prev.get('ga_roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_garoas)} "
+            f"{'상승' if d_garoas >= 0 else '하락'}했고, 광고비는 전월 대비 {_ops_fmt_pct(d_cost_pct)} "
+            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
+        )
+    if status == "목표 미달":
+        body.append("목표 미달 구간이라 매체·소재 단위로 원인을 좁혀볼 필요가 있습니다.")
+    elif status == "목표 초과 달성":
+        body.append("목표를 안정적으로 상회하고 있어 예산 증액 여력을 검토할 시점입니다.")
+    else:
+        body.append("목표 구간 내에서 안정적으로 운영되고 있습니다.")
+    if body:
+        st.markdown(" ".join(body))
+
+
+def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 주간별 코멘트"):
+    """주간별 코멘트 — 종합 대시보드의 '2) 주간별 누적' 표 아래에 쓴다.
+    주간 데이터엔 GA-ROAS가 없어(주간 리포트 시트 구조상 GA 비교 컬럼 없음) 자체 ROAS만 쓴다."""
+    st.markdown(heading)
+    if weekly.empty:
+        st.caption("주간 데이터가 아직 없습니다.")
+        return
+    w = add_kpis(weekly.sort_values("week_start")).reset_index(drop=True)
+    cur = w.iloc[-1]
+    prev = w.iloc[-2] if len(w) >= 2 else None
+    cur_label = f"{cur['week_start']:%Y-%m-%d}~{cur['week_end']:%Y-%m-%d}"
+    cur_roas = cur.get("roas", 0)
+    status = _ops_kpi_status(cur_roas)
+
+    st.markdown(f"**{cur_label} 자체 ROAS {cur_roas:,.0f}%로 {status}** (KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%, GA 비교는 월별 코멘트 참고)")
+
+    if prev is not None:
+        prev_label = f"{prev['week_start']:%Y-%m-%d}~{prev['week_end']:%Y-%m-%d}"
+        d_roas = cur_roas - prev.get("roas", 0)
+        d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
+        d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
+        st.markdown(
+            f"전주({prev_label}) ROAS {prev.get('roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_roas)} "
+            f"{'상승' if d_roas >= 0 else '하락'}했고, 광고비는 전주 대비 {_ops_fmt_pct(d_cost_pct)} "
+            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
+        )
+
+
+def _ops_channel_bucket_lines(df: pd.DataFrame, roas_col: str) -> list:
+    """매체별 df('channel','cost_incl_vat', roas_col 컬럼 필요)를 목표초과/근접/미달로 나눠
+    코멘트 문장 리스트를 만든다. 광고비가 OPS_MIN_CHANNEL_SPEND 미만인 매체는 판단 보류로 뺀다."""
+    if df.empty or roas_col not in df.columns:
+        return []
+    judged = df[df["cost_incl_vat"] >= OPS_MIN_CHANNEL_SPEND].copy()
+    held = df[df["cost_incl_vat"] < OPS_MIN_CHANNEL_SPEND].copy()
+    lines = []
+    if not judged.empty:
+        def _bucket(v):
+            if v >= OPS_KPI_ROAS_HIGH:
+                return "목표 초과"
+            if v >= OPS_KPI_ROAS_LOW:
+                return "목표 근접"
+            return "목표 미달"
+
+        judged["구분"] = judged[roas_col].map(_bucket)
+        judged = judged.sort_values(roas_col, ascending=False)
+        over = judged[judged["구분"] == "목표 초과"]
+        near = judged[judged["구분"] == "목표 근접"]
+        under = judged[judged["구분"] == "목표 미달"]
+
+        if not over.empty:
+            lines.append(
+                f"**목표 초과 ({len(over)}개 매체)**: {', '.join(over['channel'])} — ROAS "
+                f"{over[roas_col].min():,.0f}~{over[roas_col].max():,.0f}%로 목표를 상회합니다. "
+                "우선 10~20% 증액 후 재측정하는 것을 권장합니다."
+            )
+        if not near.empty:
+            lines.append(f"**목표 근접 ({len(near)}개 매체)**: {', '.join(near['channel'])} — 목표 구간 안쪽이라 현재 운영을 유지하며 지켜보는 것을 권장합니다.")
+        if not under.empty:
+            lines.append(
+                f"**목표 미달 ({len(under)}개 매체)**: {', '.join(under['channel'])} — ROAS "
+                f"{under[roas_col].min():,.0f}~{under[roas_col].max():,.0f}%로 목표에 못 미칩니다. "
+                "바로 축소하기보다 소재 교체를 먼저 시도하고, 개선이 없으면 총 예산의 10~15% 내에서 "
+                "단계적으로 축소/이동하는 것을 권장합니다."
+            )
+    if not held.empty:
+        lines.append(f"판단 보류(광고비 {OPS_MIN_CHANNEL_SPEND:,}원 미만, 표본 부족): {', '.join(held['channel'])}")
+    return lines
+
+
+def render_ops_comment_channel_narrative(
+    df: pd.DataFrame, roas_col: str, heading: str = "#### 💬 매체별 코멘트", footnote: str = "",
+):
+    """매체별 표 바로 아래 붙이는 짧은 서술형 코멘트(목표초과/근접/미달 분류 + 예산재배분 제안만).
+    표는 이미 위에 있으므로 여기서는 표를 다시 그리지 않는다."""
+    st.markdown(heading)
+    lines = _ops_channel_bucket_lines(df, roas_col)
+    if not lines:
+        st.caption("판정 가능한 매체 데이터가 아직 없습니다.")
+        return
+    for line in lines:
+        st.markdown(line)
+    if footnote:
+        st.caption(footnote)
+
+
 def render_operation_comment_page(
     weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame,
     channels: pd.DataFrame, snapshot: pd.DataFrame, creatives: pd.DataFrame,
@@ -3937,44 +4097,7 @@ def render_operation_comment_page(
     )
 
     # ── ① 전체 총평 ──
-    st.markdown("## ① 전체 총평")
-    if monthly.empty:
-        st.caption("월별 데이터가 아직 없습니다.")
-    else:
-        m = monthly.copy()
-        m["report_month"] = pd.to_datetime(m["report_month"]).dt.date
-        m = add_kpis(m.sort_values("report_month")).reset_index(drop=True)
-        cur = m.iloc[-1]
-        prev = m.iloc[-2] if len(m) >= 2 else None
-        cur_label = f"{cur['report_month'].year}년 {cur['report_month'].month}월"
-        cur_roas, cur_garoas = cur.get("roas", 0), cur.get("ga_roas", 0)
-        status = _ops_kpi_status(cur_garoas)
-
-        st.markdown(f"#### {cur_label} GA-ROAS {cur_garoas:,.0f}%로 {status} (KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%)")
-
-        body = [f"자체 ROAS는 {cur_roas:,.0f}%입니다."]
-        if cur_roas and cur_garoas and abs(cur_roas - cur_garoas) / max(cur_garoas, 1) > 0.3:
-            body.append(
-                f"자체 ROAS와 GA-ROAS 격차가 {_ops_fmt_pp(cur_roas - cur_garoas)}로 큰 편이라, "
-                "두 지표 중 어느 쪽을 메인으로 볼지 다시 짚어볼 필요가 있습니다."
-            )
-        if prev is not None:
-            prev_label = f"{prev['report_month'].year}년 {prev['report_month'].month}월"
-            d_garoas = cur_garoas - prev.get("ga_roas", 0)
-            d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
-            d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
-            body.append(
-                f"전월({prev_label}) GA-ROAS {prev.get('ga_roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_garoas)} "
-                f"{'상승' if d_garoas >= 0 else '하락'}했고, 광고비는 전월 대비 {_ops_fmt_pct(d_cost_pct)} "
-                f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
-            )
-        if status == "목표 미달":
-            body.append("목표 미달 구간이라, 아래 ②③번에서 매체·소재 단위로 원인을 좁혀볼 필요가 있습니다.")
-        elif status == "목표 초과 달성":
-            body.append("목표를 안정적으로 상회하고 있어 예산 증액 여력을 검토할 시점입니다.")
-        else:
-            body.append("목표 구간 내에서 안정적으로 운영되고 있습니다.")
-        st.markdown(" ".join(body))
+    render_ops_comment_monthly(monthly, heading="## ① 전체 총평")
 
     st.markdown("---")
 
@@ -3988,57 +4111,22 @@ def render_operation_comment_page(
         snap = add_kpis(snap[snap["as_of_month"] == latest_month]).reset_index(drop=True)
         st.caption(f"기준월: {latest_month}")
 
-        judged = snap[snap["cost_incl_vat"] >= OPS_MIN_CHANNEL_SPEND].copy()
-        held = snap[snap["cost_incl_vat"] < OPS_MIN_CHANNEL_SPEND].copy()
+        for line in _ops_channel_bucket_lines(snap, "ga_roas"):
+            st.markdown(line)
 
-        def _bucket(roas):
-            if roas >= OPS_KPI_ROAS_HIGH:
-                return "목표 초과"
-            if roas >= OPS_KPI_ROAS_LOW:
-                return "목표 근접"
-            return "목표 미달"
-
-        if not judged.empty:
-            judged["구분"] = judged["ga_roas"].map(_bucket)
-            judged = judged.sort_values("ga_roas", ascending=False)
-
-            over = judged[judged["구분"] == "목표 초과"]
-            near = judged[judged["구분"] == "목표 근접"]
-            under = judged[judged["구분"] == "목표 미달"]
-
-            if not over.empty:
-                names = ", ".join(over["channel"].tolist())
-                st.markdown(
-                    f"**목표 초과 ({len(over)}개 매체)**: {names} — GA-ROAS "
-                    f"{over['ga_roas'].min():,.0f}~{over['ga_roas'].max():,.0f}%로 목표를 상회합니다. "
-                    "우선 10~20% 증액 후 재측정하는 것을 권장합니다."
+        judged = snap[snap["cost_incl_vat"] >= OPS_MIN_CHANNEL_SPEND]
+        gap_flag = judged[
+            (judged["roas"] > 0) & (judged["ga_roas"] > 0)
+            & ((judged["roas"] - judged["ga_roas"]).abs() / judged["ga_roas"] > 0.3)
+        ]
+        if not gap_flag.empty:
+            st.caption(
+                "⚠️ 자체 ROAS와 GA-ROAS 격차가 큰 매체: "
+                + ", ".join(
+                    f"{r.channel}(자체 {r.roas:,.0f}% vs GA {r.ga_roas:,.0f}%)"
+                    for r in gap_flag.itertuples()
                 )
-            if not near.empty:
-                names = ", ".join(near["channel"].tolist())
-                st.markdown(f"**목표 근접 ({len(near)}개 매체)**: {names} — 목표 구간 안쪽이라 현재 운영을 유지하며 지켜보는 것을 권장합니다.")
-            if not under.empty:
-                names = ", ".join(under["channel"].tolist())
-                st.markdown(
-                    f"**목표 미달 ({len(under)}개 매체)**: {names} — GA-ROAS "
-                    f"{under['ga_roas'].min():,.0f}~{under['ga_roas'].max():,.0f}%로 목표에 못 미칩니다. "
-                    "바로 축소하기보다 소재 교체를 먼저 시도하고, 개선이 없으면 총 예산의 10~15% 내에서 "
-                    "단계적으로 축소/이동하는 것을 권장합니다."
-                )
-
-            gap_flag = judged[
-                (judged["roas"] > 0) & (judged["ga_roas"] > 0)
-                & ((judged["roas"] - judged["ga_roas"]).abs() / judged["ga_roas"] > 0.3)
-            ]
-            if not gap_flag.empty:
-                st.caption(
-                    "⚠️ 자체 ROAS와 GA-ROAS 격차가 큰 매체: "
-                    + ", ".join(
-                        f"{r.channel}(자체 {r.roas:,.0f}% vs GA {r.ga_roas:,.0f}%)"
-                        for r in gap_flag.itertuples()
-                    )
-                )
-        if not held.empty:
-            st.caption(f"판단 보류(광고비 {OPS_MIN_CHANNEL_SPEND:,}원 미만, 표본 부족): {', '.join(held['channel'].tolist())}")
+            )
 
         show_cols = ["channel", "cost_incl_vat", "roas", "ga_roas"]
         show_cols = [c for c in show_cols if c in snap.columns]
