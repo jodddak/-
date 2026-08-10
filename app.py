@@ -4209,30 +4209,34 @@ def _ops_top_mover_sentence(
 ) -> str:
     """전체(또는 그룹) 수치가 왜 그렇게 움직였는지, 어떤 매체/소재가 광고비·매출 변화를
     가장 크게 이끌었는지 짚어주는 문장 하나를 만든다. 매체별/소재별 코멘트에서 공용으로 쓴다.
-    df엔 [key_col, period_col, cost_col, rev_col]가 있어야 하고, cur/prev 둘 다 존재하는
-    key만 비교 대상으로 삼는다(신규/누락 항목은 증감폭 계산이 왜곡되므로 제외)."""
+    df엔 [key_col, period_col, cost_col, rev_col]가 있어야 한다. cur/prev 중 한쪽에만 있는
+    key(이번 주 신규 집행/운영 중지된 매체 등)도 그 기간엔 0원으로 보고 비교 대상에 포함한다 —
+    실제로 매체 운영을 중지/재개하는 것 자체가 흔한 원인이라 빠뜨리면 안 된다."""
     if df is None or df.empty:
         return ""
     cur_df = df[df[period_col] == cur_period].groupby(key_col)[[cost_col, rev_col]].sum()
     prev_df = df[df[period_col] == prev_period].groupby(key_col)[[cost_col, rev_col]].sum()
-    common = cur_df.index.intersection(prev_df.index)
-    if len(common) == 0:
+    all_keys = cur_df.index.union(prev_df.index)
+    if len(all_keys) == 0:
         return ""
-    d_cost = cur_df.loc[common, cost_col] - prev_df.loc[common, cost_col]
-    d_rev = cur_df.loc[common, rev_col] - prev_df.loc[common, rev_col]
+    cur_df = cur_df.reindex(all_keys, fill_value=0)
+    prev_df = prev_df.reindex(all_keys, fill_value=0)
+    d_cost = cur_df[cost_col] - prev_df[cost_col]
+    d_rev = cur_df[rev_col] - prev_df[rev_col]
 
     bits = []
-    if len(d_cost) and d_cost.abs().max() >= min_abs_cost:
+    cost_driver = None
+    if len(d_cost) and d_cost.abs().max() > min_abs_cost:
         cost_driver = d_cost.abs().idxmax()
         v = d_cost[cost_driver]
-        if abs(v) > 0:
-            bits.append(f"{cost_driver}에서 광고비가 {abs(v):,.0f}원 {'증가' if v >= 0 else '감소'}한 영향이 컸고")
-    if len(d_rev) and d_rev.abs().max() >= min_abs_rev:
+        stop_note = "(운영 중지)" if cur_df.loc[cost_driver, cost_col] == 0 and v < 0 else (
+            "(신규 집행)" if prev_df.loc[cost_driver, cost_col] == 0 and v > 0 else ""
+        )
+        bits.append(f"{cost_driver}에서 광고비가 {abs(v):,.0f}원 {'증가' if v >= 0 else '감소'}{stop_note}한 영향이 컸고")
+    if len(d_rev) and d_rev.abs().max() > min_abs_rev:
         rev_driver = d_rev.abs().idxmax()
         v = d_rev[rev_driver]
-        if abs(v) == 0:
-            pass
-        elif bits and rev_driver in d_cost.index and rev_driver == d_cost.abs().idxmax():
+        if rev_driver == cost_driver:
             bits.append(f"같은 곳에서 매출도 {abs(v):,.0f}원 {'증가' if v >= 0 else '감소'}하며 영향을 키웠습니다")
         else:
             connector = "대신 " if bits else ""
