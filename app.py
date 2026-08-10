@@ -636,6 +636,7 @@ TABLES = {
     "channel_audience_snapshot": "channel_audience_snapshot",
     "inflow_revenue_daily": "inflow_revenue_daily",
     "ga_channel_inflow": "ga_channel_inflow",
+    "agency_notes": "agency_notes",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -1076,6 +1077,43 @@ def parse_channel_snapshot(raw: pd.DataFrame, bounds, monthly_df: pd.DataFrame):
     as_of = monthly_df["report_month"].max() if len(monthly_df) else date.today().replace(day=1)
     out["as_of_month"] = as_of
     return out.reset_index(drop=True)
+
+
+# 대행사가 '매체통합' 시트 하단에 자유 텍스트로 남기는 운영 메모(특이사항/코멘트)를 찾을 때
+# 불릿 마커로 인정할 접두어. 실제 샘플 파일이 없어 휴리스틱하게 잡는다 — 다음 실제 업로드로 검증 필요.
+AGENCY_NOTE_BULLET_PREFIXES = ("*", "-", "•", ">", "※", "▶", "①", "②", "③", "④", "⑤")
+
+
+def parse_agency_notes(raw: pd.DataFrame, today: date) -> pd.DataFrame:
+    """'매체통합' 시트 하단에 대행사가 정리해주는 자유 텍스트 운영 코멘트/특이사항을 추출한다.
+    상단 표(월간/주간/일별/매체별 현황)는 각 행이 숫자 위주 데이터라 첫 칸이 불릿 마커로
+    시작하지 않는다는 점을 이용해, 각 행의 첫 번째 비어있지 않은 문자열 셀이 '*', '-', '>' 같은
+    불릿 마커로 시작하는 행만 순서대로 모아 하나의 텍스트로 합친다.
+    실제 샘플 파일 없이 휴리스틱하게 작성했으므로, 다음 실제 업로드 시 인식이 잘 되는지 확인이 필요하다."""
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    lines = []
+    n_rows, n_cols = raw.shape
+    for i in range(n_rows):
+        first_str = None
+        for j in range(n_cols):
+            v = raw.iat[i, j]
+            if isinstance(v, str) and v.strip():
+                first_str = v.strip()
+                break
+        if not first_str or len(first_str) < 2:
+            continue
+        if first_str.startswith(AGENCY_NOTE_BULLET_PREFIXES):
+            text = first_str.lstrip("".join(AGENCY_NOTE_BULLET_PREFIXES) + " ").strip()
+            if text:
+                lines.append(text)
+
+    if not lines:
+        return pd.DataFrame()
+
+    note_text = "\n".join(f"- {t}" for t in lines)
+    return pd.DataFrame([{"as_of_date": today, "note_text": note_text}])
 
 
 def discover_channel_sheets(xls: pd.ExcelFile):
@@ -1881,6 +1919,7 @@ def parse_workbook(file, today: date):
         "channel_sheets_found": [],
         "channel_sheets_parsed": [],
         "creative_sheets_found": [],
+        "agency_notes": pd.DataFrame(),
     }
     if "매체통합" in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name="매체통합", header=None)
@@ -1889,6 +1928,7 @@ def parse_workbook(file, today: date):
         result["weekly"] = parse_weekly(raw, bounds, today)
         result["daily"] = parse_daily(raw, bounds, today)
         result["channel_snapshot"] = parse_channel_snapshot(raw, bounds, result["monthly"])
+        result["agency_notes"] = parse_agency_notes(raw, today)
 
     chan_frames = []
     channel_sheet_candidates = discover_channel_sheets(xls)
@@ -2724,6 +2764,11 @@ def render_upload_panel():
                 f"🎨 소재별 성과 인식: {len(result.get('creatives', []))}행 "
                 f"({', '.join(result.get('creative_sheets_found', [])) or '해당 시트 없음'})"
             )
+            agency_notes_df = result.get("agency_notes", pd.DataFrame())
+            st.write(
+                f"📝 매체통합 시트 하단 운영 메모: "
+                f"{'인식됨' if not agency_notes_df.empty else '인식 안 됨(없거나 형식 미확인)'}"
+            )
             audience_df = result.get("channel_audience", pd.DataFrame())
             unclassified_n = (
                 int((audience_df["audience_type"] == "미분류").sum()) if not audience_df.empty else 0
@@ -2770,10 +2815,14 @@ def render_upload_panel():
                 "channel_audience_snapshot", result.get("channel_audience", pd.DataFrame()),
                 "as_of_date,channel,audience_type", file.name,
             )
+            n9 = save_table(
+                "agency_notes", result.get("agency_notes", pd.DataFrame()),
+                "as_of_date", file.name,
+            )
             st.cache_data.clear()
             st.sidebar.success(
                 f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · "
-                f"GA {n5}건 · 소재 {n7}건 · 퍼널(신규/리타겟) {n8}건"
+                f"GA {n5}건 · 소재 {n7}건 · 퍼널(신규/리타겟) {n8}건 · 운영 메모 {n9}건"
             )
             st.rerun()
 
@@ -3131,6 +3180,8 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
                     labels={"roas": "ROAS(%)"},
                     category_orders={"주": week_label_order},
                 )
+                fig2.update_yaxes(tickformat=",.0f", ticksuffix="%")
+                fig2.update_traces(hovertemplate="주=%{x}<br>ROAS=%{y:,.0f}%<extra></extra>")
                 st.plotly_chart(theme_chart(fig2), use_container_width=True)
 
         # 플레이스홀더로 미리 만들어둔 빈 월(광고비 0원)까지 그리면 옛날~올해가 다 이어진 밋밋한
@@ -3153,6 +3204,10 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
                 labels={"value": "ROAS(%)", "variable": "기준"},
                 title="플랫폼 리포팅 ROAS vs GA 기준 ROAS",
                 category_orders={"월": month_label_order},
+            )
+            fig3.update_yaxes(tickformat=",.0f", ticksuffix="%")
+            fig3.for_each_trace(
+                lambda t: t.update(hovertemplate=f"기준={t.name}<br>월=%{{x}}<br>ROAS=%{{y:,.0f}}%<extra></extra>")
             )
             st.plotly_chart(theme_chart(fig3), use_container_width=True)
             st.caption("* 광고비가 집행된 달만 표시합니다 (미집행 빈 달 제외). GA-매출/GA-ROAS는 쇼핑검색 및 GFA 외부몰 데이터가 미집계될 수 있습니다 (원본 시트 주석 기준).")
@@ -3221,6 +3276,8 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
             by_channel_chart, x="channel", y="roas", title="매체별 ROAS (%, 선택 기간 합산)", text="roas_label",
             labels={"channel": "매체", "roas": "ROAS(%)"},
         )
+        fig.update_yaxes(tickformat=",.0f", ticksuffix="%")
+        fig.update_traces(hovertemplate="매체=%{x}<br>ROAS=%{y:,.0f}%<extra></extra>")
         st.plotly_chart(theme_chart(fig), use_container_width=True)
 
         # 광고비(VAT제외)는 CPA 계산에만 쓰고 화면/엑셀에는 광고비(VAT+)만 노출 — 컬럼이 많아
@@ -3466,6 +3523,8 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
                 new_chart_df, x="channel", y="roas", text="roas_label",
                 labels={"channel": "매체", "roas": "ROAS(%)"},
             )
+            fig_new.update_yaxes(tickformat=",.0f", ticksuffix="%")
+            fig_new.update_traces(hovertemplate="매체=%{x}<br>ROAS=%{y:,.0f}%<extra></extra>")
             st.plotly_chart(theme_chart(fig_new), use_container_width=True)
     with chart_re:
         st.markdown(
@@ -3479,6 +3538,8 @@ def render_targeting_performance_page(audience: pd.DataFrame, creatives_fallback
                 re_chart_df, x="channel", y="roas", text="roas_label",
                 labels={"channel": "매체", "roas": "ROAS(%)"},
             )
+            fig_re.update_yaxes(tickformat=",.0f", ticksuffix="%")
+            fig_re.update_traces(hovertemplate="매체=%{x}<br>ROAS=%{y:,.0f}%<extra></extra>")
             st.plotly_chart(theme_chart(fig_re), use_container_width=True)
 
 
@@ -3679,7 +3740,7 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     ]
     if abs(gap_report) >= 20:
         comment_body.append(f"보고서(매체 리포트) 매출은 어드민 대비 {_ops_fmt_pct(gap_report)} 차이가 나 격차가 큰 편이니 참고해주세요.")
-    st.markdown(" ".join(comment_body))
+    st.markdown(" ".join(comment_body), unsafe_allow_html=True)
     if cost_sum > 0:
         _next = {
             "목표 초과 달성": "다음 기간엔 상위 매체 위주로 증액을 검토하는 것을 권장합니다.",
@@ -3957,11 +4018,17 @@ def _ops_kpi_status(roas: float) -> str:
 
 
 def _ops_fmt_pp(v: float) -> str:
-    return f"{'▲' if v >= 0 else '▼'}{abs(v):,.0f}%p"
+    # 표(render_html_table)와 같은 색 규칙: ▲(상승)는 빨강, ▼(하락)는 파랑.
+    # HTML 문자열이라 이 값을 쓰는 st.markdown 호출엔 반드시 unsafe_allow_html=True를 줘야 한다.
+    color = "#d93025" if v >= 0 else "#1a73e8"
+    arrow = "▲" if v >= 0 else "▼"
+    return f'<span style="color:{color}">{arrow}{abs(v):,.0f}%p</span>'
 
 
 def _ops_fmt_pct(v: float) -> str:
-    return f"{'▲' if v >= 0 else '▼'}{abs(v):,.1f}%"
+    color = "#d93025" if v >= 0 else "#1a73e8"
+    arrow = "▲" if v >= 0 else "▼"
+    return f'<span style="color:{color}">{arrow}{abs(v):,.1f}%</span>'
 
 
 def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 월별 코멘트"):
@@ -4009,7 +4076,7 @@ def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 
                 f"{'하락' if trend_down else '상승'}해서, 지출 증감이 효율로 그대로 이어지지 않은 구간입니다."
             )
     if body:
-        st.markdown(" ".join(body))
+        st.markdown(" ".join(body), unsafe_allow_html=True)
 
     if status == "목표 미달":
         if trend_down:
@@ -4058,7 +4125,8 @@ def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 �
         st.markdown(
             f"전주({prev_label}) ROAS {prev.get('roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_roas)} "
             f"{'상승' if d_roas >= 0 else '하락'}했고, 광고비는 전주 대비 {_ops_fmt_pct(d_cost_pct)} "
-            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다."
+            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다.",
+            unsafe_allow_html=True,
         )
 
     if trend_down is None:
@@ -4141,15 +4209,28 @@ def render_operation_comment_page(
     weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame,
     channels: pd.DataFrame, snapshot: pd.DataFrame, creatives: pd.DataFrame,
     audience: pd.DataFrame, inflow_revenue: pd.DataFrame, ga_channel_inflow: pd.DataFrame,
+    agency_notes: pd.DataFrame = None,
 ):
-    """① 전체 총평 → ② 매체별 코멘트+예산재배분 제안 → ③ 소재별 제안 → ④ GA 유입 코멘트
-    순서로, 업로드된 데이터를 바탕으로 룰 기반 코멘트를 자동 생성한다. 어디까지나 1차 초안이라
-    최종 운영 판단은 직접 검토가 필요하다는 점을 상단에 명시한다."""
+    """⓪ 대행사 운영 메모 → ① 전체 총평 → ② 매체별 코멘트+예산재배분 제안 →
+    ③ 소재별 제안 → ④ GA 유입 코멘트 순서로, 업로드된 데이터를 바탕으로 룰 기반 코멘트를
+    자동 생성한다. 어디까지나 1차 초안이라 최종 운영 판단은 직접 검토가 필요하다는 점을 상단에 명시한다."""
     st.info(
         f"아래 코멘트는 업로드된 데이터를 기준으로 자동 생성한 1차 초안입니다. "
         f"판단 지표는 GA-ROAS, KPI 목표는 {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%입니다. "
         "최종 운영 판단은 직접 검토 후 반영해주세요."
     )
+
+    # ── ⓪ 대행사 운영 메모 (매체통합 시트 하단 자유 텍스트) ──
+    st.markdown("## ⓪ 대행사 운영 메모")
+    if agency_notes is None or agency_notes.empty:
+        st.caption("주간 리포트의 '매체통합' 시트 하단에서 인식된 운영 메모가 아직 없습니다.")
+    else:
+        latest_note = agency_notes.sort_values("as_of_date").iloc[-1]
+        st.caption(f"기준일: {latest_note['as_of_date']} (주간 리포트 하단 코멘트를 그대로 정리한 것입니다)")
+        st.markdown(latest_note["note_text"])
+    st.caption("※ 실제 파일 구조 검증 전 휴리스틱 추출입니다 — 다음 업로드에서 누락/오인식이 있으면 알려주세요.")
+
+    st.markdown("---")
 
     # ── ① 전체 총평 ──
     render_ops_comment_monthly(monthly, heading="## ① 전체 총평")
@@ -4275,7 +4356,7 @@ def render_operation_comment_page(
                     f"전월({py}년 {pmo}월) 대비 방문자수는 {_ops_fmt_pct(d_users_pct)} "
                     f"({d_users:+,.0f}명) {'증가' if d_users >= 0 else '감소'}했습니다."
                 )
-            st.markdown(" ".join(body))
+            st.markdown(" ".join(body), unsafe_allow_html=True)
 
         if not ga_channel_inflow.empty:
             gc = ga_channel_inflow.copy()
@@ -4327,6 +4408,7 @@ def main():
     audience = load_table("channel_audience_snapshot")
     inflow_revenue = load_table("inflow_revenue_daily")
     ga_channel_inflow = load_table("ga_channel_inflow")
+    agency_notes = load_table("agency_notes")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -4349,7 +4431,7 @@ def main():
     elif page == "운영 코멘트":
         render_operation_comment_page(
             weekly, monthly, daily, channels, snapshot, creatives, audience,
-            inflow_revenue, ga_channel_inflow,
+            inflow_revenue, ga_channel_inflow, agency_notes,
         )
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
