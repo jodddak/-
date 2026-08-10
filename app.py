@@ -2778,44 +2778,31 @@ def render_upload_panel():
             st.rerun()
 
     st.sidebar.markdown("---")
-    inflow_file = st.sidebar.file_uploader(
-        "② 유입·매출 비교 데이터 업로드 (일별 GA·어드민 지표 비교 xlsx)", type=["xlsx", "xls"],
-        key="inflow_revenue_uploader",
+    ga_file = st.sidebar.file_uploader(
+        "② GA 유입 데이터 업로드 (유입·매출 비교 또는 GA 매체별 유입 경로 xlsx)",
+        type=["xlsx", "xls"], key="ga_combined_uploader",
     )
-    if inflow_file is not None:
+    if ga_file is not None:
         with st.sidebar.status("파일 분석 중...", expanded=True) as status2:
-            inflow_xls = pd.ExcelFile(inflow_file)
-            inflow_df = parse_inflow_revenue_sheet(inflow_xls)
-            if inflow_df.empty:
+            # 두 파일은 시트 구조가 서로 달라서, 하나의 업로더에서 두 파서를 다 시도해보고
+            # 실제로 데이터가 나온 쪽만 채택한다(맞지 않는 파서는 항상 빈 결과를 내도록 이미
+            # 각 파서 안에 시트명/필수컬럼 가드가 있어서 안전하게 겸용 가능).
+            ga_xls = pd.ExcelFile(ga_file)
+            inflow_df = parse_inflow_revenue_sheet(ga_xls)
+            ga_channel_df = parse_ga_channel_inflow_sheet(ga_xls)
+
+            if inflow_df.empty and ga_channel_df.empty:
                 st.warning(
-                    f"'{INFLOW_REVENUE_SHEET}' 시트를 찾지 못했거나 일별 데이터가 없습니다. "
-                    "시트명이 정확한지 확인해주세요."
+                    "인식 가능한 데이터를 찾지 못했습니다. '일별 GA,어드민 지표 비교' 시트가 있는 "
+                    "유입·매출 비교 파일이거나, 날짜/세션 소스/매체 컬럼이 있는 GA 매체별 유입 경로 "
+                    "파일인지 확인해주세요."
                 )
-            else:
+            if not inflow_df.empty:
                 st.write(
                     f"🚶 일별 유입·매출 데이터 인식: {len(inflow_df)}일 "
                     f"({inflow_df['report_date'].min()} ~ {inflow_df['report_date'].max()})"
                 )
-            status2.update(label="분석 완료", state="complete")
-
-        if st.sidebar.button("💾 유입·매출 데이터 저장하기", type="primary", key="inflow_save_btn"):
-            n_inflow = save_table("inflow_revenue_daily", inflow_df, "report_date", inflow_file.name)
-            st.cache_data.clear()
-            st.sidebar.success(f"저장 완료! 유입·매출 비교 {n_inflow}일")
-            st.rerun()
-
-    st.sidebar.markdown("---")
-    ga_channel_file = st.sidebar.file_uploader(
-        "③ GA 매체별 유입 경로 데이터 업로드 (GA 매체별 유입 경로 xlsx)", type=["xlsx", "xls"],
-        key="ga_channel_inflow_uploader",
-    )
-    if ga_channel_file is not None:
-        with st.sidebar.status("파일 분석 중...", expanded=True) as status3:
-            ga_channel_xls = pd.ExcelFile(ga_channel_file)
-            ga_channel_df = parse_ga_channel_inflow_sheet(ga_channel_xls)
-            if ga_channel_df.empty:
-                st.warning("데이터를 인식하지 못했습니다. 파일 형식(날짜/세션 소스/매체 컬럼 포함)을 확인해주세요.")
-            else:
+            if not ga_channel_df.empty:
                 st.write(
                     f"🔎 GA 매체별 유입 경로 인식: {len(ga_channel_df)}행 "
                     f"({ga_channel_df['report_date'].min()} ~ {ga_channel_df['report_date'].max()}, "
@@ -2823,12 +2810,20 @@ def render_upload_panel():
                 )
                 if ga_channel_df["channel"].isna().all():
                     st.caption("※ '매체'(채널 그룹핑) 컬럼은 아직 비어있습니다 — UTM 매핑이 반영된 파일을 다시 올리면 채워집니다.")
-            status3.update(label="분석 완료", state="complete")
+            status2.update(label="분석 완료", state="complete")
 
-        if st.sidebar.button("💾 GA 매체별 유입 경로 저장하기", type="primary", key="ga_channel_save_btn"):
-            n_ga_channel = save_table("ga_channel_inflow", ga_channel_df, "report_date,source_medium", ga_channel_file.name)
+        if st.sidebar.button("💾 GA 유입 데이터 저장하기", type="primary", key="ga_combined_save_btn"):
+            saved_msgs = []
+            if not inflow_df.empty:
+                n_inflow = save_table("inflow_revenue_daily", inflow_df, "report_date", ga_file.name)
+                saved_msgs.append(f"유입·매출 비교 {n_inflow}일")
+            if not ga_channel_df.empty:
+                n_ga_channel = save_table(
+                    "ga_channel_inflow", ga_channel_df, "report_date,source_medium", ga_file.name
+                )
+                saved_msgs.append(f"GA 매체별 유입 경로 {n_ga_channel}행")
             st.cache_data.clear()
-            st.sidebar.success(f"저장 완료! GA 매체별 유입 경로 {n_ga_channel}행")
+            st.sidebar.success("저장 완료! " + (" · ".join(saved_msgs) if saved_msgs else "저장할 데이터가 없습니다."))
             st.rerun()
 
     st.sidebar.markdown("---")
@@ -3504,7 +3499,7 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     (어드민=회사 내부 기준 vs 보고서=매체 리포트 기준 vs GA 기준, 어드민 대비 격차%)로 구성."""
     if df.empty:
         st.info(
-            "아직 데이터가 없습니다. 왼쪽 사이드바 '② 유입·매출 비교 데이터 업로드'에서 "
+            "아직 데이터가 없습니다. 왼쪽 사이드바 '② GA 유입 데이터 업로드'에서 "
             "'일별 GA,어드민 지표 비교' 시트가 있는 파일을 올려주세요."
         )
         return
@@ -3716,7 +3711,7 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     다시 올리기 전까지는 비어있는 게 정상이다."""
     if df.empty:
         st.info(
-            "아직 데이터가 없습니다. 왼쪽 사이드바 '③ GA 매체별 유입 경로 데이터 업로드'에서 "
+            "아직 데이터가 없습니다. 왼쪽 사이드바 '② GA 유입 데이터 업로드'에서 "
             "파일을 올려주세요."
         )
         return
