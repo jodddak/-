@@ -3206,6 +3206,9 @@ def render_nav() -> str:
 # 페이지별 렌더 함수 (예전 tab1~tab4의 내용을 그대로 옮김, 로직 변경 없음)
 # ──────────────────────────────────────────────────────────────
 def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame):
+    weekly = _drop_trailing_zero_weeks(weekly)
+    if weekly is None:
+        weekly = pd.DataFrame()
     if not weekly.empty:
         st.subheader("🔎 기간 필터 (주간 기준)")
         min_d, max_d = weekly["week_start"].min(), weekly["week_end"].max()
@@ -4104,11 +4107,31 @@ def _ops_next_action(text: str) -> str:
 
 WEEKDAY_KOR = ["월", "화", "수", "목", "금", "토", "일"]
 
+_WEEKLY_ZERO_CHECK_COLS = ["impressions", "clicks", "cost_excl_vat", "cost_incl_vat", "conversions", "revenue"]
+
+
+def _drop_trailing_zero_weeks(weekly: pd.DataFrame) -> pd.DataFrame:
+    """parse_weekly()에서 이미 걸러내지만, Supabase에 예전 코드로 저장된 빈(전부 0) 미래 주
+    placeholder 행이 그대로 남아있을 수도 있어서 화면에 쓸 때도 한 번 더 방어적으로 걸러준다.
+    week_start 기준 정렬 후, 값이 하나도 없는 말미 행들을 제거한다."""
+    if weekly is None or weekly.empty:
+        return weekly
+    w = weekly.sort_values("week_start").reset_index(drop=True)
+    cols = [c for c in _WEEKLY_ZERO_CHECK_COLS if c in w.columns]
+    if not cols:
+        return w
+    metric_sum = w[cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+    nonzero_idx = metric_sum[metric_sum > 0].index
+    if len(nonzero_idx):
+        w = w.loc[: nonzero_idx.max()]
+    return w.reset_index(drop=True)
+
 
 def _weekly_period_label(weekly: pd.DataFrame, label_prefix: str = "주간 코멘트 정리") -> str:
     """weekly(주간 통합 데이터)의 가장 최근 주를 '{prefix} - 26년 7월 5주차 : 07/27(월) ~08/02(일)'
     형식으로 만든다. 원본 엑셀의 'N월 N주차' 라벨 텍스트에서 'N주차' 숫자만 재사용하고,
     날짜 범위와 요일은 week_start/week_end로 직접 계산해 매주 자동으로 갱신되게 한다."""
+    weekly = _drop_trailing_zero_weeks(weekly)
     if weekly is None or weekly.empty:
         return label_prefix
     w = weekly.sort_values("week_end").iloc[-1]
@@ -4199,7 +4222,8 @@ def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 �
     """주간별 코멘트 — 종합 대시보드의 '2) 주간별 누적' 표 아래에 쓴다.
     주간 데이터엔 GA-ROAS가 없어(주간 리포트 시트 구조상 GA 비교 컬럼 없음) 자체 ROAS만 쓴다."""
     st.markdown(heading)
-    if weekly.empty:
+    weekly = _drop_trailing_zero_weeks(weekly)
+    if weekly is None or weekly.empty:
         st.caption("주간 데이터가 아직 없습니다.")
         return
     w = add_kpis(weekly.sort_values("week_start")).reset_index(drop=True)
