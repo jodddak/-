@@ -637,6 +637,7 @@ TABLES = {
     "inflow_revenue_daily": "inflow_revenue_daily",
     "ga_channel_inflow": "ga_channel_inflow",
     "agency_notes": "agency_notes",
+    "channel_weekly": "channel_weekly",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -968,7 +969,10 @@ def parse_monthly(raw: pd.DataFrame, bounds, today: date):
     return out.reset_index(drop=True)
 
 
-def parse_weekly(raw: pd.DataFrame, bounds, today: date):
+def _parse_weekly_section(raw: pd.DataFrame, bounds, today: date) -> pd.DataFrame:
+    """'■ 주간 데이터'(또는 '통합 주간별') 섹션 하나를 파싱하는 공용 코어.
+    '매체통합' 시트의 통합 주간별 표뿐 아니라, 매체 개별 시트(네이버/GFA/메타/구글/크리테오 등)에
+    똑같이 있는 '■ 주간 데이터' 표에도 그대로 쓴다 — 구조가 동일하기 때문."""
     if "weekly" not in bounds:
         return pd.DataFrame()
     data, date_idx = section_dataframe(raw, *bounds["weekly"], date_tokens=("기간", "월별"))
@@ -986,9 +990,18 @@ def parse_weekly(raw: pd.DataFrame, bounds, today: date):
             continue
         month_lead = int(lead.group(1))
         if year_state["year"] is None:
-            # 통합 주간별 섹션은 월별 섹션의 첫 달과 같은 해에서 시작
-            first_month_row = raw.iloc[bounds["monthly"][0] + 2] if "monthly" in bounds else None
-            year_state["year"] = pd.to_datetime(first_month_row.iloc[1]).year if first_month_row is not None else today.year
+            # 주간 섹션은 같은 시트의 월간 섹션 첫 달과 같은 해에서 시작한다고 본다.
+            # 컬럼 순서가 시트마다 달라서(예: '매체통합'은 날짜가 1번째 컬럼, 매체 개별
+            # 시트는 0번째 컬럼인 경우 등) 위치를 하드코딩하지 않고 section_dataframe으로
+            # 실제 날짜 컬럼을 다시 찾아서 연도를 뽑는다.
+            year_val = None
+            if "monthly" in bounds:
+                m_data, m_date_idx = section_dataframe(raw, *bounds["monthly"], date_tokens=("월별", "기간"))
+                if m_data is not None and not m_data.empty:
+                    first_date = pd.to_datetime(m_data.iloc[0, m_date_idx], errors="coerce")
+                    if pd.notna(first_date):
+                        year_val = first_date.year
+            year_state["year"] = year_val if year_val is not None else today.year
         elif year_state["prev_month"] is not None and month_lead < year_state["prev_month"] - 6:
             year_state["year"] += 1
         year_state["prev_month"] = month_lead
@@ -1029,6 +1042,11 @@ def parse_weekly(raw: pd.DataFrame, bounds, today: date):
     if len(nonzero_idx):
         out = out.loc[: nonzero_idx.max()]
     return out.reset_index(drop=True)
+
+
+def parse_weekly(raw: pd.DataFrame, bounds, today: date) -> pd.DataFrame:
+    """'매체통합' 시트의 통합 주간별 표(전체 합산)를 파싱한다."""
+    return _parse_weekly_section(raw, bounds, today)
 
 
 def parse_daily(raw: pd.DataFrame, bounds, today: date):
@@ -1144,6 +1162,9 @@ def discover_channel_sheets(xls: pd.ExcelFile):
 
 
 def parse_channel_sheet(xls: pd.ExcelFile, sheet: str, today: date):
+    """매체 개별 시트(네이버/GFA/메타/구글/크리테오 등)에서 월간 데이터를 파싱한다.
+    (monthly_df, weekly_df) 튜플을 반환한다 — weekly_df는 그 시트에 '■ 주간 데이터' 섹션이
+    있을 때만 채워지고(대부분의 개별 매체 시트에 있음), 없으면 빈 DataFrame이다."""
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
     bounds = find_sections(raw)
     if "monthly" in bounds:
@@ -1152,16 +1173,23 @@ def parse_channel_sheet(xls: pd.ExcelFile, sheet: str, today: date):
         # '■ 월간 데이터' 같은 섹션 제목이 없는 단순 시트는 기존 방식으로 폴백
         hdr = find_header_row(raw)
         if hdr is None:
-            return None
+            return None, pd.DataFrame()
         headers = raw.iloc[hdr].tolist()
         date_idx = next((i for i, h in enumerate(headers) if clean_col(h) in ("기간", "월별")), None)
         if date_idx is None:
-            return None
+            return None, pd.DataFrame()
         data = raw.iloc[hdr + 1 :].copy()
         data.columns = headers
         data = data[data.iloc[:, date_idx].notna()]
+
+    weekly_out = pd.DataFrame()
+    if "weekly" in bounds:
+        weekly_out = _parse_weekly_section(raw, bounds, today)
+        if not weekly_out.empty:
+            weekly_out["channel"] = sheet
+
     if data is None or data.empty:
-        return None
+        return None, weekly_out
     m = metric_cols(list(data.columns))
     out = pd.DataFrame()
     out["report_month"] = pd.to_datetime(data.iloc[:, date_idx], errors="coerce")
@@ -1177,7 +1205,7 @@ def parse_channel_sheet(xls: pd.ExcelFile, sheet: str, today: date):
     out["report_month"] = out["report_month"].dt.date
     out = out[out["report_month"] <= today.replace(day=1)]
     out["channel"] = sheet
-    return out.reset_index(drop=True)
+    return out.reset_index(drop=True), weekly_out
 
 
 def parse_ga_raw(xls: pd.ExcelFile, today: date):
@@ -1966,6 +1994,7 @@ def parse_workbook(file, today: date):
         "daily": pd.DataFrame(),
         "channel_snapshot": pd.DataFrame(),
         "channels": pd.DataFrame(),
+        "channels_weekly": pd.DataFrame(),
         "ga": pd.DataFrame(),
         "creatives": pd.DataFrame(),
         "channel_audience": pd.DataFrame(),
@@ -1984,15 +2013,21 @@ def parse_workbook(file, today: date):
         result["agency_notes"] = parse_agency_notes(raw, today)
 
     chan_frames = []
+    chan_weekly_frames = []
     channel_sheet_candidates = discover_channel_sheets(xls)
     if visible_sheets is not None:
         channel_sheet_candidates = [s for s in channel_sheet_candidates if s in visible_sheets]
     for s in channel_sheet_candidates:
         result["channel_sheets_found"].append(s)
-        df = parse_channel_sheet(xls, s, today)
+        df, weekly_df = parse_channel_sheet(xls, s, today)
         if df is not None and len(df):
             chan_frames.append(df)
             result["channel_sheets_parsed"].append(s)
+        if weekly_df is not None and len(weekly_df):
+            chan_weekly_frames.append(weekly_df)
+    result["channels_weekly"] = (
+        pd.concat(chan_weekly_frames, ignore_index=True) if chan_weekly_frames else pd.DataFrame()
+    )
     if chan_frames:
         result["channels"] = pd.concat(chan_frames, ignore_index=True)
 
@@ -2812,6 +2847,8 @@ def render_upload_panel():
             st.write(f"🗓️ 통합 일자별: {len(result['daily'])}일")
             st.write(f"🏷️ 당월 매체별 스냅샷: {len(result['channel_snapshot'])}개 매체")
             st.write(f"📊 매체별 시트 인식: {len(result['channel_sheets_parsed'])}/{len(result['channel_sheets_found'])}개")
+            cw = result.get("channels_weekly", pd.DataFrame())
+            st.write(f"📆 매체별 주간 데이터 인식: {len(cw)}행 (매체 {cw['channel'].nunique() if not cw.empty else 0}종)")
             st.write(f"🔎 GA 유입경로: {len(result['ga'])}건")
             st.write(
                 f"🎨 소재별 성과 인식: {len(result.get('creatives', []))}행 "
@@ -2864,6 +2901,7 @@ def render_upload_panel():
             n1 = save_table("weekly_overview", result["weekly"], "week_start", file.name)
             n2 = save_table("monthly_overview", result["monthly"], "report_month", file.name)
             n3 = save_table("channel_monthly", result["channels"], "report_month,channel", file.name)
+            n3w = save_table("channel_weekly", result.get("channels_weekly", pd.DataFrame()), "channel,week_start", file.name)
             n4 = save_table("channel_snapshot", result["channel_snapshot"], "as_of_month,channel", file.name)
             n5 = save_table("ga_source", result["ga"], "as_of_date,source_medium", file.name)
             n6 = save_table("daily_overview", result["daily"], "report_date", file.name)
@@ -2883,7 +2921,7 @@ def render_upload_panel():
             )
             st.cache_data.clear()
             st.sidebar.success(
-                f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(당월) {n4} · "
+                f"저장 완료! 주간 {n1} · 월별 {n2} · 일자별 {n6} · 매체(월) {n3} · 매체(주간) {n3w} · 매체(당월) {n4} · "
                 f"GA {n5}건 · 소재 {n7}건 · 퍼널(신규/리타겟) {n8}건 · 운영 메모 {n9}건"
             )
             st.rerun()
@@ -3205,7 +3243,10 @@ def render_nav() -> str:
 # ──────────────────────────────────────────────────────────────
 # 페이지별 렌더 함수 (예전 tab1~tab4의 내용을 그대로 옮김, 로직 변경 없음)
 # ──────────────────────────────────────────────────────────────
-def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame):
+def render_overview_page(
+    weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame,
+    channels: pd.DataFrame = None, channels_weekly: pd.DataFrame = None,
+):
     weekly = _drop_trailing_zero_weeks(weekly)
     if weekly is None:
         weekly = pd.DataFrame()
@@ -3290,7 +3331,7 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
             date_col="report_month", show_cols=month_show_cols, numeric_cols=month_numeric_cols,
             title="1) 월별 누적", key="monthly_cum", mode="month",
         )
-        render_ops_comment_monthly(monthly)
+        render_ops_comment_monthly(monthly, channels=channels)
 
         wk = weekly.copy()
         if not wk.empty:
@@ -3304,7 +3345,7 @@ def render_overview_page(weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.
             date_col="week_start", show_cols=week_show_cols, numeric_cols=week_numeric_cols,
             title="2) 주간별 누적", key="weekly_cum", mode="week",
         )
-        render_ops_comment_weekly(weekly)
+        render_ops_comment_weekly(weekly, channels_weekly=channels_weekly)
 
         day_show_cols = ["report_date", "impressions", "clicks", "ctr", "cpc", "cost_excl_vat", "cost_incl_vat",
                           "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
@@ -4105,6 +4146,104 @@ def _ops_next_action(text: str) -> str:
     return f'<b style="color:#d93025;">다음 액션: {text}</b>'
 
 
+def _short_week_label(row) -> str:
+    """weekly 행에서 'N월 N주차' 짧은 라벨을 뽑는다. 원본 엑셀 라벨에 '주차' 표기가 없으면
+    week_start~week_end 날짜(MM/DD)로 대체한다."""
+    m = re.search(r"(\d{1,2})월\s*(\d+)\s*주차", str(row.get("label", "")))
+    if m:
+        return f"{m.group(1)}월 {m.group(2)}주차"
+    return f"{row['week_start']:%m/%d}~{row['week_end']:%m/%d}"
+
+
+def _ops_driver_sentence(cur, prev, cur_label: str, prev_label: str, roas_col: str = "roas", roas_label: str = "ROAS") -> str:
+    """단순히 'ROAS가 올랐다/내렸다'만 말하지 않고, 광고비·노출·클릭·매출이 어느 방향으로
+    같이 움직였는지(볼륨 측) + CVR·객단가가 어떻게 바뀌어서 ROAS가 그렇게 움직였는지(효율 측)를
+    묶어서 설명하는 문장을 만든다. 월별/주간별 코멘트에서 공용으로 쓴다.
+    반환값에 <span>/<b> 태그가 섞여 있어 st.markdown()에 unsafe_allow_html=True가 필요하다."""
+
+    def pct(a, b):
+        return (a - b) / abs(b) * 100 if b else 0
+
+    d_cost = cur.get("cost_incl_vat", 0) - prev.get("cost_incl_vat", 0)
+    d_impr_pct = pct(cur.get("impressions", 0), prev.get("impressions", 0))
+    d_clicks_pct = pct(cur.get("clicks", 0), prev.get("clicks", 0))
+    d_rev_pct = pct(cur.get("revenue", 0), prev.get("revenue", 0))
+    d_cvr_pct = pct(cur.get("cvr", 0), prev.get("cvr", 0))
+    d_aov = cur.get("aov", 0) - prev.get("aov", 0)
+    d_aov_pct = pct(cur.get("aov", 0), prev.get("aov", 0))
+    d_roas_pp = cur.get(roas_col, 0) - prev.get(roas_col, 0)
+
+    cost_word = "증가" if d_cost >= 0 else "감소"
+    metrics = [("노출수", d_impr_pct), ("클릭수", d_clicks_pct), ("매출", d_rev_pct)]
+    same_dir = [n for n, v in metrics if (v >= 0) == (d_cost >= 0)]
+    diff_dir = [n for n, v in metrics if (v >= 0) != (d_cost >= 0)]
+
+    if len(same_dir) == 3:
+        vol_sentence = f"{cur_label}는 {prev_label} 대비 광고비가 {cost_word}하면서 노출수·클릭수·매출도 동반 {cost_word}했습니다."
+    elif same_dir:
+        vol_sentence = (
+            f"{cur_label}는 {prev_label} 대비 광고비가 {cost_word}했고 {'·'.join(same_dir)}도 함께 {cost_word}했지만, "
+            f"{'·'.join(diff_dir)}는 반대로 움직였습니다."
+        )
+    else:
+        vol_sentence = f"{cur_label}는 {prev_label} 대비 광고비가 {cost_word}했지만, 노출수·클릭수·매출은 반대로 움직였습니다."
+
+    eff_bits = []
+    if abs(d_cvr_pct) >= 0.5:
+        eff_bits.append(f"CVR이 {_ops_fmt_pct(d_cvr_pct)} {'상승' if d_cvr_pct >= 0 else '하락'}")
+    if abs(d_aov_pct) >= 0.5:
+        eff_bits.append(f"객단가가 {_ops_fmt_pct(d_aov_pct)}({d_aov:+,.0f}원) {'상승' if d_aov_pct >= 0 else '하락'}")
+
+    roas_verb = "상승" if d_roas_pp >= 0 else "하락"
+    if eff_bits:
+        eff_sentence = "다만 " + ", ".join(eff_bits) + f"한 영향으로 {roas_label}는 {_ops_fmt_pp(d_roas_pp)} {roas_verb}했습니다."
+    else:
+        eff_sentence = f"{roas_label}는 {_ops_fmt_pp(d_roas_pp)} {roas_verb}했습니다."
+
+    return vol_sentence + " " + eff_sentence
+
+
+def _ops_top_mover_sentence(
+    df: pd.DataFrame, key_col: str, period_col: str, cur_period, prev_period,
+    cost_col: str = "cost_incl_vat", rev_col: str = "revenue", min_abs_cost: float = 0, min_abs_rev: float = 0,
+) -> str:
+    """전체(또는 그룹) 수치가 왜 그렇게 움직였는지, 어떤 매체/소재가 광고비·매출 변화를
+    가장 크게 이끌었는지 짚어주는 문장 하나를 만든다. 매체별/소재별 코멘트에서 공용으로 쓴다.
+    df엔 [key_col, period_col, cost_col, rev_col]가 있어야 하고, cur/prev 둘 다 존재하는
+    key만 비교 대상으로 삼는다(신규/누락 항목은 증감폭 계산이 왜곡되므로 제외)."""
+    if df is None or df.empty:
+        return ""
+    cur_df = df[df[period_col] == cur_period].groupby(key_col)[[cost_col, rev_col]].sum()
+    prev_df = df[df[period_col] == prev_period].groupby(key_col)[[cost_col, rev_col]].sum()
+    common = cur_df.index.intersection(prev_df.index)
+    if len(common) == 0:
+        return ""
+    d_cost = cur_df.loc[common, cost_col] - prev_df.loc[common, cost_col]
+    d_rev = cur_df.loc[common, rev_col] - prev_df.loc[common, rev_col]
+
+    bits = []
+    if len(d_cost) and d_cost.abs().max() >= min_abs_cost:
+        cost_driver = d_cost.abs().idxmax()
+        v = d_cost[cost_driver]
+        if abs(v) > 0:
+            bits.append(f"{cost_driver}에서 광고비가 {abs(v):,.0f}원 {'증가' if v >= 0 else '감소'}한 영향이 컸고")
+    if len(d_rev) and d_rev.abs().max() >= min_abs_rev:
+        rev_driver = d_rev.abs().idxmax()
+        v = d_rev[rev_driver]
+        if abs(v) == 0:
+            pass
+        elif bits and rev_driver in d_cost.index and rev_driver == d_cost.abs().idxmax():
+            bits.append(f"같은 곳에서 매출도 {abs(v):,.0f}원 {'증가' if v >= 0 else '감소'}하며 영향을 키웠습니다")
+        else:
+            connector = "대신 " if bits else ""
+            bits.append(f"{connector}{rev_driver}에서 매출이 {abs(v):,.0f}원 {'증가' if v >= 0 else '감소'}한 영향이 컸습니다")
+    if not bits:
+        return ""
+    if len(bits) == 1:
+        return bits[0] + "."
+    return bits[0] + ", " + bits[1] + "."
+
+
 WEEKDAY_KOR = ["월", "화", "수", "목", "금", "토", "일"]
 
 _WEEKLY_ZERO_CHECK_COLS = ["impressions", "clicks", "cost_excl_vat", "cost_incl_vat", "conversions", "revenue"]
@@ -4150,9 +4289,11 @@ def _weekly_period_label(weekly: pd.DataFrame, label_prefix: str = "주간 코�
     return f"{label_prefix} - {period}"
 
 
-def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 월별 코멘트"):
+def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 월별 코멘트", channels: pd.DataFrame = None):
     """월별 총평 코멘트 — 종합 대시보드의 '1) 월별 누적' 표 아래와, 운영 코멘트 탭의 ①에서
-    공용으로 쓴다. GA-ROAS를 KPI 판단 기준(200~300%)으로 쓰고, 자체 ROAS는 참고로 같이 보여준다."""
+    공용으로 쓴다. GA-ROAS를 KPI 판단 기준(200~300%)으로 쓰고, 자체 ROAS는 참고로 같이 보여준다.
+    channels(매체별 월간 데이터)가 주어지면, '전체'만 보고 끝내지 않고 어느 매체가 광고비/매출
+    변화를 가장 크게 이끌었는지 매체명까지 짚어주는 문장을 한 줄 더 붙인다."""
     st.markdown(heading)
     if monthly.empty:
         st.caption("월별 데이터가 아직 없습니다.")
@@ -4179,21 +4320,16 @@ def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 
         prev_label = f"{prev['report_month'].year}년 {prev['report_month'].month}월"
         d_garoas = cur_garoas - prev.get("ga_roas", 0)
         trend_down = d_garoas < 0
-        d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
-        d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
-        d_rev = cur["revenue"] - prev["revenue"]
-        d_rev_pct = (d_rev / prev["revenue"] * 100) if prev["revenue"] else 0
-        body.append(
-            f"전월({prev_label}) GA-ROAS {prev.get('ga_roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_garoas)} "
-            f"{'상승' if d_garoas >= 0 else '하락'}했습니다. 광고비는 전월 대비 {_ops_fmt_pct(d_cost_pct)} "
-            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했고, 매출은 {_ops_fmt_pct(d_rev_pct)} "
-            f"({d_rev:+,.0f}원) {'증가' if d_rev >= 0 else '감소'}했습니다."
-        )
-        if (d_cost >= 0) != (d_garoas >= 0) and abs(d_cost_pct) > 10:
-            body.append(
-                f"광고비가 {'늘었는데도' if d_cost >= 0 else '줄었는데도'} GA-ROAS는 "
-                f"{'하락' if trend_down else '상승'}해서, 지출 증감이 효율로 그대로 이어지지 않은 구간입니다."
+        body.append(_ops_driver_sentence(cur, prev, cur_label, prev_label, roas_col="ga_roas", roas_label="GA-ROAS"))
+        if channels is not None and not channels.empty and "report_month" in channels.columns:
+            ch = channels.copy()
+            ch["report_month"] = pd.to_datetime(ch["report_month"]).dt.date
+            mover = _ops_top_mover_sentence(
+                ch, key_col="channel", period_col="report_month",
+                cur_period=cur["report_month"], prev_period=prev["report_month"],
             )
+            if mover:
+                body.append(mover)
     if body:
         st.markdown(" ".join(body), unsafe_allow_html=True)
 
@@ -4218,9 +4354,13 @@ def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 
     st.markdown(_ops_next_action(body_next), unsafe_allow_html=True)
 
 
-def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 주간별 코멘트"):
+def render_ops_comment_weekly(
+    weekly: pd.DataFrame, heading: str = "#### 💬 주간별 코멘트", channels_weekly: pd.DataFrame = None,
+):
     """주간별 코멘트 — 종합 대시보드의 '2) 주간별 누적' 표 아래에 쓴다.
-    주간 데이터엔 GA-ROAS가 없어(주간 리포트 시트 구조상 GA 비교 컬럼 없음) 자체 ROAS만 쓴다."""
+    주간 데이터엔 GA-ROAS가 없어(주간 리포트 시트 구조상 GA 비교 컬럼 없음) 자체 ROAS만 쓴다.
+    channels_weekly(매체 개별 시트의 주간 데이터)가 주어지면, 어느 매체가 이번 주 광고비/매출
+    변화를 가장 크게 이끌었는지 매체명까지 짚어주는 문장을 한 줄 더 붙인다."""
     st.markdown(heading)
     weekly = _drop_trailing_zero_weeks(weekly)
     if weekly is None or weekly.empty:
@@ -4240,14 +4380,21 @@ def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 �
         prev_label = f"{prev['week_start']:%Y-%m-%d}~{prev['week_end']:%Y-%m-%d}"
         d_roas = cur_roas - prev.get("roas", 0)
         trend_down = d_roas < 0
-        d_cost = cur["cost_incl_vat"] - prev["cost_incl_vat"]
-        d_cost_pct = (d_cost / prev["cost_incl_vat"] * 100) if prev["cost_incl_vat"] else 0
         st.markdown(
-            f"전주({prev_label}) ROAS {prev.get('roas', 0):,.0f}% 대비 {_ops_fmt_pp(d_roas)} "
-            f"{'상승' if d_roas >= 0 else '하락'}했고, 광고비는 전주 대비 {_ops_fmt_pct(d_cost_pct)} "
-            f"({d_cost:+,.0f}원) {'증가' if d_cost >= 0 else '감소'}했습니다.",
+            _ops_driver_sentence(
+                cur, prev, _short_week_label(cur), _short_week_label(prev), roas_col="roas", roas_label="ROAS"
+            ),
             unsafe_allow_html=True,
         )
+        if channels_weekly is not None and not channels_weekly.empty and "week_start" in channels_weekly.columns:
+            cwk = channels_weekly.copy()
+            cwk["week_start"] = pd.to_datetime(cwk["week_start"]).dt.date
+            mover = _ops_top_mover_sentence(
+                cwk, key_col="channel", period_col="week_start",
+                cur_period=cur["week_start"], prev_period=prev["week_start"],
+            )
+            if mover:
+                st.markdown(mover)
 
     if trend_down is None:
         next_action = "아직 비교할 전주 데이터가 없어 다음 주 데이터가 쌓이면 추세를 판단할 수 있습니다."
@@ -4357,7 +4504,7 @@ def render_operation_comment_page(
     st.markdown("---")
 
     # ── ① 전체 총평 ──
-    render_ops_comment_monthly(monthly, heading="## ① 전체 총평")
+    render_ops_comment_monthly(monthly, heading="## ① 전체 총평", channels=channels)
 
     st.markdown("---")
 
@@ -4430,6 +4577,20 @@ def render_operation_comment_page(
         held_n = int((agg["판정"] == "판단 보류").sum())
 
         st.caption(f"계정 평균 ROAS: {account_avg_roas:,.0f}% · 광고비 {OPS_CREATIVE_MIN_SPEND:,}원 미만 {held_n}개 소재는 판단 보류")
+
+        # 전체 소재 수치가 왜 그렇게 움직였는지, 어떤 소재가 광고비/매출 변화를 가장 크게
+        # 이끌었는지 이전 스냅샷과 비교해 짚어준다(직전 저장 시점 대비).
+        cr_dates = sorted(cr["as_of_date"].unique())
+        if len(cr_dates) >= 2:
+            cur_snap_date, prev_snap_date = cr_dates[-1], cr_dates[-2]
+            cr_key = cr.copy()
+            cr_key["key"] = cr_key["channel"].astype(str) + " " + cr_key["creative"].astype(str)
+            creative_mover = _ops_top_mover_sentence(
+                cr_key, key_col="key", period_col="as_of_date",
+                cur_period=cur_snap_date, prev_period=prev_snap_date,
+            )
+            if creative_mover:
+                st.markdown(f"직전 저장({prev_snap_date}) 대비 이번({cur_snap_date}) 소재 수치는 {creative_mover}")
 
         if not good.empty:
             top_good = ", ".join(f"{r.creative}({r.roas:,.0f}%)" for r in good.head(3).itertuples())
@@ -4538,6 +4699,7 @@ def main():
     inflow_revenue = load_table("inflow_revenue_daily")
     ga_channel_inflow = load_table("ga_channel_inflow")
     agency_notes = load_table("agency_notes")
+    channels_weekly = load_table("channel_weekly")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -4550,7 +4712,7 @@ def main():
     page = render_nav()  # ← st.tabs() 대신 사이드바 그룹 네비게이션
 
     if page == "종합 대시보드":
-        render_overview_page(weekly, monthly, daily)
+        render_overview_page(weekly, monthly, daily, channels, channels_weekly)
     elif page == "매체별 성과":
         render_channel_page(channels, snapshot)
     elif page == "타겟팅별 성과":
