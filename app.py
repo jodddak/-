@@ -4399,6 +4399,15 @@ def render_ops_comment_weekly(
             )
             if mover:
                 st.markdown(mover)
+            cur_ch = sorted(cwk.loc[cwk["week_start"] == cur["week_start"], "channel"].unique())
+            prev_ch = sorted(cwk.loc[cwk["week_start"] == prev["week_start"], "channel"].unique())
+            st.caption(
+                f"※ 매체별 주간 데이터 인식: 전체 {cwk['channel'].nunique()}개 매체 · "
+                f"{_short_week_label(cur)} {len(cur_ch)}개({', '.join(cur_ch) or '없음'}) · "
+                f"{_short_week_label(prev)} {len(prev_ch)}개({', '.join(prev_ch) or '없음'})"
+            )
+        elif channels_weekly is not None and channels_weekly.empty:
+            st.caption("※ 매체별 주간 데이터가 아직 없습니다 — 매체별 코멘트는 전체 합산 기준으로만 표시됩니다.")
 
     if trend_down is None:
         next_action = "아직 비교할 전주 데이터가 없어 다음 주 데이터가 쌓이면 추세를 판단할 수 있습니다."
