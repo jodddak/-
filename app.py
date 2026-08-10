@@ -1161,11 +1161,26 @@ def discover_channel_sheets(xls: pd.ExcelFile):
     return names
 
 
-def parse_channel_sheet(xls: pd.ExcelFile, sheet: str, today: date):
+def _drop_hidden_rows(raw: pd.DataFrame, hidden_rows: set | None) -> pd.DataFrame:
+    """엑셀에서 행 자체를 숨겨둔(우클릭 → 행 숨기기) 행은 화면에 보이는 표와 무관한
+    예전 버전/임시 데이터인 경우가 많다. 위치 기반(iloc) 파싱이 엉뚱한 행을 진짜 표로
+    착각하지 않도록, 섹션을 찾기 전에 아예 원본에서 제거하고 행 번호를 다시 매긴다."""
+    if not hidden_rows:
+        return raw
+    keep_idx = [i for i in range(len(raw)) if i not in hidden_rows]
+    if len(keep_idx) == len(raw):
+        return raw
+    return raw.iloc[keep_idx].reset_index(drop=True)
+
+
+def parse_channel_sheet(xls: pd.ExcelFile, sheet: str, today: date, hidden_rows: set | None = None):
     """매체 개별 시트(네이버/GFA/메타/구글/크리테오 등)에서 월간 데이터를 파싱한다.
     (monthly_df, weekly_df) 튜플을 반환한다 — weekly_df는 그 시트에 '■ 주간 데이터' 섹션이
-    있을 때만 채워지고(대부분의 개별 매체 시트에 있음), 없으면 빈 DataFrame이다."""
+    있을 때만 채워지고(대부분의 개별 매체 시트에 있음), 없으면 빈 DataFrame이다.
+    hidden_rows: 엑셀에서 숨겨진 행 번호(raw의 0-indexed 위치) 집합 — 있으면 파싱 전에 미리
+    제거한다. 시트 안에 예전 버전 표가 통째로 숨겨진 채 남아있어 잘못 잡히는 걸 막기 위함."""
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+    raw = _drop_hidden_rows(raw, hidden_rows)
     bounds = find_sections(raw)
     if "monthly" in bounds:
         data, date_idx = section_dataframe(raw, *bounds["monthly"], date_tokens=("기간", "월별"))
@@ -2005,6 +2020,7 @@ def parse_workbook(file, today: date):
     }
     if "매체통합" in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name="매체통합", header=None)
+        raw = _drop_hidden_rows(raw, get_hidden_rows(wb_for_hidden, "매체통합"))
         bounds = find_sections(raw)
         result["monthly"] = parse_monthly(raw, bounds, today)
         result["weekly"] = parse_weekly(raw, bounds, today)
@@ -2019,7 +2035,7 @@ def parse_workbook(file, today: date):
         channel_sheet_candidates = [s for s in channel_sheet_candidates if s in visible_sheets]
     for s in channel_sheet_candidates:
         result["channel_sheets_found"].append(s)
-        df, weekly_df = parse_channel_sheet(xls, s, today)
+        df, weekly_df = parse_channel_sheet(xls, s, today, hidden_rows=get_hidden_rows(wb_for_hidden, s))
         if df is not None and len(df):
             chan_frames.append(df)
             result["channel_sheets_parsed"].append(s)
