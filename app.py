@@ -3801,7 +3801,7 @@ def render_inflow_revenue_page(df: pd.DataFrame):
             "목표 구간 내": "다음 기간에도 현재 운영 기조를 유지하는 것을 권장합니다.",
             "목표 미달": "다음 기간엔 매체별·소재별 코멘트를 참고해 원인을 좁혀보는 것을 권장합니다.",
         }[status]
-        st.markdown(f"**다음 액션**: {_next}")
+        st.markdown(_ops_next_action(_next), unsafe_allow_html=True)
 
     dl_df = format_display(detail[detail_cols])
     dl_df["avg_session_duration"] = detail["avg_session_duration"].map(_fmt_duration)
@@ -3998,8 +3998,11 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     st.markdown(" ".join(comment_body))
     if not agg.empty:
         st.markdown(
-            f"**다음 액션**: {top1['source_medium']} 유입이 다음 기간에도 유지되는지 확인하고, "
-            "유입 대비 구매(전환)가 낮은 소스/매체가 있으면 랜딩페이지·타겟팅 점검을 권장합니다."
+            _ops_next_action(
+                f"{top1['source_medium']} 유입이 다음 기간에도 유지되는지 확인하고, "
+                "유입 대비 구매(전환)가 낮은 소스/매체가 있으면 랜딩페이지·타겟팅 점검을 권장합니다."
+            ),
+            unsafe_allow_html=True,
         )
     if agg["channel"].isna().all() if not agg.empty else False:
         st.caption("※ '매체'(채널 그룹핑) 매핑 전이라 소스/매체 단위로만 코멘트했습니다.")
@@ -4085,6 +4088,37 @@ def _ops_fmt_pct(v: float) -> str:
     return f'<span style="color:{color}">{arrow}{abs(v):,.1f}%</span>'
 
 
+def _ops_next_action(text: str) -> str:
+    """'다음 액션' 라벨을 굵고 빨간 텍스트로 강조해서 눈에 띄게 한다.
+    이 함수가 붙은 문장을 st.markdown()으로 렌더링할 땐 unsafe_allow_html=True가 필요하다."""
+    return f'<b style="color:#d93025;">다음 액션</b>: {text}'
+
+
+WEEKDAY_KOR = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def _weekly_period_label(weekly: pd.DataFrame, label_prefix: str = "주간 코멘트 정리") -> str:
+    """weekly(주간 통합 데이터)의 가장 최근 주를 '{prefix} - 26년 7월 5주차 : 07/27(월) ~08/02(일)'
+    형식으로 만든다. 원본 엑셀의 'N월 N주차' 라벨 텍스트에서 'N주차' 숫자만 재사용하고,
+    날짜 범위와 요일은 week_start/week_end로 직접 계산해 매주 자동으로 갱신되게 한다."""
+    if weekly is None or weekly.empty:
+        return label_prefix
+    w = weekly.sort_values("week_end").iloc[-1]
+    week_start, week_end = w["week_start"], w["week_end"]
+    if isinstance(week_start, str):
+        week_start = pd.to_datetime(week_start).date()
+    if isinstance(week_end, str):
+        week_end = pd.to_datetime(week_end).date()
+    year2 = f"{week_start.year % 100:02d}"
+    month = week_start.month
+    m = re.search(r"(\d+)\s*주차", str(w.get("label", "")))
+    week_part = f"{m.group(1)}주차" if m else ""
+    start_s = f"{week_start.month:02d}/{week_start.day:02d}({WEEKDAY_KOR[week_start.weekday()]})"
+    end_s = f"{week_end.month:02d}/{week_end.day:02d}({WEEKDAY_KOR[week_end.weekday()]})"
+    period = f"{year2}년 {month}월 {week_part} : {start_s} ~{end_s}".replace("  ", " ")
+    return f"{label_prefix} - {period}"
+
+
 def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 월별 코멘트"):
     """월별 총평 코멘트 — 종합 대시보드의 '1) 월별 누적' 표 아래와, 운영 코멘트 탭의 ①에서
     공용으로 쓴다. GA-ROAS를 KPI 판단 기준(200~300%)으로 쓰고, 자체 ROAS는 참고로 같이 보여준다."""
@@ -4150,7 +4184,7 @@ def render_ops_comment_monthly(monthly: pd.DataFrame, heading: str = "#### 💬 
         )
     else:
         body_next = "목표 구간 내에서 안정적으로 운영되고 있어, 다음 달에도 현재 운영 기조(매체 비중·소재 구성)를 유지하는 것을 권장합니다."
-    st.markdown(f"**다음 액션**: {body_next}")
+    st.markdown(_ops_next_action(body_next), unsafe_allow_html=True)
 
 
 def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 주간별 코멘트"):
@@ -4193,7 +4227,7 @@ def render_ops_comment_weekly(weekly: pd.DataFrame, heading: str = "#### 💬 �
         next_action = "상승 추세라 다음 주도 현재 운영을 유지하며 지켜보는 것을 권장합니다."
     else:
         next_action = "하락 추세이니 다음 주엔 원인(소재 소진·시즌성 등)을 점검해보는 것을 권장합니다."
-    st.markdown(f"**다음 액션**: {next_action}")
+    st.markdown(_ops_next_action(next_action), unsafe_allow_html=True)
 
 
 def _ops_channel_bucket_lines(df: pd.DataFrame, roas_col: str) -> list:
@@ -4225,18 +4259,20 @@ def _ops_channel_bucket_lines(df: pd.DataFrame, roas_col: str) -> list:
         if not over.empty:
             lines.append(
                 f"**목표 초과 ({len(over)}개 매체)**: {_names_with_roas(over)} — 목표를 상회합니다. "
-                "**다음 액션**: 이번 주 중 10~20% 증액을 적용해보고, 다음 주 재측정 후 유지·추가 증액 여부를 결정하는 것을 권장합니다."
+                + _ops_next_action("이번 주 중 10~20% 증액을 적용해보고, 다음 주 재측정 후 유지·추가 증액 여부를 결정하는 것을 권장합니다.")
             )
         if not near.empty:
             lines.append(
                 f"**목표 근접 ({len(near)}개 매체)**: {_names_with_roas(near)} — 목표 구간 안쪽입니다. "
-                "**다음 액션**: 현재 예산·소재를 유지하며 다음 주까지 추세를 지켜보는 것을 권장합니다."
+                + _ops_next_action("현재 예산·소재를 유지하며 다음 주까지 추세를 지켜보는 것을 권장합니다.")
             )
         if not under.empty:
             lines.append(
                 f"**목표 미달 ({len(under)}개 매체)**: {_names_with_roas(under)} — 목표에 못 미칩니다. "
-                "**다음 액션**: 이번 주엔 소재 교체를 먼저 시도하고, 다음 주에도 개선이 없으면 총 예산의 10~15% "
-                "내에서 목표 초과 매체 쪽으로 단계적으로 이동하는 것을 권장합니다."
+                + _ops_next_action(
+                    "이번 주엔 소재 교체를 먼저 시도하고, 다음 주에도 개선이 없으면 총 예산의 10~15% "
+                    "내에서 목표 초과 매체 쪽으로 단계적으로 이동하는 것을 권장합니다."
+                )
             )
     if not held.empty:
         lines.append(f"판단 보류(광고비 {OPS_MIN_CHANNEL_SPEND:,}원 미만, 표본 부족): {', '.join(held['channel'])}")
@@ -4254,7 +4290,7 @@ def render_ops_comment_channel_narrative(
         st.caption("판정 가능한 매체 데이터가 아직 없습니다.")
         return
     for line in lines:
-        st.markdown(line)
+        st.markdown(line, unsafe_allow_html=True)
     if footnote:
         st.caption(footnote)
 
@@ -4275,7 +4311,9 @@ def render_operation_comment_page(
     )
 
     # ── ⓪ 대행사 운영 메모 (매체통합 시트 하단 자유 텍스트) ──
-    st.markdown("## ⓪ 대행사 운영 메모")
+    # 제목에 그 주의 연도/월/N주차/날짜범위(요일 포함)를 자동으로 붙인다 — 매주 업로드할 때마다
+    # weekly(통합 주간별)의 가장 최근 주 기준으로 갱신된다.
+    st.markdown(f"## {_weekly_period_label(weekly)}")
     if agency_notes is None or agency_notes.empty:
         st.caption("주간 리포트의 '매체통합' 시트 하단에서 인식된 운영 메모가 아직 없습니다.")
     else:
@@ -4302,7 +4340,7 @@ def render_operation_comment_page(
         st.caption(f"기준월: {latest_month}")
 
         for line in _ops_channel_bucket_lines(snap, "ga_roas"):
-            st.markdown(line)
+            st.markdown(line, unsafe_allow_html=True)
 
         judged = snap[snap["cost_incl_vat"] >= OPS_MIN_CHANNEL_SPEND]
         gap_flag = judged[
@@ -4365,7 +4403,8 @@ def render_operation_comment_page(
             top_good = ", ".join(f"{r.creative}({r.roas:,.0f}%)" for r in good.head(3).itertuples())
             st.markdown(
                 f"**효율 우수 소재 ({len(good)}개)**: 계정 평균 대비 1.2배 이상 — 상위로는 {top_good} 등입니다. "
-                "**다음 액션**: 이번 주 중 예산을 증액하거나 동일 소재를 타 캠페인/타겟팅으로 확장 적용해보는 것을 권장합니다."
+                + _ops_next_action("이번 주 중 예산을 증액하거나 동일 소재를 타 캠페인/타겟팅으로 확장 적용해보는 것을 권장합니다."),
+                unsafe_allow_html=True,
             )
             st.dataframe(
                 korify(format_display(good[["channel", "creative", "cost_incl_vat", "roas"]])),
@@ -4376,7 +4415,8 @@ def render_operation_comment_page(
             st.markdown(
                 f"**효율 부진 소재 ({len(bad)}개)**: 계정 평균 대비 0.7배 이하 — 하위로는 {worst_bad} 등입니다. "
                 "다만 막 시작한 소재는 학습 기간(3~7일)을 감안해 성급히 끄지 않는 것을 권장합니다. "
-                "**다음 액션**: 이번 주엔 문구/이미지 교체를 먼저 시도하고, 다음 주까지 개선이 없으면 축소/OFF를 검토하세요."
+                + _ops_next_action("이번 주엔 문구/이미지 교체를 먼저 시도하고, 다음 주까지 개선이 없으면 축소/OFF를 검토하세요."),
+                unsafe_allow_html=True,
             )
             st.dataframe(
                 korify(format_display(bad[["channel", "creative", "cost_incl_vat", "roas"]])),
@@ -4426,9 +4466,12 @@ def render_operation_comment_page(
                 names = ", ".join(f"{r.source_medium}({r.users:,.0f}명)" for r in top_src.itertuples())
                 st.markdown(f"최근 30일 기준 유입 상위 소스/매체는 {names} 순입니다.")
                 st.markdown(
-                    f"**다음 액션**: 상위 소스인 {top_src.iloc[0]['source_medium']} 유입을 다음 주에도 "
-                    "유지되는지 확인하고, 유입은 있는데 구매로 안 이어지는 소스/매체가 있으면 랜딩페이지·"
-                    "타겟팅을 점검하는 것을 권장합니다."
+                    _ops_next_action(
+                        f"상위 소스인 {top_src.iloc[0]['source_medium']} 유입을 다음 주에도 "
+                        "유지되는지 확인하고, 유입은 있는데 구매로 안 이어지는 소스/매체가 있으면 랜딩페이지·"
+                        "타겟팅을 점검하는 것을 권장합니다."
+                    ),
+                    unsafe_allow_html=True,
                 )
             if recent["channel"].isna().all():
                 st.caption(
