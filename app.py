@@ -1080,20 +1080,22 @@ def parse_channel_snapshot(raw: pd.DataFrame, bounds, monthly_df: pd.DataFrame):
 
 
 # 대행사가 '매체통합' 시트 하단에 자유 텍스트로 남기는 운영 메모(특이사항/코멘트)를 찾을 때
-# 불릿 마커로 인정할 접두어. 실제 샘플 파일이 없어 휴리스틱하게 잡는다 — 다음 실제 업로드로 검증 필요.
-AGENCY_NOTE_BULLET_PREFIXES = ("*", "-", "•", ">", "※", "▶", "①", "②", "③", "④", "⑤")
+# 상위 불릿(예: "*. 7월 신규 예산 반영 완료")으로 인정할 접두어.
+AGENCY_NOTE_BULLET_PREFIXES = ("*", "-", "•", "※", "▶", "①", "②", "③", "④", "⑤")
+# ">"로 시작하는 줄은 바로 위 상위 불릿에 딸린 하위/부연 설명으로 취급(들여쓰기해서 표시).
+AGENCY_NOTE_SUB_PREFIX = ">"
 
 
 def parse_agency_notes(raw: pd.DataFrame, today: date) -> pd.DataFrame:
     """'매체통합' 시트 하단에 대행사가 정리해주는 자유 텍스트 운영 코멘트/특이사항을 추출한다.
     상단 표(월간/주간/일별/매체별 현황)는 각 행이 숫자 위주 데이터라 첫 칸이 불릿 마커로
-    시작하지 않는다는 점을 이용해, 각 행의 첫 번째 비어있지 않은 문자열 셀이 '*', '-', '>' 같은
-    불릿 마커로 시작하는 행만 순서대로 모아 하나의 텍스트로 합친다.
-    실제 샘플 파일 없이 휴리스틱하게 작성했으므로, 다음 실제 업로드 시 인식이 잘 되는지 확인이 필요하다."""
+    시작하지 않는다는 점을 이용해, 각 행의 첫 번째 비어있지 않은 문자열 셀이 '*.', '-', '>' 같은
+    불릿 마커로 시작하는 행만 순서대로 모아 하나의 텍스트로 합친다. '>'로 시작하는 줄은 바로 위
+    상위 항목의 하위 설명으로 보고 들여써서 표시한다."""
     if raw is None or raw.empty:
         return pd.DataFrame()
 
-    lines = []
+    items = []  # (level, text) — level 0=상위 불릿, 1=하위(">")
     n_rows, n_cols = raw.shape
     for i in range(n_rows):
         first_str = None
@@ -1104,15 +1106,20 @@ def parse_agency_notes(raw: pd.DataFrame, today: date) -> pd.DataFrame:
                 break
         if not first_str or len(first_str) < 2:
             continue
-        if first_str.startswith(AGENCY_NOTE_BULLET_PREFIXES):
-            text = first_str.lstrip("".join(AGENCY_NOTE_BULLET_PREFIXES) + " ").strip()
+        if first_str.startswith(AGENCY_NOTE_SUB_PREFIX):
+            text = first_str.lstrip(AGENCY_NOTE_SUB_PREFIX + " ").strip()
             if text:
-                lines.append(text)
+                items.append((1, text))
+        elif first_str.startswith(AGENCY_NOTE_BULLET_PREFIXES):
+            # "*." "* " 등 뒤에 붙는 마침표/공백까지 같이 제거 (예: "*. 쇼핑박스..." → "쇼핑박스...")
+            text = first_str.lstrip("".join(AGENCY_NOTE_BULLET_PREFIXES) + ". ").strip()
+            if text:
+                items.append((0, text))
 
-    if not lines:
+    if not items:
         return pd.DataFrame()
 
-    note_text = "\n".join(f"- {t}" for t in lines)
+    note_text = "\n".join(f"    - {t}" if level == 1 else f"- {t}" for level, t in items)
     return pd.DataFrame([{"as_of_date": today, "note_text": note_text}])
 
 
@@ -1864,6 +1871,44 @@ def attach_creative_images(creatives: pd.DataFrame, image_urls: dict) -> pd.Data
         ),
         axis=1,
     )
+    return creatives
+
+
+def backfill_missing_creative_images(creatives: pd.DataFrame) -> pd.DataFrame:
+    """이번 주 엑셀에 이미지가 안 박혀있거나 인식이 안 돼서 image_url이 비는 소재는,
+    과거에 저장된 같은 매체+소재명의 최근 이미지 URL이 있으면 그대로 이어붙인다.
+    Storage 경로가 소재명 해시로 고정돼 있어 파일 자체는 계속 남아있는데, 이번 주
+    스냅샷 행에는 그 URL을 다시 채워주지 않으면 이미지가 빈 걸로 보이는 문제가 있었음
+    (2026-08 발견). 소재명이 같으면 매체가 같은 것으로 보고 가장 최근 저장분의 URL을 쓴다."""
+    if creatives is None or creatives.empty:
+        return creatives
+    creatives = creatives.copy()
+    if "image_url" not in creatives.columns:
+        creatives["image_url"] = None
+
+    missing_mask = creatives["image_url"].isna() | (creatives["image_url"].astype(str) == "")
+    if not missing_mask.any():
+        return creatives
+
+    prev = load_table("creative_performance")
+    if prev.empty or "image_url" not in prev.columns:
+        return creatives
+    prev = prev[prev["image_url"].notna() & (prev["image_url"].astype(str) != "")]
+    if prev.empty:
+        return creatives
+    if "as_of_date" in prev.columns:
+        prev = prev.sort_values("as_of_date")
+    lookup = prev.drop_duplicates(subset=["channel", "creative"], keep="last").set_index(
+        ["channel", "creative"]
+    )["image_url"]
+
+    def _fill(row):
+        cur = row["image_url"]
+        if pd.notna(cur) and str(cur) != "":
+            return cur
+        return lookup.get((row["channel"], row["creative"]))
+
+    creatives.loc[missing_mask, "image_url"] = creatives.loc[missing_mask].apply(_fill, axis=1)
     return creatives
 
 
@@ -2798,6 +2843,15 @@ def render_upload_panel():
                         st.write(f"소재 이미지 {len(images)}개 인식, {len(image_urls)}개 업로드 성공")
                         if image_errors:
                             st.warning("업로드 실패 예시:\n" + "\n".join(image_errors))
+                    before_missing = int(
+                        creatives_df["image_url"].isna().sum() if "image_url" in creatives_df.columns
+                        else len(creatives_df)
+                    )
+                    creatives_df = backfill_missing_creative_images(creatives_df)
+                    after_missing = int(creatives_df["image_url"].isna().sum())
+                    backfilled_n = before_missing - after_missing
+                    if backfilled_n > 0:
+                        st.write(f"🔁 이번 파일엔 이미지가 없어 이전 저장분 이미지로 채운 소재: {backfilled_n}개")
 
             n1 = save_table("weekly_overview", result["weekly"], "week_start", file.name)
             n2 = save_table("monthly_overview", result["monthly"], "report_month", file.name)
