@@ -1474,15 +1474,26 @@ BUDGET_SCOPE_TITLES = {
     "자사몰": "자사몰 현황",
     # "외부몰": "외부몰 현황",  # 구조가 더 복잡해서(직입점/벤더 중첩) 다음 단계에서 추가 예정
 }
+# 실제로 시트에 등장하는 모든 섹션 제목(파싱 대상이 아닌 것도 포함) — 섹션 경계(어디까지가
+# '자사몰 현황' 구간인지)를 정확히 자르기 위해 필요하다. 하나의 시트 안에 온라인사업팀/자사몰/
+# 외부몰 현황이 위아래로 이어져 있을 수 있어서, 자사몰 구간이 다음 섹션(외부몰 현황) 내용까지
+# 삼켜버리지 않도록 전체 목록으로 경계를 잡는다.
+ALL_BUDGET_SECTION_TITLES = ["온라인사업팀 현황", "자사몰 현황", "외부몰 현황"]
 BUDGET_YEAR_LABEL = "26년"
 BUDGET_YEAR_NUM = 2000 + int(re.sub(r"\D", "", BUDGET_YEAR_LABEL))
 BUDGET_SUBSECTION_DETAIL = "매체 세부내역"
 
 
-def _find_budget_month_columns(raw: pd.DataFrame, scan_rows: int = 40):
-    """'1월'~'12월'이 순서대로 나열된 헤더 행을 찾아 (헤더 행 번호, {월번호: 컬럼위치})를 반환한다.
-    10개월 이상 잡히는 첫 행을 헤더로 인정한다(연말 등 일부 컬럼이 빠져도 허용)."""
-    for r in range(min(scan_rows, len(raw))):
+def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: int | None = None):
+    """[start_row, end_row) 범위 안에서 '1월'~'12월'이 순서대로 나열된 헤더 행을 찾아
+    (헤더 행 번호, {월번호: 컬럼위치})를 반환한다. 10개월 이상 잡히는 첫 행을 헤더로 인정한다
+    (연말 등 일부 컬럼이 빠져도 허용).
+
+    섹션(온라인사업팀 현황/자사몰 현황/외부몰 현황 등)마다 표가 따로 그려져 있어서 헤더 행 위치와
+    컬럼 배치가 섹션마다 다를 수 있다 — 그래서 시트 전체에서 한 번만 찾지 않고, 각 섹션 구간
+    안에서 지역적으로(local) 찾는다."""
+    end_row = len(raw) if end_row is None else min(end_row, len(raw))
+    for r in range(max(start_row, 0), end_row):
         month_cols = {}
         for i, v in enumerate(raw.iloc[r].tolist()):
             m = re.match(r"^(\d{1,2})\s*월$", str(v).strip())
@@ -1495,34 +1506,46 @@ def _find_budget_month_columns(raw: pd.DataFrame, scan_rows: int = 40):
 
 def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
     """'◆26년 월별 예산 정리' 파일에서 '자사몰 현황' 섹션의 26년 매체별 월간 예산(광고선전비)을
-    파싱한다. 형이 캡쳐해준 화면 구조를 보고 만든 1차 버전 — 아직 실제 파일로 검증 전이라, 구조가
-    조금 다르면 조정이 필요할 수 있다. 매체 세부내역 각 행 + '자사몰' 전체 합계(광고선전비
+    파싱한다. 형이 캡쳐해준 화면 구조를 보고 만든 버전 — 한 시트 안에 온라인사업팀 현황/자사몰
+    현황/외부몰 현황이 위아래로 이어져 있고 섹션마다 표 레이아웃(헤더 행 위치, 라벨 컬럼 개수)이
+    다를 수 있다고 보고, '1월'~'12월' 헤더를 시트 전체에서 한 번만 찾지 않고 섹션(자사몰 현황)
+    구간 안에서 지역적으로 찾도록 만들었다. 매체 세부내역 각 행 + '자사몰' 전체 합계(광고선전비
     1월~12월) 행을 channel='TOTAL'로 같이 저장한다. 원본이 천원 단위(+VAT)라 1000을 곱해 원
-    단위로 맞춘다(다른 테이블들과 단위를 통일하기 위함)."""
+    단위로 맞춘다(다른 테이블들과 단위를 통일하기 위함). 합성 데이터로는 검증했지만 실제 파일
+    바이트 단위 검증은 아직이라, 형이 앱 업데이트 후 업로드해보고 여전히 안 잡히면 바로 알려주면
+    좋겠다."""
     rows = []
     for sheet in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name=sheet, header=None)
         if raw.empty:
             continue
-        header_row, month_cols = _find_budget_month_columns(raw)
-        if header_row is None or not month_cols:
-            continue
-        label_col_end = min(month_cols.values())
+
+        # 시트 안에 등장하는 모든 섹션 제목의 위치를 먼저 전부 찾아둔다 (온라인사업팀 현황이
+        # 자사몰 현황보다 앞에 있을 수 있고, 그 위쪽에 다른 요약 표가 더 있을 수도 있어서 —
+        # 헤더/컬럼 위치를 시트 전체에서 한 번만 찾지 않고 섹션별로 다시 찾기 위한 기준점).
+        title_positions = []  # [(row_idx, title), ...] 등장 순서대로
+        for r in range(len(raw)):
+            row_str = raw.iloc[r].astype(str)
+            for t in ALL_BUDGET_SECTION_TITLES:
+                if row_str.str.contains(t, na=False, regex=False).any():
+                    title_positions.append((r, t))
 
         for scope, scope_title in BUDGET_SCOPE_TITLES.items():
-            scope_row_idx = [
-                r for r in range(len(raw))
-                if raw.iloc[r].astype(str).str.contains(scope_title, na=False, regex=False).any()
-            ]
-            if not scope_row_idx:
+            scope_starts = [r for r, t in title_positions if t == scope_title]
+            if not scope_starts:
                 continue
-            start = scope_row_idx[0]
-            other_titles = [t for t in BUDGET_SCOPE_TITLES.values() if t != scope_title]
-            end_candidates = [
-                r for r in range(start + 1, len(raw))
-                if any(raw.iloc[r].astype(str).str.contains(t, na=False, regex=False).any() for t in other_titles)
-            ]
-            end = end_candidates[0] if end_candidates else len(raw)
+            start = scope_starts[0]
+            # 다음 섹션 제목(어떤 제목이든)이 나오는 행 전까지가 이 scope 구간.
+            later_titles = [r for r, t in title_positions if r > start]
+            end = later_titles[0] if later_titles else len(raw)
+
+            # 이 섹션 구간 안에서 지역적으로 '1월'~'12월' 헤더 행/컬럼 위치를 찾는다 — 섹션마다
+            # 표 레이아웃(라벨 컬럼 개수 등)이 다를 수 있어 전역 헤더를 재사용하면 엉뚱한
+            # 컬럼에서 값을 읽게 된다.
+            header_row, month_cols = _find_budget_month_columns(raw, start_row=start, end_row=end)
+            if header_row is None or not month_cols:
+                continue
+            label_col_end = min(month_cols.values())
 
             # 26년 블록: '26년' 텍스트가 나오는 행부터 '25년' 텍스트가 나오는 행 전까지.
             year_start_candidates = [
