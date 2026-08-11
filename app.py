@@ -1481,14 +1481,16 @@ BUDGET_SCOPE_TITLES = {
 # 삼켜버리지 않도록 전체 목록으로 경계를 잡는다.
 ALL_BUDGET_SECTION_TITLES = ["온라인사업팀 현황", "자사몰 현황", "외부몰 현황"]
 BUDGET_SUBSECTION_DETAIL = "매체 세부내역"
-# '매체 세부내역' 라벨을 못 찾았을 때, 매체명이 아니라 요약 행(예상매출/실매출/매출 달성률/
-# 광고비/광고비 비율/전년 대비 증감율 등)으로 보이는 라벨은 채널 후보에서 제외하기 위한 패턴.
-# 정확한 문구('매출 달성률' vs '매출 달성율' 등 표기가 파일마다 다를 수 있음)에 기대지 않고,
-# 매체명에는 절대 안 들어갈 넓은 키워드로 잡는다(매출/광고/달성/증감/비율/목표/누계/대비 등은
-# 채널명에 나올 일이 없다).
-BUDGET_SUMMARY_ROW_LABEL_RE = re.compile(
-    r"매출|광고비|광고선전비|달성|증감|비율|목표|누계|대비"
-)
+# '매체 세부내역' 라벨을 못 찾았을 때, 요약 행(예상매출/실매출/매출 달성률/광고비/비율/전년
+# 대비 등 — 파일마다 문구가 조금씩 다름)이 채널로 잘못 잡히는 걸 막기 위해, 요약 행을
+# "제외"하는 방식 대신 실제 매체명으로 알려진 키워드를 "포함"하는지로 판단한다(화이트리스트가
+# 훨씬 안전 — 요약 행 문구는 파일마다 계속 달라졌지만 매체명은 안정적이었다).
+BUDGET_CHANNEL_NAME_KEYWORDS = [
+    "네이버", "메타", "구글", "크리테오", "GFA", "카카오", "모비온", "AEDI", "틱톡", "당근",
+    "쿠팡", "무신사", "G마켓", "바이럴", "토스", "하프클럽", "LF몰", "신규 매체", "신규매체",
+    "법인카드", "촬영", "잔여", "기타 비용", "기타비용", "웹뜰", "AGENCY", "에이전시",
+]
+BUDGET_CHANNEL_NAME_RE = re.compile("|".join(re.escape(k) for k in BUDGET_CHANNEL_NAME_KEYWORDS), re.IGNORECASE)
 
 
 def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: int | None = None):
@@ -1750,8 +1752,7 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                     channel_row_range = range(detail_start_candidates[0] + 1, y_end)
                 else:
                     # '매체 세부내역' 라벨 문구를 못 찾은 경우 — 파일마다 이 라벨 문구가 없거나
-                    # 다를 수 있어서, 대신 '요약 행'처럼 보이지 않는(예상매출/실매출/광고비/비율/
-                    # 전년 대비 등이 아닌) 라벨을 가진 행을 전부 매체 후보로 본다.
+                    # 다를 수 있어서, y_start부터 훑되 아래에서 매체명 화이트리스트로 다시 거른다.
                     channel_row_range = range(y_start, y_end)
 
                 for r in channel_row_range:
@@ -1762,8 +1763,13 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                             label = v.strip()
                     if not label:
                         continue
-                    if not detail_start_candidates and BUDGET_SUMMARY_ROW_LABEL_RE.search(label):
-                        continue
+                    if not detail_start_candidates:
+                        # '매체 세부내역' 라벨이 없을 때는 요약 행을 "제외"하는 대신, 알려진
+                        # 매체명 키워드를 "포함"하는 라벨만 채널로 인정한다 — 요약 행 문구는
+                        # 파일마다 계속 달라서 블랙리스트로는 다 못 걸렀다(예: '매출 달성률'이
+                        # 새 채널처럼 잡히는 사고가 실제로 있었음). 화이트리스트가 훨씬 안전하다.
+                        if not BUDGET_CHANNEL_NAME_RE.search(label):
+                            continue
                     for m, c in month_cols.items():
                         v = pd.to_numeric(raw.iat[r, c], errors="coerce")
                         if pd.notna(v):
