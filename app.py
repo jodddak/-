@@ -1479,8 +1479,6 @@ BUDGET_SCOPE_TITLES = {
 # 외부몰 현황이 위아래로 이어져 있을 수 있어서, 자사몰 구간이 다음 섹션(외부몰 현황) 내용까지
 # 삼켜버리지 않도록 전체 목록으로 경계를 잡는다.
 ALL_BUDGET_SECTION_TITLES = ["온라인사업팀 현황", "자사몰 현황", "외부몰 현황"]
-BUDGET_YEAR_LABEL = "26년"
-BUDGET_YEAR_NUM = 2000 + int(re.sub(r"\D", "", BUDGET_YEAR_LABEL))
 BUDGET_SUBSECTION_DETAIL = "매체 세부내역"
 
 
@@ -1581,20 +1579,30 @@ def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
     return "\n".join(lines)
 
 
-def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
-    """'◆26년 월별 예산 정리' 파일에서 '자사몰 현황' 섹션의 26년 매체별 월간 예산(광고선전비)을
-    파싱한다. 형이 캡쳐해준 화면 구조를 보고 만든 버전 — 한 시트 안에 온라인사업팀 현황/자사몰
-    현황/외부몰 현황이 위아래로 이어져 있고 섹션마다 표 레이아웃(헤더 행 위치, 라벨 컬럼 개수)이
-    다를 수 있다고 보고, '1월'~'12월' 헤더를 시트 전체에서 한 번만 찾지 않고 섹션(자사몰 현황)
-    구간 안에서 지역적으로 찾도록 만들었다. 매체 세부내역 각 행 + '자사몰' 전체 합계(광고선전비
-    1월~12월) 행을 channel='TOTAL'로 같이 저장한다.
+BUDGET_YEAR_LABELS = ["26년", "25년"]  # 파싱할 연도(등장 순서와 무관하게 둘 다 찾는다)
+# channel 컬럼에 실제 매체명 대신 넣는 특수 표시값 — 광고비(TOTAL)와 구분해서
+# 매출 지표도 같은 테이블/스키마에 같이 저장하기 위한 것.
+BUDGET_SENTINEL_EXPECTED_REVENUE = "__예상매출__"
+BUDGET_SENTINEL_ACTUAL_REVENUE = "__실매출__"
 
-    형이 보내준 진단 화면으로 확인된 두 가지 실제 파일 특성을 반영했다:
+
+def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
+    """'◆26년 월별 예산 정리' 파일에서 '자사몰 현황' 섹션의 매체별 월간 예산(광고비), 예상매출,
+    실매출을 26년/25년 둘 다 파싱한다. 형이 캡쳐해준 화면 구조를 보고 만든 버전 — 한 시트 안에
+    온라인사업팀 현황/자사몰 현황/외부몰 현황이 위아래로 이어져 있고 섹션마다 표 레이아웃(헤더 행
+    위치, 라벨 컬럼 개수)이 다를 수 있다고 보고, '1월'~'12월' 헤더를 시트 전체에서 한 번만 찾지
+    않고 섹션(자사몰 현황) 구간 안에서 지역적으로 찾는다.
+
+    형이 보내준 진단/실제 화면으로 확인된 실제 파일 특성을 반영했다:
     1) '1월'~'12월' 헤더 셀이 문자열 '1월'이 아니라 숫자 1(서식만 'N월'로 표시)로 저장돼 있어서,
-       숫자형 월(1~12, 컬럼 순서대로 1씩 증가)도 헤더로 인식하도록 했다.
-    2) 화면엔 '(단위: 천원, +VAT)'로 표시되지만, 셀에 저장된 실제 값은 이미 원 단위였다
-       (예: 연 목표 셀 raw 값 9,323,310,832 ≈ 화면 표시 9,323,311천원×1000) — 그래서 1000을
+       숫자형 월(1~12, 컬럼 순서대로 1씩 증가)도 헤더로 인식한다.
+    2) 화면엔 '(단위: 천원, +VAT)'로 표시되지만, 셀에 저장된 실제 값은 이미 원 단위였다 — 1000을
        곱하지 않고 원본 값을 그대로 저장한다.
+    3) 광고비 합계 행 라벨이 파일 버전마다 다르다('광고선전비 (1월~12월)' / '실제 광고비
+       (1월~6월)'+'잔여 광고비 (7월~12월)' 등) — 특정 라벨 문구에 의존하지 않도록, 광고비
+       TOTAL은 라벨 매칭 대신 '매체 세부내역' 채널별 합계를 그대로 더해서 계산한다.
+    channel='TOTAL'은 광고비 합계(매체 합산), channel='__예상매출__'/'__실매출__'은 매출
+    지표를 담는다.
     """
     rows = []
     for sheet in xls.sheet_names:
@@ -1623,70 +1631,81 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
 
             # 이 섹션 구간 안에서 지역적으로 '1월'~'12월' 헤더 행/컬럼 위치를 찾는다 — 섹션마다
             # 표 레이아웃(라벨 컬럼 개수 등)이 다를 수 있어 전역 헤더를 재사용하면 엉뚱한
-            # 컬럼에서 값을 읽게 된다.
+            # 컬럼에서 값을 읽게 된다. 26년/25년 블록은 보통 같은 헤더(같은 컬럼 배치)를 공유한다.
             header_row, month_cols = _find_budget_month_columns(raw, start_row=start, end_row=end)
             if header_row is None or not month_cols:
                 continue
             label_col_end = min(month_cols.values())
 
-            # 26년 블록: '26년' 텍스트가 나오는 행부터 '25년' 텍스트가 나오는 행 전까지.
-            year_start_candidates = [
-                r for r in range(start, end)
-                if raw.iloc[r].astype(str).str.contains(BUDGET_YEAR_LABEL, na=False, regex=False).any()
-            ]
-            if not year_start_candidates:
-                continue
-            y_start = year_start_candidates[0]
-            year_end_candidates = [
-                r for r in range(y_start + 1, end)
-                if raw.iloc[r].astype(str).str.contains("25년", na=False, regex=False).any()
-            ]
-            y_end = year_end_candidates[0] if year_end_candidates else end
+            # 연도 블록 시작 위치를 전부 찾고(26년, 25년 등장 순서대로) 각 블록의 끝을 다음 연도
+            # 블록 시작(또는 섹션 끝)으로 잡는다.
+            year_hits = []
+            for yl in BUDGET_YEAR_LABELS:
+                hits = [
+                    r for r in range(start, end)
+                    if raw.iloc[r].astype(str).str.contains(yl, na=False, regex=False).any()
+                ]
+                if hits:
+                    year_hits.append((hits[0], yl))
+            year_hits.sort(key=lambda x: x[0])
 
-            # scope 전체 합계: '광고선전비 (1월~12월)' 행 (매출/광고비 요약 블록에 있음, 매체
-            # 세부내역보다 위쪽) → channel='TOTAL'로 저장.
-            total_row_idx = [
-                r for r in range(y_start, y_end)
-                if raw.iloc[r].astype(str).str.contains(r"광고선전비\s*\(?\s*1\s*월\s*~\s*12\s*월", na=False, regex=True).any()
-            ]
-            if total_row_idx:
-                r = total_row_idx[0]
-                for m, c in month_cols.items():
-                    v = pd.to_numeric(raw.iat[r, c], errors="coerce")
-                    if pd.notna(v):
-                        rows.append({"scope": scope, "channel": "TOTAL", "month": m, "budget_cost": float(v)})
+            for i, (y_start, yl) in enumerate(year_hits):
+                y_end = year_hits[i + 1][0] if i + 1 < len(year_hits) else end
+                year_num = 2000 + int(re.sub(r"\D", "", yl))
 
-            # 매체 세부내역: 라벨 행 다음부터 y_end까지, 각 행의 첫 문자열 셀(라벨 컬럼 범위 안)을
-            # 매체명으로 쓴다. 숫자로 시작하는 값/빈 라벨/전부 빈 월별 값인 행은 건너뛴다.
-            detail_start_candidates = [
-                r for r in range(y_start, y_end)
-                if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()
-            ]
-            if not detail_start_candidates:
-                continue
-            d_start = detail_start_candidates[0] + 1
-            for r in range(d_start, y_end):
-                label = None
-                for c in range(label_col_end):
-                    v = raw.iat[r, c]
-                    if isinstance(v, str) and v.strip() and not re.match(r"^\d", v.strip()):
-                        label = v.strip()
-                if not label:
+                # 예상매출/실매출 행 — 광고비와 달리 라벨이 안정적으로 '예상매출'/'실매출' 문구를
+                # 쓰고 있어서 그대로 매칭한다.
+                for label, sentinel in [
+                    ("예상매출", BUDGET_SENTINEL_EXPECTED_REVENUE),
+                    ("실매출", BUDGET_SENTINEL_ACTUAL_REVENUE),
+                ]:
+                    idxs = [
+                        r for r in range(y_start, y_end)
+                        if raw.iloc[r].astype(str).str.contains(label, na=False, regex=False).any()
+                    ]
+                    if not idxs:
+                        continue
+                    r = idxs[0]
+                    for m, c in month_cols.items():
+                        v = pd.to_numeric(raw.iat[r, c], errors="coerce")
+                        if pd.notna(v):
+                            rows.append({"scope": scope, "channel": sentinel, "year": year_num, "month": m, "budget_cost": float(v)})
+
+                # 매체 세부내역: 라벨 행 다음부터 y_end까지, 각 행의 첫 문자열 셀(라벨 컬럼 범위
+                # 안)을 매체명으로 쓴다. 숫자로 시작하는 값/빈 라벨/전부 빈 월별 값인 행은 건너뛴다.
+                detail_start_candidates = [
+                    r for r in range(y_start, y_end)
+                    if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()
+                ]
+                if not detail_start_candidates:
                     continue
-                any_val = False
-                for m, c in month_cols.items():
-                    v = pd.to_numeric(raw.iat[r, c], errors="coerce")
-                    if pd.notna(v):
-                        any_val = True
-                        rows.append({"scope": scope, "channel": label, "month": m, "budget_cost": float(v)})
-                if not any_val:
-                    continue
+                d_start = detail_start_candidates[0] + 1
+                for r in range(d_start, y_end):
+                    label = None
+                    for c in range(label_col_end):
+                        v = raw.iat[r, c]
+                        if isinstance(v, str) and v.strip() and not re.match(r"^\d", v.strip()):
+                            label = v.strip()
+                    if not label:
+                        continue
+                    for m, c in month_cols.items():
+                        v = pd.to_numeric(raw.iat[r, c], errors="coerce")
+                        if pd.notna(v):
+                            rows.append({"scope": scope, "channel": label, "year": year_num, "month": m, "budget_cost": float(v)})
 
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
-    out["year"] = BUDGET_YEAR_NUM
     out = out.groupby(["scope", "channel", "year", "month"], as_index=False)["budget_cost"].sum()
+
+    # 광고비 TOTAL = 매체 세부내역(실제 채널명 행)의 월별 합계. 요약 행 라벨 문구에 기대지 않기
+    # 위해 이렇게 계산한다.
+    sentinels = {BUDGET_SENTINEL_EXPECTED_REVENUE, BUDGET_SENTINEL_ACTUAL_REVENUE}
+    ch_only = out[~out["channel"].isin(sentinels)]
+    if not ch_only.empty:
+        total = ch_only.groupby(["scope", "year", "month"], as_index=False)["budget_cost"].sum()
+        total["channel"] = "TOTAL"
+        out = pd.concat([out, total], ignore_index=True)
     return out
 
 
@@ -3428,88 +3447,158 @@ def render_upload_panel():
 # ──────────────────────────────────────────────────────────────
 # 예산 현황 (신규, 1차 버전) — '◆26년 월별 예산 정리' 파일 기반, 자사몰만
 # ──────────────────────────────────────────────────────────────
+def _budget_month_series(b: pd.DataFrame, year: int, channel: str) -> dict:
+    """b(scope='자사몰'로 이미 필터된 budget df)에서 특정 연도·channel의 {월: 값} dict를 만든다.
+    값이 없는 월은 None."""
+    vals = {m: None for m in range(1, 13)}
+    sub = b[(b["year"] == year) & (b["channel"] == channel)]
+    for _, r in sub.iterrows():
+        vals[int(r["month"])] = float(r["budget_cost"])
+    return vals
+
+
+def _budget_total_mtd(vals: dict, year: int, today) -> tuple:
+    """연간 합계와, 오늘 기준 '당월 누계'(해당 연도가 올해면 이번 달까지, 과거 연도면 12월까지
+    값이 있는 월만) 합계를 계산한다."""
+    present = {m: v for m, v in vals.items() if v is not None}
+    total = sum(present.values()) if present else None
+    cutoff = today.month if year == today.year else 12
+    mtd_vals = [v for m, v in present.items() if m <= cutoff]
+    mtd = sum(mtd_vals) if mtd_vals else None
+    return total, mtd
+
+
+def _budget_ratio_series(num: dict, den: dict) -> dict:
+    out = {}
+    for m in range(1, 13):
+        n, d = num.get(m), den.get(m)
+        out[m] = (n / d * 100) if (n is not None and d not in (None, 0)) else None
+    return out
+
+
+def _budget_yoy_series(cur: dict, prev: dict) -> dict:
+    out = {}
+    for m in range(1, 13):
+        c, p = cur.get(m), prev.get(m)
+        out[m] = ((c - p) / p * 100) if (c is not None and p not in (None, 0)) else None
+    return out
+
+
+def _budget_fmt_money(v):
+    return f"{v:,.0f}" if v is not None else "-"
+
+
+def _budget_fmt_pct(v):
+    return f"{v:.1f}%" if v is not None else "-"
+
+
+def _budget_fmt_pct_change(v):
+    if v is None:
+        return "-"
+    arrow = "▲" if v >= 0 else "▼"
+    return f"{arrow}{abs(v):.1f}%"
+
+
 def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
-    st.subheader("💰 예산 현황 (자사몰 · 1차 버전)")
+    st.subheader("💰 예산 현황 (자사몰)")
     st.caption(
-        "'◆26년 월별 예산 정리' 파일의 '자사몰 현황' 섹션(26년, 매체 세부내역) 기준입니다. "
-        "형이 캡쳐해준 화면 구조를 보고 만든 1차 버전이라, 실제 파일로 아직 검증 전입니다 — "
-        "숫자가 이상해 보이면 알려주세요. 매체별 예산의 매체명이 리포트 매체명과 아직 자동으로 "
-        "안 맞춰져 있어서, 우선 자사몰 전체 목표 대비 실제 집행만 비교합니다."
+        "'◆26년 월별 예산 정리' 파일의 '자사몰 현황' 섹션을 원본 엑셀 표와 같은 형태(연 목표/당월 "
+        "누계/1~12월, 26년·25년 비교, 매체 세부내역)로 보여줍니다. 원본 표시는 천원 단위지만, "
+        "여기 숫자는 원 단위입니다. 광고비 합계는 '매체 세부내역' 채널별 합으로 계산합니다(요약 행 "
+        "라벨이 파일 버전마다 달라서 라벨 대신 실제 매체별 값을 더한 값입니다) — 원본 표의 합계와 "
+        "다르면 알려주세요."
     )
     if budget is None or budget.empty:
         st.info("아직 예산 데이터가 없습니다. 왼쪽 사이드바 '③ 연간 예산 파일 업로드'에서 파일을 올려주세요.")
         return
 
     b = budget[budget["scope"] == "자사몰"].copy()
-    total_b = b[b["channel"] == "TOTAL"].sort_values("month")
-    if total_b.empty:
-        st.info("자사몰 TOTAL(광고선전비 1월~12월) 행을 못 찾았습니다. 파일 구조를 다시 확인해주세요.")
+    if b.empty:
+        st.info("자사몰 예산 데이터를 찾지 못했습니다. 왼쪽 사이드바 업로드 화면의 진단 정보를 확인해주세요.")
         return
 
-    year = int(total_b["year"].iloc[0])
-    actual_by_month = pd.Series(dtype=float)
-    if monthly is not None and not monthly.empty:
-        m = monthly.copy()
-        m["report_month"] = pd.to_datetime(m["report_month"])
-        m_year = m[m["report_month"].dt.year == year]
-        if not m_year.empty:
-            actual_by_month = m_year.groupby(m_year["report_month"].dt.month)["cost_incl_vat"].sum()
+    years = sorted(b["year"].unique(), reverse=True)
+    today = datetime.now()
 
-    rows = []
-    for _, r in total_b.iterrows():
-        mo = int(r["month"])
-        budget_v = float(r["budget_cost"])
-        actual_v = float(actual_by_month.get(mo, 0))
-        rows.append({
-            "월": f"{mo}월", "월번호": mo, "목표 예산": budget_v, "실제 집행": actual_v,
-            "집행률": (actual_v / budget_v * 100) if budget_v else 0,
-            "차이": actual_v - budget_v,
-        })
-    show = pd.DataFrame(rows).sort_values("월번호")
+    month_cols = [f"{m}월" for m in range(1, 13)]
+    table_cols = ["구분", "합계(연간)", "당월 누계"] + month_cols
+    rows = []  # list of dict per column
 
-    st.markdown(f"##### {year}년 자사몰 월별 목표 예산 vs 실제 집행")
-    fig = px.bar(
-        show, x="월", y=["목표 예산", "실제 집행"], barmode="group",
-        category_orders={"월": show["월"].tolist()}, labels={"value": "금액(원)", "variable": "구분"},
-    )
-    fig.update_yaxes(tickformat=",.0f")
-    fig.for_each_trace(
-        lambda t: t.update(hovertemplate=f"구분={t.name}<br>월=%{{x}}<br>금액=%{{y:,.0f}}원<extra></extra>")
-    )
-    st.plotly_chart(theme_chart(fig), use_container_width=True)
+    def add_row(label, vals, year, fmt_fn, indent=False):
+        total, mtd = _budget_total_mtd(vals, year, today)
+        row = {
+            "구분": ("　ㄴ " if indent else "") + label,
+            "합계(연간)": _budget_fmt_money(total) if fmt_fn is _budget_fmt_money else (fmt_fn(None)),
+            "당월 누계": _budget_fmt_money(mtd) if fmt_fn is _budget_fmt_money else fmt_fn(None),
+        }
+        for m in range(1, 13):
+            row[f"{m}월"] = fmt_fn(vals.get(m))
+        rows.append(row)
 
-    show_disp = show[["월", "목표 예산", "실제 집행", "차이", "집행률"]].copy()
-    for c in ["목표 예산", "실제 집행", "차이"]:
-        show_disp[c] = show[c].map(lambda v: f"{v:,.0f}")
-    show_disp["집행률"] = show["집행률"].map(lambda v: f"{v:.0f}%" if v else "-")
-    render_html_table(show_disp)
+    revenue_by_year = {}
+    cost_by_year = {}
+    for year in years:
+        rev_e = _budget_month_series(b, year, BUDGET_SENTINEL_EXPECTED_REVENUE)
+        rev_a = _budget_month_series(b, year, BUDGET_SENTINEL_ACTUAL_REVENUE)
+        cost = _budget_month_series(b, year, "TOTAL")
+        revenue_by_year[year] = rev_a
+        cost_by_year[year] = cost
 
-    cur = show[show["실제 집행"] > 0].sort_values("월번호")
-    if not cur.empty:
-        last = cur.iloc[-1]
-        if last["집행률"] >= 110:
-            status = "초과 집행"
-        elif last["집행률"] >= 80:
-            status = "목표 근접"
-        else:
-            status = "저집행"
-        st.markdown(
-            f"**{last['월']} 기준 목표 예산 {last['목표 예산']:,.0f}원 대비 실제 {last['실제 집행']:,.0f}원 "
-            f"집행({last['집행률']:.0f}%)로 {status}입니다.**"
+        add_row(f"{year}년 실매출", rev_a, year, _budget_fmt_money)
+        if any(v is not None for v in rev_e.values()):
+            achieve = _budget_ratio_series(rev_a, rev_e)
+            add_row(f"{year}년 매출 달성률", achieve, year, _budget_fmt_pct)
+        add_row(f"{year}년 광고비", cost, year, _budget_fmt_money)
+        cost_ratio = _budget_ratio_series(cost, rev_a)
+        add_row(f"{year}년 광고비 비율", cost_ratio, year, _budget_fmt_pct)
+
+        chs = b[
+            (b["year"] == year)
+            & (~b["channel"].isin(["TOTAL", BUDGET_SENTINEL_EXPECTED_REVENUE, BUDGET_SENTINEL_ACTUAL_REVENUE]))
+        ]["channel"].unique().tolist()
+        chs_sorted = sorted(
+            chs,
+            key=lambda c: -(sum(v for v in _budget_month_series(b, year, c).values() if v is not None) or 0),
+        )
+        for ch in chs_sorted:
+            add_row(ch, _budget_month_series(b, year, ch), year, _budget_fmt_money, indent=True)
+
+    if len(years) >= 2:
+        y_cur, y_prev = years[0], years[1]
+        add_row(
+            "전년 대비 매출 증감율",
+            _budget_yoy_series(revenue_by_year[y_cur], revenue_by_year[y_prev]),
+            y_cur, _budget_fmt_pct_change,
+        )
+        add_row(
+            "전년 대비 광고비 증감율",
+            _budget_yoy_series(cost_by_year[y_cur], cost_by_year[y_prev]),
+            y_cur, _budget_fmt_pct_change,
         )
 
-    detail = b[b["channel"] != "TOTAL"]
-    if not detail.empty:
-        st.markdown("---")
-        st.markdown("##### 매체별 예산 (원본 참고용 — 리포트 매체명과 자동 매칭 전)")
-        pivot = detail.pivot_table(index="channel", columns="month", values="budget_cost", aggfunc="sum")
-        pivot = pivot.reindex(sorted(pivot.columns), axis=1)
-        pivot.columns = [f"{c}월" for c in pivot.columns]
-        pivot = pivot.reset_index().rename(columns={"channel": "매체명"})
-        pivot_disp = pivot.copy()
-        for c in pivot.columns[1:]:
-            pivot_disp[c] = pivot[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "-")
-        render_html_table(pivot_disp)
+    show = pd.DataFrame(rows, columns=table_cols)
+    render_html_table(show)
+
+    # 요약 코멘트: 최신 실적이 있는 달 기준으로 목표 대비 진행 상황 한 줄.
+    latest_year = years[0]
+    rev_a = revenue_by_year[latest_year]
+    cost = cost_by_year[latest_year]
+    entered_months = [m for m in range(1, 13) if rev_a.get(m) or cost.get(m)]
+    if entered_months:
+        last_m = max(entered_months)
+        rev_v, cost_v = rev_a.get(last_m), cost.get(last_m)
+        if rev_v and cost_v:
+            roas_ratio = rev_v / cost_v * 100 if cost_v else None
+            st.markdown(
+                f"**{latest_year}년 {last_m}월 기준 자사몰 실매출 {rev_v:,.0f}원, 광고비 {cost_v:,.0f}원"
+                + (f" (광고비 비율 {cost_v / rev_v * 100:.1f}%)" if rev_v else "")
+                + "입니다.**"
+            )
+
+    st.caption(
+        "'매체 세부내역' 매체명은 원본 파일 표기 그대로이며, 다른 페이지(매체별 성과 등)의 리포트 "
+        "매체명과 아직 자동으로 매칭되지 않았습니다."
+    )
 
 
 # ──────────────────────────────────────────────────────────────
