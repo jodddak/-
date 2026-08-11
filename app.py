@@ -3113,7 +3113,12 @@ def render_upload_panel():
                 if mapped_n == 0:
                     st.caption("※ '매체'(채널 그룹핑) 컬럼이 아직 비어있습니다 — UTM 매핑표를 같이/먼저 올리면 채워집니다.")
                 elif mapped_n < len(ga_channel_df):
-                    unmapped = sorted(ga_channel_df.loc[ga_channel_df["channel"].isna(), "source_medium"].unique())
+                    # source_medium에 문자열이 아닌 값(숫자로 잘못 인식된 셀 등)이 섞여 있으면
+                    # sorted()/join()이 타입 비교 에러로 죽을 수 있어, 비교 전에 전부 문자열로 맞춘다.
+                    unmapped = sorted(
+                        ga_channel_df.loc[ga_channel_df["channel"].isna(), "source_medium"]
+                        .dropna().astype(str).unique()
+                    )
                     st.caption(f"※ 매핑표에 없는 소스/매체 {len(unmapped)}종은 미매핑 상태입니다: {', '.join(unmapped[:10])}{' 외' if len(unmapped) > 10 else ''}")
             status2.update(label="분석 완료", state="complete")
 
