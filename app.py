@@ -1496,11 +1496,25 @@ def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: i
     for r in range(max(start_row, 0), end_row):
         month_cols = {}
         for i, v in enumerate(raw.iloc[r].tolist()):
-            m = re.match(r"^(\d{1,2})\s*월$", str(v).strip())
-            if m and 1 <= int(m.group(1)) <= 12:
-                month_cols[int(m.group(1))] = i
+            month_num = None
+            s = str(v).strip()
+            m = re.match(r"^(\d{1,2})\s*월$", s)
+            if m:
+                month_num = int(m.group(1))
+            elif isinstance(v, (int, float)) and not isinstance(v, bool) and pd.notna(v):
+                # 셀 값이 텍스트 '1월'이 아니라 숫자 1(서식만 'N월'로 표시되는 경우)일 수 있어서,
+                # 정수 1~12 값도 후보로 받아들인다.
+                if float(v) == int(v) and 1 <= int(v) <= 12:
+                    month_num = int(v)
+            if month_num is not None and 1 <= month_num <= 12:
+                month_cols[month_num] = i
         if len(month_cols) >= 10:
-            return r, month_cols
+            # 숫자형 월(1~12)로만 잡힌 경우, 우연히 다른 데이터 행이 걸리는 걸 막기 위해
+            # 컬럼 순서대로 월이 1씩 증가하는지(오름차순 연속) 확인한다.
+            ordered = sorted(month_cols.items(), key=lambda kv: kv[1])
+            seq_ok = all(b[0] - a[0] == 1 for a, b in zip(ordered, ordered[1:]))
+            if seq_ok:
+                return r, month_cols
     return None, {}
 
 
@@ -1547,15 +1561,22 @@ def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
         detail_hits = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()]
         lines.append(f"- '매체 세부내역' 텍스트 발견 행: {detail_hits[:10]}" if detail_hits else "- '매체 세부내역' 텍스트를 못 찾음")
 
-        # 시트 맨 앞부분 미리보기 (텍스트가 있는 셀 위주) — 실제 문구가 캡쳐 화면과 다른지 대조용.
-        preview_rows = []
-        for r in range(min(8, len(raw))):
-            vals = [str(v).strip() for v in raw.iloc[r].tolist()[:8] if pd.notna(v) and str(v).strip()]
-            if vals:
-                preview_rows.append(f"  {r}행: " + " | ".join(vals))
-        if preview_rows:
-            lines.append("- 앞부분 미리보기(첫 8행, 텍스트 있는 셀만):")
-            lines.extend(preview_rows)
+        # '자사몰 현황' 구간이 있으면 그 주변을 컬럼 위치가 그대로 보이게(빈 칸 생략 없이)
+        # 찍어서, 헤더 행과 데이터 행의 컬럼이 실제로 어떻게 어긋나는지 한눈에 보이게 한다.
+        zasamall_rows = title_hits.get("자사몰 현황", [])
+        if zasamall_rows:
+            r0 = zasamall_rows[0]
+            preview_start, preview_end = max(0, r0 - 1), min(len(raw), r0 + 14)
+            lines.append(f"- '자사몰 현황' 주변 원본 셀 (col0~col11, {preview_start}~{preview_end - 1}행, 빈칸도 그대로 표시):")
+        else:
+            preview_start, preview_end = 0, min(8, len(raw))
+            lines.append(f"- 앞부분 원본 셀 (col0~col11, 0~{preview_end - 1}행, 빈칸도 그대로 표시):")
+        for r in range(preview_start, preview_end):
+            cells = []
+            for c in range(min(12, raw.shape[1])):
+                v = raw.iat[r, c]
+                cells.append("·" if pd.isna(v) or str(v).strip() == "" else str(v).strip())
+            lines.append(f"  {r:>3}행: " + " | ".join(cells))
         lines.append("")
     return "\n".join(lines)
 
@@ -1566,10 +1587,15 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
     현황/외부몰 현황이 위아래로 이어져 있고 섹션마다 표 레이아웃(헤더 행 위치, 라벨 컬럼 개수)이
     다를 수 있다고 보고, '1월'~'12월' 헤더를 시트 전체에서 한 번만 찾지 않고 섹션(자사몰 현황)
     구간 안에서 지역적으로 찾도록 만들었다. 매체 세부내역 각 행 + '자사몰' 전체 합계(광고선전비
-    1월~12월) 행을 channel='TOTAL'로 같이 저장한다. 원본이 천원 단위(+VAT)라 1000을 곱해 원
-    단위로 맞춘다(다른 테이블들과 단위를 통일하기 위함). 합성 데이터로는 검증했지만 실제 파일
-    바이트 단위 검증은 아직이라, 형이 앱 업데이트 후 업로드해보고 여전히 안 잡히면 바로 알려주면
-    좋겠다."""
+    1월~12월) 행을 channel='TOTAL'로 같이 저장한다.
+
+    형이 보내준 진단 화면으로 확인된 두 가지 실제 파일 특성을 반영했다:
+    1) '1월'~'12월' 헤더 셀이 문자열 '1월'이 아니라 숫자 1(서식만 'N월'로 표시)로 저장돼 있어서,
+       숫자형 월(1~12, 컬럼 순서대로 1씩 증가)도 헤더로 인식하도록 했다.
+    2) 화면엔 '(단위: 천원, +VAT)'로 표시되지만, 셀에 저장된 실제 값은 이미 원 단위였다
+       (예: 연 목표 셀 raw 값 9,323,310,832 ≈ 화면 표시 9,323,311천원×1000) — 그래서 1000을
+       곱하지 않고 원본 값을 그대로 저장한다.
+    """
     rows = []
     for sheet in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name=sheet, header=None)
@@ -1628,7 +1654,7 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                 for m, c in month_cols.items():
                     v = pd.to_numeric(raw.iat[r, c], errors="coerce")
                     if pd.notna(v):
-                        rows.append({"scope": scope, "channel": "TOTAL", "month": m, "budget_cost": float(v) * 1000})
+                        rows.append({"scope": scope, "channel": "TOTAL", "month": m, "budget_cost": float(v)})
 
             # 매체 세부내역: 라벨 행 다음부터 y_end까지, 각 행의 첫 문자열 셀(라벨 컬럼 범위 안)을
             # 매체명으로 쓴다. 숫자로 시작하는 값/빈 라벨/전부 빈 월별 값인 행은 건너뛴다.
@@ -1652,7 +1678,7 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                     v = pd.to_numeric(raw.iat[r, c], errors="coerce")
                     if pd.notna(v):
                         any_val = True
-                        rows.append({"scope": scope, "channel": label, "month": m, "budget_cost": float(v) * 1000})
+                        rows.append({"scope": scope, "channel": label, "month": m, "budget_cost": float(v)})
                 if not any_val:
                     continue
 
