@@ -1483,23 +1483,44 @@ def build_utm_channel_lookup(utm_map: pd.DataFrame) -> dict:
 
 def _ga_daily_agg(ga_channel_inflow: pd.DataFrame) -> pd.DataFrame:
     """ga_channel_inflow(일자×소스/매체, UTM 매핑 완료)를 날짜 단위로 합산해 ga_conversions/
-    ga_revenue를 만든다. '일자별 누적' 표에 GA 컬럼을 붙일 때 쓴다. 매체 매핑이 안 된 행도
-    (channel이 비어있어도) 전체 합계엔 포함한다 — 날짜 단위 합계는 매체 구분이 필요 없어서."""
+    ga_revenue를 만든다. '일자별 누적' 표에 GA 컬럼을 붙일 때 쓴다. 우리가 실제로 운영 중인
+    매체(UTM 매핑표에 있는 소스/매체)만 합산한다 — 자연유입/direct/referral/이메일 등은
+    광고 성과가 아니라서 여기 섞이면 자체 ROAS랑 비교가 안 맞게 된다."""
     if ga_channel_inflow is None or ga_channel_inflow.empty:
         return pd.DataFrame(columns=["report_date", "ga_conversions", "ga_revenue"])
     g = ga_channel_inflow.copy()
+    g = g[g["channel"].notna()]
+    if g.empty:
+        return pd.DataFrame(columns=["report_date", "ga_conversions", "ga_revenue"])
     g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
     return g.groupby("report_date", as_index=False).agg(
         ga_conversions=("conversions", "sum"), ga_revenue=("revenue", "sum")
     )
 
 
+def _ga_daily_agg_all(ga_channel_inflow: pd.DataFrame) -> pd.DataFrame:
+    """_ga_daily_agg와 반대로, 매체 매핑 여부와 상관없이(자연유입/direct/referral/이메일 등
+    포함) 날짜 단위로 전부 합산한다. '유입·매출 비교' 페이지의 GA-매출은 어드민(사이트 전체)
+    매출과 비교하는 용도라, 광고 채널만 걸러내면 안 되고 GA가 보는 전체를 그대로 써야 한다."""
+    if ga_channel_inflow is None or ga_channel_inflow.empty:
+        return pd.DataFrame(columns=["report_date", "ga_conversions_all", "ga_revenue_all"])
+    g = ga_channel_inflow.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    return g.groupby("report_date", as_index=False).agg(
+        ga_conversions_all=("conversions", "sum"), ga_revenue_all=("revenue", "sum")
+    )
+
+
 def _ga_weekly_agg(ga_channel_inflow: pd.DataFrame, weekly: pd.DataFrame) -> pd.DataFrame:
     """'주간별 누적' 표의 각 주(week_start~week_end) 구간에 맞춰 ga_channel_inflow를
-    합산한다. 리포트 원본 주간 섹션엔 GA 컬럼이 아예 없어서, 이 방식으로만 채울 수 있다."""
+    합산한다. 리포트 원본 주간 섹션엔 GA 컬럼이 아예 없어서, 이 방식으로만 채울 수 있다.
+    _ga_daily_agg와 마찬가지로 UTM 매핑된(=우리가 운영 중인) 매체만 합산한다."""
     if ga_channel_inflow is None or ga_channel_inflow.empty or weekly is None or weekly.empty:
         return pd.DataFrame(columns=["week_start", "ga_conversions", "ga_revenue"])
     g = ga_channel_inflow.copy()
+    g = g[g["channel"].notna()]
+    if g.empty:
+        return pd.DataFrame(columns=["week_start", "ga_conversions", "ga_revenue"])
     g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
     rows = []
     for _, w in weekly.iterrows():
@@ -3928,10 +3949,14 @@ def render_ga_page(ga: pd.DataFrame):
         st.info("GA 유입경로 데이터가 아직 없습니다.")
 
 
-def render_inflow_revenue_page(df: pd.DataFrame):
+def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame = None):
     """유입·매출 비교 — 형이 별도로 정리해서 준 '일별 GA·어드민 지표 비교' 파일 기반.
     채널별이 아니라 사이트 전체 일별 합산 기준. ① 방문자 추이(GA 총/신규) ② 매출 비교
-    (어드민=회사 내부 기준 vs 보고서=매체 리포트 기준 vs GA 기준, 어드민 대비 격차%)로 구성."""
+    (어드민=회사 내부 기준 vs GA 기준, 어드민 대비 격차%)로 구성.
+    '매체-매출'(광고 리포트 기준)은 이 비교에서 뺐다 — 어드민 매출은 사이트 전체 매출이고
+    GA 매출도 자연유입 포함 전체인데, 매체-매출은 광고 채널 것만 걷은 거라 셋을 나란히 비교하면
+    서로 다른 걸 비교하는 셈이 된다(형 확인). GA-매출은 원본 시트에 채워져 있으면 그 값을 쓰고,
+    비어있으면(0/NaN) 'GA 매체별 유입 경로'(UTM 매핑 전 원본 전체 합산)로 채운다."""
     if df.empty:
         st.info(
             "아직 데이터가 없습니다. 왼쪽 사이드바 '② GA 유입 데이터 업로드'에서 "
@@ -3941,6 +3966,22 @@ def render_inflow_revenue_page(df: pd.DataFrame):
 
     df = df.copy()
     df["report_date"] = pd.to_datetime(df["report_date"]).dt.date
+    ga_all = _ga_daily_agg_all(ga_channel_inflow)
+    if not ga_all.empty:
+        # 원본 시트 값이 전부 0/NaN이면(int64) 실수 GA 매출을 대입할 때 타입 경고가 나므로,
+        # 대입 전에 float으로 미리 맞춰둔다.
+        df["ga_revenue"] = pd.to_numeric(df["ga_revenue"], errors="coerce").astype(float)
+        df["ga_roas"] = pd.to_numeric(df["ga_roas"], errors="coerce").astype(float)
+        df = df.merge(ga_all, on="report_date", how="left")
+        needs_fill = df["ga_revenue"].isna() | (df["ga_revenue"] == 0)
+        df.loc[needs_fill, "ga_revenue"] = df.loc[needs_fill, "ga_revenue_all"]
+        df = df.drop(columns=["ga_revenue_all", "ga_conversions_all"], errors="ignore")
+        # ga_revenue를 새로 채운 날짜는 ga_roas(원본 시트 값)도 다시 계산해야 값이 맞는다.
+        df.loc[needs_fill, "ga_roas"] = np.where(
+            df.loc[needs_fill, "cost_incl_vat"] > 0,
+            df.loc[needs_fill, "ga_revenue"] / df.loc[needs_fill, "cost_incl_vat"] * 100,
+            0,
+        )
     st.subheader("🔎 기간 필터")
     min_d, max_d = df["report_date"].min(), df["report_date"].max()
     start, end = period_filter(min_d, max_d, key="inflow", default_preset="이번달")
@@ -3981,31 +4022,28 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     )
     st.plotly_chart(theme_chart(fig_visit), use_container_width=True)
 
-    # ── ② 매출 비교 (어드민 vs 보고서 vs GA) ──
+    # ── ② 매출 비교 (어드민 vs GA) ──
+    # '보고서(매체 리포트) 기준 매출'은 광고 채널에서 걷힌 매출만이라, 사이트 전체 매출인
+    # 어드민·GA와 나란히 비교하면 서로 다른 범위를 비교하는 셈이라 이 표에서는 뺐다(형 확인).
+    # 매체 리포트 기준 매출·ROAS는 '종합 대시보드'/'매체별 성과'에서 따로 확인할 수 있다.
     st.markdown("##### ② 매출 비교")
-    st.caption("어드민 = 회사 내부(카페24 등 백엔드) 기준 매출 · 보고서 = 매체 리포트(광고 플랫폼) 기준 매출 · GA = GA 기준 매출")
+    st.caption("어드민 = 회사 내부(카페24 등 백엔드) 기준, 사이트 전체 매출 · GA = GA가 집계한 사이트 전체 매출(자연유입·direct 포함)")
     admin_sum = fd["admin_revenue"].sum()
-    report_sum = fd["revenue"].sum()
     ga_sum = fd["ga_revenue"].sum()
     cost_sum = fd["cost_incl_vat"].sum()
-    gap_report = ((report_sum - admin_sum) / admin_sum * 100) if admin_sum else 0
     gap_ga = ((ga_sum - admin_sum) / admin_sum * 100) if admin_sum else 0
 
-    r1, r2, r3 = st.columns(3)
+    r1, r3 = st.columns(2)
     r1.metric("어드민 매출(회사 내부 기준)", f"{admin_sum:,.0f} 원")
-    r2.metric("보고서 기준 매출", f"{report_sum:,.0f} 원", f"{gap_report:+.1f}% vs 어드민")
     r3.metric("GA 기준 매출", f"{ga_sum:,.0f} 원", f"{gap_ga:+.1f}% vs 어드민")
-    st.caption(
-        "격차(%)는 어드민(회사 내부 기준) 매출 대비 초과/미달 비율입니다. "
-        "GA-매출은 쇼핑검색·GFA 외부몰 등 일부 데이터가 미집계될 수 있어 참고용으로 보는 걸 권장합니다."
-    )
+    st.caption("격차(%)는 어드민(회사 내부 기준) 매출 대비 초과/미달 비율입니다.")
 
     revenue_chart_df = fd.melt(
-        id_vars=["일자"], value_vars=["admin_revenue", "revenue", "ga_revenue"],
+        id_vars=["일자"], value_vars=["admin_revenue", "ga_revenue"],
         var_name="구분", value_name="매출",
     )
     revenue_chart_df["구분"] = revenue_chart_df["구분"].map({
-        "admin_revenue": "어드민(회사 내부)", "revenue": "보고서(매체 리포트)", "ga_revenue": "GA 기준",
+        "admin_revenue": "어드민(회사 내부)", "ga_revenue": "GA 기준",
     })
     fig_rev = px.line(
         revenue_chart_df, x="일자", y="매출", color="구분", markers=True,
@@ -4030,27 +4068,21 @@ def render_inflow_revenue_page(df: pd.DataFrame):
         "pageviews": "페이지뷰",
         "avg_session_duration": "평균 체류시간",
         "admin_revenue": "어드민-매출",
-        "revenue": "매체-매출",
         "ga_revenue": "GA-매출",
-        "roas": "매체-ROAS",
         "ga_roas": "GA-ROAS",
-        "report_gap_pct": "어드민-매체 매출 비교",
         "ga_gap_pct": "어드민-GA 매출 비교",
     }
     INFLOW_DETAIL_LABELS_REV = {v: k for k, v in INFLOW_DETAIL_LABELS.items()}
 
     detail_cols = [
         "report_date", "users", "new_users", "returning_users", "bounce_rate", "pageviews",
-        "avg_session_duration", "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas",
+        "avg_session_duration", "admin_revenue", "ga_revenue", "ga_roas",
     ]
     detail = fd[detail_cols].copy()
-    detail["report_gap_pct"] = np.where(
-        detail["admin_revenue"] > 0, (detail["revenue"] - detail["admin_revenue"]) / detail["admin_revenue"] * 100, 0
-    )
     detail["ga_gap_pct"] = np.where(
         detail["admin_revenue"] > 0, (detail["ga_revenue"] - detail["admin_revenue"]) / detail["admin_revenue"] * 100, 0
     )
-    final_cols = detail_cols + ["report_gap_pct", "ga_gap_pct"]
+    final_cols = detail_cols + ["ga_gap_pct"]
 
     def _fmt_duration(v):
         # 초 단위 숫자를 "3분 26초" 형태로 되돌려 보여준다 (원본 엑셀 표기와 맞춤).
@@ -4068,7 +4100,6 @@ def render_inflow_revenue_page(df: pd.DataFrame):
             return "-"
         return f"{'▲' if v >= 0 else '▼'}{v:+.1f}%"
 
-    show["report_gap_pct"] = detail["report_gap_pct"].map(_fmt_gap)
     show["ga_gap_pct"] = detail["ga_gap_pct"].map(_fmt_gap)
 
     returning_users_sum = fd["returning_users"].sum()  # (위 ①에서도 계산하지만 이 표 TOTAL 행에도 필요)
@@ -4081,18 +4112,15 @@ def render_inflow_revenue_page(df: pd.DataFrame):
         "pageviews": f"{fd['pageviews'].sum():,.0f}",
         "avg_session_duration": _fmt_duration(fd["avg_session_duration"].mean()),
         "admin_revenue": f"{admin_sum:,.0f}",
-        "revenue": f"{report_sum:,.0f}",
         "ga_revenue": f"{ga_sum:,.0f}",
-        "roas": f"{(report_sum / cost_sum * 100) if cost_sum else 0:.0f}%",
         "ga_roas": f"{(ga_sum / cost_sum * 100) if cost_sum else 0:.0f}%",
-        "report_gap_pct": f"{'▲' if gap_report >= 0 else '▼'}{gap_report:+.1f}%",
         "ga_gap_pct": f"{'▲' if gap_ga >= 0 else '▼'}{gap_ga:+.1f}%",
     }
     table = pd.concat([pd.DataFrame([total_row])[final_cols], show[final_cols]], ignore_index=True)
     table = table.rename(columns=INFLOW_DETAIL_LABELS)
     raw_numeric_cols = [
         "users", "new_users", "returning_users", "bounce_rate", "pageviews", "avg_session_duration",
-        "admin_revenue", "revenue", "ga_revenue", "roas", "ga_roas",
+        "admin_revenue", "ga_revenue", "ga_roas",
     ]
     render_html_table(table, raw=detail[raw_numeric_cols], raw_label_map=INFLOW_DETAIL_LABELS_REV)
 
@@ -4104,8 +4132,6 @@ def render_inflow_revenue_page(df: pd.DataFrame):
     comment_body = [
         f"총 방문자 {users_sum:,.0f}명(신규 비중 {new_ratio:.1f}%), 어드민 매출 대비 GA 매출 격차는 {_ops_fmt_pct(gap_ga)}입니다."
     ]
-    if abs(gap_report) >= 20:
-        comment_body.append(f"보고서(매체 리포트) 매출은 어드민 대비 {_ops_fmt_pct(gap_report)} 차이가 나 격차가 큰 편이니 참고해주세요.")
     st.markdown(" ".join(comment_body), unsafe_allow_html=True)
     if cost_sum > 0:
         _next = {
@@ -5061,7 +5087,7 @@ def main():
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
     elif page == "유입·매출 비교":
-        render_inflow_revenue_page(inflow_revenue)
+        render_inflow_revenue_page(inflow_revenue, ga_channel_inflow)
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
