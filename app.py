@@ -639,6 +639,7 @@ TABLES = {
     "agency_notes": "agency_notes",
     "channel_weekly": "channel_weekly",
     "utm_channel_map": "utm_channel_map",
+    "channel_budget": "channel_budget",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -1466,6 +1467,121 @@ def parse_utm_channel_map(xls: pd.ExcelFile) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     # 같은 소스/매체가 여러 시트/행에 중복돼 있으면 마지막(가장 아래) 값을 채택한다.
     out = out.drop_duplicates(subset=["source_medium"], keep="last").reset_index(drop=True)
+    return out
+
+
+BUDGET_SCOPE_TITLES = {
+    "자사몰": "자사몰 현황",
+    # "외부몰": "외부몰 현황",  # 구조가 더 복잡해서(직입점/벤더 중첩) 다음 단계에서 추가 예정
+}
+BUDGET_YEAR_LABEL = "26년"
+BUDGET_YEAR_NUM = 2000 + int(re.sub(r"\D", "", BUDGET_YEAR_LABEL))
+BUDGET_SUBSECTION_DETAIL = "매체 세부내역"
+
+
+def _find_budget_month_columns(raw: pd.DataFrame, scan_rows: int = 40):
+    """'1월'~'12월'이 순서대로 나열된 헤더 행을 찾아 (헤더 행 번호, {월번호: 컬럼위치})를 반환한다.
+    10개월 이상 잡히는 첫 행을 헤더로 인정한다(연말 등 일부 컬럼이 빠져도 허용)."""
+    for r in range(min(scan_rows, len(raw))):
+        month_cols = {}
+        for i, v in enumerate(raw.iloc[r].tolist()):
+            m = re.match(r"^(\d{1,2})\s*월$", str(v).strip())
+            if m and 1 <= int(m.group(1)) <= 12:
+                month_cols[int(m.group(1))] = i
+        if len(month_cols) >= 10:
+            return r, month_cols
+    return None, {}
+
+
+def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
+    """'◆26년 월별 예산 정리' 파일에서 '자사몰 현황' 섹션의 26년 매체별 월간 예산(광고선전비)을
+    파싱한다. 형이 캡쳐해준 화면 구조를 보고 만든 1차 버전 — 아직 실제 파일로 검증 전이라, 구조가
+    조금 다르면 조정이 필요할 수 있다. 매체 세부내역 각 행 + '자사몰' 전체 합계(광고선전비
+    1월~12월) 행을 channel='TOTAL'로 같이 저장한다. 원본이 천원 단위(+VAT)라 1000을 곱해 원
+    단위로 맞춘다(다른 테이블들과 단위를 통일하기 위함)."""
+    rows = []
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+        if raw.empty:
+            continue
+        header_row, month_cols = _find_budget_month_columns(raw)
+        if header_row is None or not month_cols:
+            continue
+        label_col_end = min(month_cols.values())
+
+        for scope, scope_title in BUDGET_SCOPE_TITLES.items():
+            scope_row_idx = [
+                r for r in range(len(raw))
+                if raw.iloc[r].astype(str).str.contains(scope_title, na=False, regex=False).any()
+            ]
+            if not scope_row_idx:
+                continue
+            start = scope_row_idx[0]
+            other_titles = [t for t in BUDGET_SCOPE_TITLES.values() if t != scope_title]
+            end_candidates = [
+                r for r in range(start + 1, len(raw))
+                if any(raw.iloc[r].astype(str).str.contains(t, na=False, regex=False).any() for t in other_titles)
+            ]
+            end = end_candidates[0] if end_candidates else len(raw)
+
+            # 26년 블록: '26년' 텍스트가 나오는 행부터 '25년' 텍스트가 나오는 행 전까지.
+            year_start_candidates = [
+                r for r in range(start, end)
+                if raw.iloc[r].astype(str).str.contains(BUDGET_YEAR_LABEL, na=False, regex=False).any()
+            ]
+            if not year_start_candidates:
+                continue
+            y_start = year_start_candidates[0]
+            year_end_candidates = [
+                r for r in range(y_start + 1, end)
+                if raw.iloc[r].astype(str).str.contains("25년", na=False, regex=False).any()
+            ]
+            y_end = year_end_candidates[0] if year_end_candidates else end
+
+            # scope 전체 합계: '광고선전비 (1월~12월)' 행 (매출/광고비 요약 블록에 있음, 매체
+            # 세부내역보다 위쪽) → channel='TOTAL'로 저장.
+            total_row_idx = [
+                r for r in range(y_start, y_end)
+                if raw.iloc[r].astype(str).str.contains(r"광고선전비\s*\(?\s*1\s*월\s*~\s*12\s*월", na=False, regex=True).any()
+            ]
+            if total_row_idx:
+                r = total_row_idx[0]
+                for m, c in month_cols.items():
+                    v = pd.to_numeric(raw.iat[r, c], errors="coerce")
+                    if pd.notna(v):
+                        rows.append({"scope": scope, "channel": "TOTAL", "month": m, "budget_cost": float(v) * 1000})
+
+            # 매체 세부내역: 라벨 행 다음부터 y_end까지, 각 행의 첫 문자열 셀(라벨 컬럼 범위 안)을
+            # 매체명으로 쓴다. 숫자로 시작하는 값/빈 라벨/전부 빈 월별 값인 행은 건너뛴다.
+            detail_start_candidates = [
+                r for r in range(y_start, y_end)
+                if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()
+            ]
+            if not detail_start_candidates:
+                continue
+            d_start = detail_start_candidates[0] + 1
+            for r in range(d_start, y_end):
+                label = None
+                for c in range(label_col_end):
+                    v = raw.iat[r, c]
+                    if isinstance(v, str) and v.strip() and not re.match(r"^\d", v.strip()):
+                        label = v.strip()
+                if not label:
+                    continue
+                any_val = False
+                for m, c in month_cols.items():
+                    v = pd.to_numeric(raw.iat[r, c], errors="coerce")
+                    if pd.notna(v):
+                        any_val = True
+                        rows.append({"scope": scope, "channel": label, "month": m, "budget_cost": float(v) * 1000})
+                if not any_val:
+                    continue
+
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["year"] = BUDGET_YEAR_NUM
+    out = out.groupby(["scope", "channel", "year", "month"], as_index=False)["budget_cost"].sum()
     return out
 
 
@@ -3161,11 +3277,131 @@ def render_upload_panel():
             st.rerun()
 
     st.sidebar.markdown("---")
+    budget_file = st.sidebar.file_uploader(
+        "③ 연간 예산 파일 업로드 (◆26년 월별 예산 정리 xlsx)",
+        type=["xlsx", "xls"], key="budget_uploader",
+    )
+    if budget_file is not None:
+        with st.sidebar.status("파일 분석 중...", expanded=True) as status3:
+            budget_xls = pd.ExcelFile(budget_file)
+            budget_df = parse_channel_budget_sheet(budget_xls)
+            if budget_df.empty:
+                st.warning(
+                    "인식 가능한 예산 데이터를 찾지 못했습니다. '자사몰 현황' 섹션, '26년' 블록, "
+                    "'매체 세부내역'이 있는 파일인지 확인해주세요. (1차 버전이라 원본 레이아웃과 "
+                    "다르면 못 읽을 수 있습니다 — 이 경우 형에게 알려주세요.)"
+                )
+            else:
+                total_n = budget_df[budget_df["channel"] == "TOTAL"]["budget_cost"].sum()
+                st.write(
+                    f"💰 자사몰 예산 인식: {len(budget_df)}행, "
+                    f"매체 {budget_df.loc[budget_df['channel'] != 'TOTAL', 'channel'].nunique()}종, "
+                    f"26년 TOTAL 연간 예산 {total_n:,.0f}원"
+                )
+            status3.update(label="분석 완료", state="complete")
+
+        if st.sidebar.button("💾 예산 데이터 저장하기", type="primary", key="budget_save_btn"):
+            if budget_df.empty:
+                st.sidebar.warning("저장할 예산 데이터가 없습니다.")
+            else:
+                n_budget = save_table("channel_budget", budget_df, "scope,channel,year,month", budget_file.name)
+                st.cache_data.clear()
+                st.sidebar.success(f"저장 완료! 예산 {n_budget}행")
+                st.rerun()
+
+    st.sidebar.markdown("---")
     wk = load_table("weekly_overview")
     st.sidebar.metric("누적 주간 데이터", f"{len(wk):,} 주")
     if st.sidebar.button("🔄 새로고침 (캐시 비우기)"):
         st.cache_data.clear()
         st.rerun()
+
+
+# ──────────────────────────────────────────────────────────────
+# 예산 현황 (신규, 1차 버전) — '◆26년 월별 예산 정리' 파일 기반, 자사몰만
+# ──────────────────────────────────────────────────────────────
+def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
+    st.subheader("💰 예산 현황 (자사몰 · 1차 버전)")
+    st.caption(
+        "'◆26년 월별 예산 정리' 파일의 '자사몰 현황' 섹션(26년, 매체 세부내역) 기준입니다. "
+        "형이 캡쳐해준 화면 구조를 보고 만든 1차 버전이라, 실제 파일로 아직 검증 전입니다 — "
+        "숫자가 이상해 보이면 알려주세요. 매체별 예산의 매체명이 리포트 매체명과 아직 자동으로 "
+        "안 맞춰져 있어서, 우선 자사몰 전체 목표 대비 실제 집행만 비교합니다."
+    )
+    if budget is None or budget.empty:
+        st.info("아직 예산 데이터가 없습니다. 왼쪽 사이드바 '③ 연간 예산 파일 업로드'에서 파일을 올려주세요.")
+        return
+
+    b = budget[budget["scope"] == "자사몰"].copy()
+    total_b = b[b["channel"] == "TOTAL"].sort_values("month")
+    if total_b.empty:
+        st.info("자사몰 TOTAL(광고선전비 1월~12월) 행을 못 찾았습니다. 파일 구조를 다시 확인해주세요.")
+        return
+
+    year = int(total_b["year"].iloc[0])
+    actual_by_month = pd.Series(dtype=float)
+    if monthly is not None and not monthly.empty:
+        m = monthly.copy()
+        m["report_month"] = pd.to_datetime(m["report_month"])
+        m_year = m[m["report_month"].dt.year == year]
+        if not m_year.empty:
+            actual_by_month = m_year.groupby(m_year["report_month"].dt.month)["cost_incl_vat"].sum()
+
+    rows = []
+    for _, r in total_b.iterrows():
+        mo = int(r["month"])
+        budget_v = float(r["budget_cost"])
+        actual_v = float(actual_by_month.get(mo, 0))
+        rows.append({
+            "월": f"{mo}월", "월번호": mo, "목표 예산": budget_v, "실제 집행": actual_v,
+            "집행률": (actual_v / budget_v * 100) if budget_v else 0,
+            "차이": actual_v - budget_v,
+        })
+    show = pd.DataFrame(rows).sort_values("월번호")
+
+    st.markdown(f"##### {year}년 자사몰 월별 목표 예산 vs 실제 집행")
+    fig = px.bar(
+        show, x="월", y=["목표 예산", "실제 집행"], barmode="group",
+        category_orders={"월": show["월"].tolist()}, labels={"value": "금액(원)", "variable": "구분"},
+    )
+    fig.update_yaxes(tickformat=",.0f")
+    fig.for_each_trace(
+        lambda t: t.update(hovertemplate=f"구분={t.name}<br>월=%{{x}}<br>금액=%{{y:,.0f}}원<extra></extra>")
+    )
+    st.plotly_chart(theme_chart(fig), use_container_width=True)
+
+    show_disp = show[["월", "목표 예산", "실제 집행", "차이", "집행률"]].copy()
+    for c in ["목표 예산", "실제 집행", "차이"]:
+        show_disp[c] = show[c].map(lambda v: f"{v:,.0f}")
+    show_disp["집행률"] = show["집행률"].map(lambda v: f"{v:.0f}%" if v else "-")
+    render_html_table(show_disp)
+
+    cur = show[show["실제 집행"] > 0].sort_values("월번호")
+    if not cur.empty:
+        last = cur.iloc[-1]
+        if last["집행률"] >= 110:
+            status = "초과 집행"
+        elif last["집행률"] >= 80:
+            status = "목표 근접"
+        else:
+            status = "저집행"
+        st.markdown(
+            f"**{last['월']} 기준 목표 예산 {last['목표 예산']:,.0f}원 대비 실제 {last['실제 집행']:,.0f}원 "
+            f"집행({last['집행률']:.0f}%)로 {status}입니다.**"
+        )
+
+    detail = b[b["channel"] != "TOTAL"]
+    if not detail.empty:
+        st.markdown("---")
+        st.markdown("##### 매체별 예산 (원본 참고용 — 리포트 매체명과 자동 매칭 전)")
+        pivot = detail.pivot_table(index="channel", columns="month", values="budget_cost", aggfunc="sum")
+        pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+        pivot.columns = [f"{c}월" for c in pivot.columns]
+        pivot = pivot.reset_index().rename(columns={"channel": "매체명"})
+        pivot_disp = pivot.copy()
+        for c in pivot.columns[1:]:
+            pivot_disp[c] = pivot[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "-")
+        render_html_table(pivot_disp)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -3385,7 +3621,7 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
-    "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과"],
+    "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
     "GA 유입 리포트": ["GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
@@ -5050,6 +5286,7 @@ def main():
     ga_channel_inflow = load_table("ga_channel_inflow")
     agency_notes = load_table("agency_notes")
     channels_weekly = load_table("channel_weekly")
+    budget = load_table("channel_budget")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -5069,6 +5306,8 @@ def main():
         render_targeting_performance_page(audience, creatives_fallback=creatives)
     elif page == "소재별 성과":
         render_creative_performance(creatives)
+    elif page == "예산 현황":
+        render_budget_page(monthly, budget)
     elif page == "운영 코멘트":
         render_operation_comment_page(
             weekly, monthly, daily, channels, snapshot, creatives, audience,
