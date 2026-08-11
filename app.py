@@ -1520,7 +1520,7 @@ def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: i
 def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
     """예산 파일 파싱이 실패했을 때, 형이 화면을 캡쳐해서 보내주면 바로 원인을 알 수 있도록
     시트별로 무엇을 찾았는지/못 찾았는지 자세히 보여주는 진단 리포트를 만든다."""
-    lines = []
+    lines = [f"전체 시트 목록({len(xls.sheet_names)}개): {xls.sheet_names}", ""]
     for sheet in xls.sheet_names:
         raw = pd.read_excel(xls, sheet_name=sheet, header=None)
         lines.append(f"### 시트: '{sheet}' ({raw.shape[0]}행 x {raw.shape[1]}열)")
