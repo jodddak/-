@@ -1481,6 +1481,11 @@ BUDGET_SCOPE_TITLES = {
 # 삼켜버리지 않도록 전체 목록으로 경계를 잡는다.
 ALL_BUDGET_SECTION_TITLES = ["온라인사업팀 현황", "자사몰 현황", "외부몰 현황"]
 BUDGET_SUBSECTION_DETAIL = "매체 세부내역"
+# '매체 세부내역' 라벨을 못 찾았을 때, 매체명이 아니라 요약 행(예상매출/실매출/광고비/비율/
+# 전년 대비 등)으로 보이는 라벨은 채널 후보에서 제외하기 위한 패턴.
+BUDGET_SUMMARY_ROW_LABEL_RE = re.compile(
+    r"예상매출|실매출|매출\s*달성률|광고선전비|광고비|전년\s*대비|비율|목표|누계|증감"
+)
 
 
 def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: int | None = None):
@@ -1582,6 +1587,26 @@ def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
 
         detail_hits = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()]
         lines.append(f"- '매체 세부내역' 텍스트 발견 행: {detail_hits[:10]}" if detail_hits else "- '매체 세부내역' 텍스트를 못 찾음")
+
+        # '매체 세부내역'이라는 라벨 문구에 기대지 않고, 실제 매체명(네이버/메타/구글 등)이
+        # 어디에 있는지 직접 찾는다 — 라벨 문구가 실제 파일과 다를 수 있어서, 채널명 자체를
+        # 찾는 게 더 확실하다.
+        channel_keywords = ["네이버", "메타", "구글", "크리테오", "GFA", "카카오", "모비온", "AEDI", "틱톡", "당근"]
+        channel_hits = []
+        for r in range(len(raw)):
+            row_str = raw.iloc[r].astype(str)
+            for kw in channel_keywords:
+                if row_str.str.contains(kw, na=False, regex=False).any():
+                    channel_hits.append((r, kw))
+                    break
+        if channel_hits:
+            lines.append(
+                "- 매체명 키워드(네이버/메타/구글/크리테오/GFA/카카오/모비온 등) 직접 검색 결과: "
+                + ", ".join(f"{r}행({kw})" for r, kw in channel_hits[:20])
+                + (" 등" if len(channel_hits) > 20 else "")
+            )
+        else:
+            lines.append("- 매체명 키워드(네이버/메타/구글 등)를 이 시트 전체에서 하나도 못 찾음")
 
         preview_cols = min(18, raw.shape[1])
 
@@ -1718,16 +1743,23 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                     r for r in range(y_start, y_end)
                     if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()
                 ]
-                if not detail_start_candidates:
-                    continue
-                d_start = detail_start_candidates[0] + 1
-                for r in range(d_start, y_end):
+                if detail_start_candidates:
+                    channel_row_range = range(detail_start_candidates[0] + 1, y_end)
+                else:
+                    # '매체 세부내역' 라벨 문구를 못 찾은 경우 — 파일마다 이 라벨 문구가 없거나
+                    # 다를 수 있어서, 대신 '요약 행'처럼 보이지 않는(예상매출/실매출/광고비/비율/
+                    # 전년 대비 등이 아닌) 라벨을 가진 행을 전부 매체 후보로 본다.
+                    channel_row_range = range(y_start, y_end)
+
+                for r in channel_row_range:
                     label = None
                     for c in range(label_col_end):
                         v = raw.iat[r, c]
                         if isinstance(v, str) and v.strip() and not re.match(r"^\d", v.strip()):
                             label = v.strip()
                     if not label:
+                        continue
+                    if not detail_start_candidates and BUDGET_SUMMARY_ROW_LABEL_RE.search(label):
                         continue
                     for m, c in month_cols.items():
                         v = pd.to_numeric(raw.iat[r, c], errors="coerce")
