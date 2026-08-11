@@ -1471,6 +1471,7 @@ def parse_utm_channel_map(xls: pd.ExcelFile) -> pd.DataFrame:
 
 
 BUDGET_SCOPE_TITLES = {
+    "온라인사업팀": "온라인사업팀 현황",
     "자사몰": "자사몰 현황",
     # "외부몰": "외부몰 현황",  # 구조가 더 복잡해서(직입점/벤더 중첩) 다음 단계에서 추가 예정
 }
@@ -3499,101 +3500,149 @@ def _budget_fmt_pct_change(v):
     return f"{arrow}{abs(v):.1f}%"
 
 
+BUDGET_TABLE_CSS = f"""
+<style>
+.stco-budget-wrap {{ overflow-x:auto; border:1px solid {THEME_COLORS["border"]}; border-radius:10px;
+  background:{THEME_COLORS["canvas"]}; margin-bottom:12px; }}
+.stco-budget-table {{ width:100%; border-collapse:collapse; font-size:13px;
+  font-family:{THEME_FONT_STACK}; }}
+.stco-budget-table th {{ background:{THEME_COLORS["surface"]}; color:{THEME_COLORS["muted"]};
+  font-weight:600; padding:6px 10px; text-align:right; border-bottom:1px solid {THEME_COLORS["border"]};
+  white-space:nowrap; }}
+.stco-budget-table th:nth-child(-n+3) {{ text-align:center; }}
+.stco-budget-table td {{ padding:6px 10px; text-align:right; color:{THEME_COLORS["foreground"]};
+  border:1px solid {THEME_COLORS["border"]}; white-space:nowrap; }}
+.stco-budget-table td:nth-child(-n+3) {{ text-align:center; color:{THEME_COLORS["body"]}; font-weight:600; }}
+.stco-budget-table tr:hover td {{ background:{THEME_COLORS["surface"]}; }}
+.stco-budget-strong {{ background:#fff8e1; font-weight:700; color:{THEME_COLORS["foreground"]} !important; }}
+</style>
+"""
+
+
+def _render_budget_box_table(scope_label: str, b_scope: pd.DataFrame, years: list, today) -> dict:
+    """scope_label(예: '자사몰')에 해당하는 예산 데이터를, 원본 엑셀 표처럼 연도/그룹이
+    rowspan으로 병합된 박스형 HTML 표로 그린다. 실매출·광고비 행은 원본의 노란 강조와 비슷하게
+    배경색을 넣는다. 진단용으로 연도별 {채널수} dict를 반환한다."""
+
+    def series(year, channel):
+        return _budget_month_series(b_scope, year, channel)
+
+    def money_cells(vals, year, strong=False):
+        total, mtd = _budget_total_mtd(vals, year, today)
+        cls = ' class="stco-budget-strong"' if strong else ""
+        cells = f"<td{cls}>{_budget_fmt_money(total)}</td><td{cls}>{_budget_fmt_money(mtd)}</td>"
+        for m in range(1, 13):
+            cells += f"<td{cls}>{_budget_fmt_money(vals.get(m))}</td>"
+        return cells
+
+    def pct_cells(vals, fmt_fn=_budget_fmt_pct):
+        cells = "<td>-</td><td>-</td>"
+        for m in range(1, 13):
+            text = fmt_fn(vals.get(m))
+            style = ""
+            if text.startswith("▲"):
+                style = ' style="color:#d93025;"'
+            elif text.startswith("▼"):
+                style = ' style="color:#1a73e8;"'
+            cells += f"<td{style}>{text}</td>"
+        return cells
+
+    month_headers = "".join(f"<th>{m}월</th>" for m in range(1, 13))
+    html = [
+        '<div class="stco-budget-wrap"><table class="stco-budget-table"><thead><tr>'
+        f"<th>연도</th><th>구분</th><th>항목</th><th>합계(연간)</th><th>당월 누계</th>{month_headers}"
+        "</tr></thead><tbody>"
+    ]
+
+    revenue_by_year, cost_by_year, channel_counts = {}, {}, {}
+    for idx, year in enumerate(years):
+        rev_e = series(year, BUDGET_SENTINEL_EXPECTED_REVENUE)
+        rev_a = series(year, BUDGET_SENTINEL_ACTUAL_REVENUE)
+        cost = series(year, "TOTAL")
+        revenue_by_year[year] = rev_a
+        cost_by_year[year] = cost
+        achieve = _budget_ratio_series(rev_a, rev_e)
+        cost_ratio = _budget_ratio_series(cost, rev_a)
+
+        yoy_rows = []
+        if idx + 1 < len(years):
+            prev_year = years[idx + 1]
+            prev_rev = revenue_by_year.get(prev_year) or series(prev_year, BUDGET_SENTINEL_ACTUAL_REVENUE)
+            prev_cost = cost_by_year.get(prev_year) or series(prev_year, "TOTAL")
+            yoy_rows = [
+                ("전년 대비 매출 증감율", _budget_yoy_series(rev_a, prev_rev)),
+                ("전년 대비 광고비 증감율", _budget_yoy_series(cost, prev_cost)),
+            ]
+
+        chs = b_scope[
+            (b_scope["year"] == year)
+            & (~b_scope["channel"].isin(["TOTAL", BUDGET_SENTINEL_EXPECTED_REVENUE, BUDGET_SENTINEL_ACTUAL_REVENUE]))
+        ]["channel"].unique().tolist()
+        chs_sorted = sorted(chs, key=lambda c: -(sum(v for v in series(year, c).values() if v is not None) or 0))
+        channel_counts[year] = len(chs_sorted)
+
+        sales_rowspan = 4 + len(yoy_rows)
+        detail_rowspan = max(len(chs_sorted), 1)
+        year_rowspan = sales_rowspan + detail_rowspan
+
+        html.append(
+            f'<tr><td rowspan="{year_rowspan}">{year}년</td>'
+            f'<td rowspan="{sales_rowspan}">매출/광고비</td>'
+            f"<td>실매출</td>{money_cells(rev_a, year, strong=True)}</tr>"
+        )
+        html.append(f"<tr><td>매출 달성률</td>{pct_cells(achieve)}</tr>")
+        html.append(f"<tr><td>광고비</td>{money_cells(cost, year, strong=True)}</tr>")
+        html.append(f"<tr><td>광고비 비율</td>{pct_cells(cost_ratio)}</tr>")
+        for label, yoy_vals in yoy_rows:
+            html.append(f"<tr><td>{label}</td>{pct_cells(yoy_vals, _budget_fmt_pct_change)}</tr>")
+
+        if chs_sorted:
+            html.append(
+                f'<tr><td rowspan="{detail_rowspan}">매체 세부내역</td>'
+                f"<td>{chs_sorted[0]}</td>{money_cells(series(year, chs_sorted[0]), year)}</tr>"
+            )
+            for ch in chs_sorted[1:]:
+                html.append(f"<tr><td>{ch}</td>{money_cells(series(year, ch), year)}</tr>")
+        else:
+            html.append(
+                f'<tr><td rowspan="{detail_rowspan}">매체 세부내역</td>'
+                f'<td colspan="14">이 연도는 매체 세부내역을 못 찾았습니다</td></tr>'
+            )
+
+    html.append("</tbody></table></div>")
+    st.markdown(BUDGET_TABLE_CSS + "".join(html), unsafe_allow_html=True)
+    return channel_counts
+
+
 def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
-    st.subheader("💰 예산 현황 (자사몰)")
+    st.subheader("💰 예산 현황")
     st.caption(
-        "'◆26년 월별 예산 정리' 파일의 '자사몰 현황' 섹션을 원본 엑셀 표와 같은 형태(연 목표/당월 "
-        "누계/1~12월, 26년·25년 비교, 매체 세부내역)로 보여줍니다. 원본 표시는 천원 단위지만, "
-        "여기 숫자는 원 단위입니다. 광고비 합계는 '매체 세부내역' 채널별 합으로 계산합니다(요약 행 "
-        "라벨이 파일 버전마다 달라서 라벨 대신 실제 매체별 값을 더한 값입니다) — 원본 표의 합계와 "
-        "다르면 알려주세요."
+        "'◆26년 월별 예산 정리' 파일의 '온라인사업팀 현황'·'자사몰 현황' 섹션을 원본 엑셀 표와 "
+        "같은 형태(연도/구분/항목 병합, 26년·25년 비교, 매체 세부내역)로 보여줍니다. 원본 표시는 "
+        "천원 단위지만 여기 숫자는 원 단위입니다. 광고비 합계는 '매체 세부내역' 채널별 합으로 "
+        "계산합니다(요약 행 라벨이 파일 버전마다 달라서, 라벨 대신 실제 매체별 값을 더한 값입니다) "
+        "— 원본 표의 합계와 다르면 알려주세요."
     )
     if budget is None or budget.empty:
         st.info("아직 예산 데이터가 없습니다. 왼쪽 사이드바 '③ 연간 예산 파일 업로드'에서 파일을 올려주세요.")
         return
 
-    b = budget[budget["scope"] == "자사몰"].copy()
-    if b.empty:
-        st.info("자사몰 예산 데이터를 찾지 못했습니다. 왼쪽 사이드바 업로드 화면의 진단 정보를 확인해주세요.")
+    today = datetime.now()
+    scopes_present = [s for s in BUDGET_SCOPE_TITLES if s in budget["scope"].unique()]
+    if not scopes_present:
+        st.info("예산 데이터를 찾지 못했습니다. 왼쪽 사이드바 업로드 화면의 진단 정보를 확인해주세요.")
         return
 
-    years = sorted(b["year"].unique(), reverse=True)
-    today = datetime.now()
-
-    month_cols = [f"{m}월" for m in range(1, 13)]
-    table_cols = ["구분", "합계(연간)", "당월 누계"] + month_cols
-    rows = []  # list of dict per column
-
-    def add_row(label, vals, year, fmt_fn, indent=False):
-        total, mtd = _budget_total_mtd(vals, year, today)
-        row = {
-            "구분": ("　ㄴ " if indent else "") + label,
-            "합계(연간)": _budget_fmt_money(total) if fmt_fn is _budget_fmt_money else (fmt_fn(None)),
-            "당월 누계": _budget_fmt_money(mtd) if fmt_fn is _budget_fmt_money else fmt_fn(None),
-        }
-        for m in range(1, 13):
-            row[f"{m}월"] = fmt_fn(vals.get(m))
-        rows.append(row)
-
-    revenue_by_year = {}
-    cost_by_year = {}
-    for year in years:
-        rev_e = _budget_month_series(b, year, BUDGET_SENTINEL_EXPECTED_REVENUE)
-        rev_a = _budget_month_series(b, year, BUDGET_SENTINEL_ACTUAL_REVENUE)
-        cost = _budget_month_series(b, year, "TOTAL")
-        revenue_by_year[year] = rev_a
-        cost_by_year[year] = cost
-
-        add_row(f"{year}년 실매출", rev_a, year, _budget_fmt_money)
-        if any(v is not None for v in rev_e.values()):
-            achieve = _budget_ratio_series(rev_a, rev_e)
-            add_row(f"{year}년 매출 달성률", achieve, year, _budget_fmt_pct)
-        add_row(f"{year}년 광고비", cost, year, _budget_fmt_money)
-        cost_ratio = _budget_ratio_series(cost, rev_a)
-        add_row(f"{year}년 광고비 비율", cost_ratio, year, _budget_fmt_pct)
-
-        chs = b[
-            (b["year"] == year)
-            & (~b["channel"].isin(["TOTAL", BUDGET_SENTINEL_EXPECTED_REVENUE, BUDGET_SENTINEL_ACTUAL_REVENUE]))
-        ]["channel"].unique().tolist()
-        chs_sorted = sorted(
-            chs,
-            key=lambda c: -(sum(v for v in _budget_month_series(b, year, c).values() if v is not None) or 0),
-        )
-        for ch in chs_sorted:
-            add_row(ch, _budget_month_series(b, year, ch), year, _budget_fmt_money, indent=True)
-
-    if len(years) >= 2:
-        y_cur, y_prev = years[0], years[1]
-        add_row(
-            "전년 대비 매출 증감율",
-            _budget_yoy_series(revenue_by_year[y_cur], revenue_by_year[y_prev]),
-            y_cur, _budget_fmt_pct_change,
-        )
-        add_row(
-            "전년 대비 광고비 증감율",
-            _budget_yoy_series(cost_by_year[y_cur], cost_by_year[y_prev]),
-            y_cur, _budget_fmt_pct_change,
-        )
-
-    show = pd.DataFrame(rows, columns=table_cols)
-    render_html_table(show)
-
-    # 요약 코멘트: 최신 실적이 있는 달 기준으로 목표 대비 진행 상황 한 줄.
-    latest_year = years[0]
-    rev_a = revenue_by_year[latest_year]
-    cost = cost_by_year[latest_year]
-    entered_months = [m for m in range(1, 13) if rev_a.get(m) or cost.get(m)]
-    if entered_months:
-        last_m = max(entered_months)
-        rev_v, cost_v = rev_a.get(last_m), cost.get(last_m)
-        if rev_v and cost_v:
-            roas_ratio = rev_v / cost_v * 100 if cost_v else None
-            st.markdown(
-                f"**{latest_year}년 {last_m}월 기준 자사몰 실매출 {rev_v:,.0f}원, 광고비 {cost_v:,.0f}원"
-                + (f" (광고비 비율 {cost_v / rev_v * 100:.1f}%)" if rev_v else "")
-                + "입니다.**"
-            )
+    for scope in scopes_present:
+        b = budget[budget["scope"] == scope].copy()
+        if b.empty:
+            continue
+        years = sorted(b["year"].unique(), reverse=True)
+        st.markdown(f"##### {BUDGET_SCOPE_TITLES[scope]}")
+        channel_counts = _render_budget_box_table(scope, b, years, today)
+        diag = " · ".join(f"{y}년 매체 {n}개" for y, n in channel_counts.items())
+        st.caption(f"매체 세부내역 인식: {diag}")
+        st.markdown("---")
 
     st.caption(
         "'매체 세부내역' 매체명은 원본 파일 표기 그대로이며, 다른 페이지(매체별 성과 등)의 리포트 "
