@@ -1528,16 +1528,39 @@ def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
             lines.append("- (빈 시트)")
             continue
 
+        title_scan_cols = min(3, raw.shape[1])
+        title_positions = []  # [(row, title), ...] 등장 순서대로 — 파서와 동일한 방식(왼쪽 컬럼만)
+        for r in range(len(raw)):
+            row_str = raw.iloc[r, :title_scan_cols].astype(str)
+            for t in ALL_BUDGET_SECTION_TITLES:
+                if row_str.str.contains(t, na=False, regex=False).any():
+                    title_positions.append((r, t))
         title_hits = {}
-        for t in ALL_BUDGET_SECTION_TITLES:
-            hit_rows = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains(t, na=False, regex=False).any()]
-            if hit_rows:
-                title_hits[t] = hit_rows
+        for r, t in title_positions:
+            title_hits.setdefault(t, []).append(r)
         if title_hits:
             for t, hit_rows in title_hits.items():
-                lines.append(f"- '{t}' 텍스트 발견: {hit_rows[:5]}행" + (" 등" if len(hit_rows) > 5 else ""))
+                lines.append(f"- '{t}' 텍스트 발견(맨 왼쪽 {title_scan_cols}개 컬럼만 확인): {hit_rows[:5]}행" + (" 등" if len(hit_rows) > 5 else ""))
         else:
-            lines.append("- '온라인사업팀 현황'/'자사몰 현황'/'외부몰 현황' 텍스트를 이 시트에서 못 찾음")
+            lines.append("- '온라인사업팀 현황'/'자사몰 현황'/'외부몰 현황' 텍스트를 이 시트 왼쪽 컬럼에서 못 찾음")
+
+        # 실제 파서가 판단할 [start, end) 구간과, 그 범위 안에 '26년'/'25년'/'매체 세부내역'이
+        # 실제로 들어오는지를 직접 계산해서 보여준다 — 이게 어긋나면 구간이 너무 일찍 끊긴 것
+        # (파싱 실패의 가장 흔한 원인).
+        for scope_check, title_check in BUDGET_SCOPE_TITLES.items():
+            starts = title_hits.get(title_check, [])
+            if not starts:
+                continue
+            s = starts[0]
+            later = sorted(r for r, _ in title_positions if r > s)
+            e = later[0] if later else len(raw)
+            year_in = [r for r in range(len(raw)) if s <= r < e and raw.iloc[r].astype(str).str.contains("26년|25년", na=False, regex=True).any()]
+            detail_in = [r for r in range(len(raw)) if s <= r < e and raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()]
+            lines.append(
+                f"- [파서 판정] '{title_check}' 구간 = {s}~{e - 1}행 / 이 구간 안 '26·25년' 발견: "
+                f"{year_in if year_in else '없음'} / 이 구간 안 '매체 세부내역' 발견: "
+                f"{detail_in if detail_in else '없음 ← 이게 없으면 매체 데이터가 0개로 나옵니다'}"
+            )
 
         all_month_headers = []
         r = 0
@@ -1614,9 +1637,13 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
         # 시트 안에 등장하는 모든 섹션 제목의 위치를 먼저 전부 찾아둔다 (온라인사업팀 현황이
         # 자사몰 현황보다 앞에 있을 수 있고, 그 위쪽에 다른 요약 표가 더 있을 수도 있어서 —
         # 헤더/컬럼 위치를 시트 전체에서 한 번만 찾지 않고 섹션별로 다시 찾기 위한 기준점).
+        # 왼쪽 몇 개 컬럼(라벨 자리)만 본다 — 전체 행을 다 보면 '매체 세부내역'의 채널명이나
+        # 코멘트 셀에 우연히 '외부몰' 같은 단어가 들어있을 때 그걸 새 섹션 제목으로 잘못 인식해서
+        # 구간이 너무 일찍 끊길 수 있다.
+        title_scan_cols = min(3, raw.shape[1])
         title_positions = []  # [(row_idx, title), ...] 등장 순서대로
         for r in range(len(raw)):
-            row_str = raw.iloc[r].astype(str)
+            row_str = raw.iloc[r, :title_scan_cols].astype(str)
             for t in ALL_BUDGET_SECTION_TITLES:
                 if row_str.str.contains(t, na=False, regex=False).any():
                     title_positions.append((r, t))
