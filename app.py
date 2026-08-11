@@ -1458,6 +1458,52 @@ def build_utm_channel_lookup(utm_map: pd.DataFrame) -> dict:
     }
 
 
+def _ga_daily_agg(ga_channel_inflow: pd.DataFrame) -> pd.DataFrame:
+    """ga_channel_inflow(일자×소스/매체, UTM 매핑 완료)를 날짜 단위로 합산해 ga_conversions/
+    ga_revenue를 만든다. '일자별 누적' 표에 GA 컬럼을 붙일 때 쓴다. 매체 매핑이 안 된 행도
+    (channel이 비어있어도) 전체 합계엔 포함한다 — 날짜 단위 합계는 매체 구분이 필요 없어서."""
+    if ga_channel_inflow is None or ga_channel_inflow.empty:
+        return pd.DataFrame(columns=["report_date", "ga_conversions", "ga_revenue"])
+    g = ga_channel_inflow.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    return g.groupby("report_date", as_index=False).agg(
+        ga_conversions=("conversions", "sum"), ga_revenue=("revenue", "sum")
+    )
+
+
+def _ga_weekly_agg(ga_channel_inflow: pd.DataFrame, weekly: pd.DataFrame) -> pd.DataFrame:
+    """'주간별 누적' 표의 각 주(week_start~week_end) 구간에 맞춰 ga_channel_inflow를
+    합산한다. 리포트 원본 주간 섹션엔 GA 컬럼이 아예 없어서, 이 방식으로만 채울 수 있다."""
+    if ga_channel_inflow is None or ga_channel_inflow.empty or weekly is None or weekly.empty:
+        return pd.DataFrame(columns=["week_start", "ga_conversions", "ga_revenue"])
+    g = ga_channel_inflow.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    rows = []
+    for _, w in weekly.iterrows():
+        mask = (g["report_date"] >= w["week_start"]) & (g["report_date"] <= w["week_end"])
+        rows.append({
+            "week_start": w["week_start"],
+            "ga_conversions": g.loc[mask, "conversions"].sum(),
+            "ga_revenue": g.loc[mask, "revenue"].sum(),
+        })
+    return pd.DataFrame(rows)
+
+
+def _ga_channel_agg(ga_channel_inflow: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """선택된 기간 안에서, UTM 매핑이 된(channel이 채워진) 행만 매체 단위로 합산한다.
+    '매체별 성과' 표에 (기간 선택에 맞춰 갱신되는) GA 컬럼을 붙일 때 쓴다."""
+    if ga_channel_inflow is None or ga_channel_inflow.empty:
+        return pd.DataFrame(columns=["channel", "ga_conversions", "ga_revenue"])
+    g = ga_channel_inflow.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    g = g[(g["report_date"] >= start) & (g["report_date"] <= end) & g["channel"].notna()]
+    if g.empty:
+        return pd.DataFrame(columns=["channel", "ga_conversions", "ga_revenue"])
+    return g.groupby("channel", as_index=False).agg(
+        ga_conversions=("conversions", "sum"), ga_revenue=("revenue", "sum")
+    )
+
+
 CREATIVE_NAME_HINTS = ["소재성과", "소재별성과"]  # 예: 페이스북_소재성과요약
 
 
@@ -3366,6 +3412,7 @@ def render_nav() -> str:
 def render_overview_page(
     weekly: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFrame,
     channels: pd.DataFrame = None, channels_weekly: pd.DataFrame = None,
+    ga_channel_inflow: pd.DataFrame = None,
 ):
     weekly = _drop_trailing_zero_weeks(weekly)
     if weekly is None:
@@ -3457,21 +3504,43 @@ def render_overview_page(
         if not wk.empty:
             wk["week_no"] = wk["label"].astype(str).str.replace(r"\s*\(.*\)\s*$", "", regex=True).str.strip()
             wk["week_range"] = wk.apply(lambda r: f"{r['week_start']:%Y-%m-%d}~{r['week_end']:%Y-%m-%d}", axis=1)
+            # 리포트 원본 주간 섹션엔 GA 컬럼이 없어서(월별 섹션에만 있음), GA 매체별 유입 경로
+            # (UTM 매핑 완료분)를 주 단위로 직접 합산해 붙인다 — 업로드가 안 됐으면 조용히 생략.
+            ga_wk = _ga_weekly_agg(ga_channel_inflow, wk)
+            if not ga_wk.empty:
+                wk = wk.merge(ga_wk, on="week_start", how="left")
+                wk["ga_conversions"] = wk["ga_conversions"].fillna(0)
+                wk["ga_revenue"] = wk["ga_revenue"].fillna(0)
+                wk["ga_roas"] = np.where(wk["cost_incl_vat"] > 0, wk["ga_revenue"] / wk["cost_incl_vat"] * 100, 0)
         week_show_cols = ["week_range", "week_no", "impressions", "clicks", "ctr", "cpc",
                            "cost_excl_vat", "cost_incl_vat", "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
+        if not wk.empty and "ga_conversions" in wk.columns:
+            week_show_cols += ["ga_conversions", "ga_revenue", "ga_roas"]
         week_numeric_cols = [c for c in week_show_cols if c not in ("week_no", "week_range")]
         render_cumulative_table(
             add_kpis(wk) if not wk.empty else wk,
             date_col="week_start", show_cols=week_show_cols, numeric_cols=week_numeric_cols,
             title="2) 주간별 누적", key="weekly_cum", mode="week",
         )
+        if ga_channel_inflow is None or ga_channel_inflow.empty:
+            st.caption("※ 'GA 매체별 유입 경로' 데이터를 업로드하면 GA-전환수/GA-매출/GA-ROAS 컬럼이 여기에도 채워집니다.")
         render_ops_comment_weekly(weekly, channels_weekly=channels_weekly)
 
+        dy = daily.copy()
+        if not dy.empty:
+            ga_dy = _ga_daily_agg(ga_channel_inflow)
+            if not ga_dy.empty:
+                dy = dy.merge(ga_dy, on="report_date", how="left")
+                dy["ga_conversions"] = dy["ga_conversions"].fillna(0)
+                dy["ga_revenue"] = dy["ga_revenue"].fillna(0)
+                dy["ga_roas"] = np.where(dy["cost_incl_vat"] > 0, dy["ga_revenue"] / dy["cost_incl_vat"] * 100, 0)
         day_show_cols = ["report_date", "impressions", "clicks", "ctr", "cpc", "cost_excl_vat", "cost_incl_vat",
                           "signups", "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
+        if not dy.empty and "ga_conversions" in dy.columns:
+            day_show_cols += ["ga_conversions", "ga_revenue", "ga_roas"]
         day_numeric_cols = [c for c in day_show_cols if c != "report_date"]
         render_cumulative_table(
-            add_kpis(daily) if not daily.empty else daily,
+            add_kpis(dy) if not dy.empty else dy,
             date_col="report_date", show_cols=day_show_cols, numeric_cols=day_numeric_cols,
             title="3) 일자별 누적", key="daily_cum", mode="day",
         )
@@ -3479,7 +3548,7 @@ def render_overview_page(
         st.info("주간 데이터가 아직 없습니다.")
 
 
-def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
+def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame, ga_channel_inflow: pd.DataFrame = None):
     if not channels.empty:
         channels["report_month"] = pd.to_datetime(channels["report_month"]).dt.date
         st.subheader("🔎 기간 필터 (월별 기준)")
@@ -3494,7 +3563,19 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
                  cost_excl_vat=("cost_excl_vat", "sum"), cost_incl_vat=("cost_incl_vat", "sum"),
                  conversions=("conversions", "sum"), revenue=("revenue", "sum"))
         )
+        # 리포트 원본 매체별 GA 컬럼은 '당월 스냅샷' 기준이라 아래 별도 표로만 보여주고, 여기
+        # 메인 표에는 UTM 매핑된 GA 매체별 유입 경로 데이터를 선택 기간(mstart~mend) 그대로
+        # 합산해서 붙인다 — 기간을 바꾸면 이 GA 컬럼도 같이 갱신된다.
+        ga_by_channel = _ga_channel_agg(ga_channel_inflow, mstart, mend)
+        if not ga_by_channel.empty:
+            by_channel = by_channel.merge(ga_by_channel, on="channel", how="left")
+            by_channel["ga_conversions"] = by_channel["ga_conversions"].fillna(0)
+            by_channel["ga_revenue"] = by_channel["ga_revenue"].fillna(0)
         by_channel = add_kpis(by_channel).sort_values("cost_incl_vat", ascending=False)
+        if "ga_revenue" in by_channel.columns:
+            by_channel["ga_roas"] = np.where(
+                by_channel["cost_incl_vat"] > 0, by_channel["ga_revenue"] / by_channel["cost_incl_vat"] * 100, 0
+            )
 
         by_channel_chart = by_channel.copy()
         by_channel_chart["roas_label"] = by_channel_chart["roas"].map(lambda v: f"{v:.0f}%")
@@ -3510,10 +3591,13 @@ def render_channel_page(channels: pd.DataFrame, snapshot: pd.DataFrame):
         # 표 폭이 들쭉날쭉해지는 것도 줄어든다. 컬럼 순서는 종합 대시보드/타겟팅별 성과와 동일하게
         # 노출수 → 클릭수 → CTR → CPC → 광고비 순으로 맞춘다.
         BC_COL_ORDER = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
-                        "cpa", "conversions", "cvr", "revenue", "roas", "aov"]
+                        "cpa", "conversions", "cvr", "revenue", "roas", "aov",
+                        "ga_conversions", "ga_revenue", "ga_roas"]
         bc_cols = [c for c in BC_COL_ORDER if c in by_channel.columns]
         bc_cols += [c for c in by_channel.columns if c not in bc_cols and c != "cost_excl_vat"]
         bc_table = format_display(by_channel[bc_cols])
+        if "ga_revenue" not in by_channel.columns:
+            st.caption("※ 'GA 매체별 유입 경로' 데이터를 업로드하면(UTM 매핑 필요) 매체별 GA-전환수/GA-매출/GA-ROAS도 여기 표시됩니다.")
         # CPA는 광고비(VAT제외) 기준으로 계산되는데, bc_cols에서 그 컬럼을 표시에서 뺐다고
         # TOTAL 합산용 원본까지 잘라버리면 cost_excl_vat이 0 취급돼 CPA가 0으로 나온다.
         # 합산은 by_channel 전체 컬럼 기준으로 하고, 화면에 낼 항목만 bc_cols로 고른다.
@@ -4932,9 +5016,9 @@ def main():
     page = render_nav()  # ← st.tabs() 대신 사이드바 그룹 네비게이션
 
     if page == "종합 대시보드":
-        render_overview_page(weekly, monthly, daily, channels, channels_weekly)
+        render_overview_page(weekly, monthly, daily, channels, channels_weekly, ga_channel_inflow)
     elif page == "매체별 성과":
-        render_channel_page(channels, snapshot)
+        render_channel_page(channels, snapshot, ga_channel_inflow)
     elif page == "타겟팅별 성과":
         render_targeting_performance_page(audience, creatives_fallback=creatives)
     elif page == "소재별 성과":
