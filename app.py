@@ -1583,22 +1583,35 @@ def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
         detail_hits = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()]
         lines.append(f"- '매체 세부내역' 텍스트 발견 행: {detail_hits[:10]}" if detail_hits else "- '매체 세부내역' 텍스트를 못 찾음")
 
+        preview_cols = min(18, raw.shape[1])
+
+        def dump_rows(row_start, row_end):
+            out_lines = []
+            for r in range(max(0, row_start), min(len(raw), row_end)):
+                cells = []
+                for c in range(preview_cols):
+                    v = raw.iat[r, c]
+                    cells.append("·" if pd.isna(v) or str(v).strip() == "" else str(v).strip())
+                out_lines.append(f"  {r:>3}행: " + " | ".join(cells))
+            return out_lines
+
         # '자사몰 현황' 구간이 있으면 그 주변을 컬럼 위치가 그대로 보이게(빈 칸 생략 없이)
         # 찍어서, 헤더 행과 데이터 행의 컬럼이 실제로 어떻게 어긋나는지 한눈에 보이게 한다.
         zasamall_rows = title_hits.get("자사몰 현황", [])
         if zasamall_rows:
             r0 = zasamall_rows[0]
-            preview_start, preview_end = max(0, r0 - 1), min(len(raw), r0 + 14)
-            lines.append(f"- '자사몰 현황' 주변 원본 셀 (col0~col11, {preview_start}~{preview_end - 1}행, 빈칸도 그대로 표시):")
+            lines.append(f"- '자사몰 현황' 주변 원본 셀 (col0~col{preview_cols - 1}, {max(0, r0 - 1)}~{min(len(raw), r0 + 14) - 1}행, 빈칸도 그대로 표시):")
+            lines.extend(dump_rows(r0 - 1, r0 + 14))
         else:
-            preview_start, preview_end = 0, min(8, len(raw))
-            lines.append(f"- 앞부분 원본 셀 (col0~col11, 0~{preview_end - 1}행, 빈칸도 그대로 표시):")
-        for r in range(preview_start, preview_end):
-            cells = []
-            for c in range(min(12, raw.shape[1])):
-                v = raw.iat[r, c]
-                cells.append("·" if pd.isna(v) or str(v).strip() == "" else str(v).strip())
-            lines.append(f"  {r:>3}행: " + " | ".join(cells))
+            lines.append(f"- 앞부분 원본 셀 (col0~col{preview_cols - 1}, 0~{min(8, len(raw)) - 1}행, 빈칸도 그대로 표시):")
+            lines.extend(dump_rows(0, 8))
+
+        # '매체 세부내역' 텍스트가 자사몰 구간 밖(예: 훨씬 아래쪽)에서 발견되는 경우가 있어서,
+        # 그 위치 주변도 별도로 그대로 찍어준다 — 진짜 매체별 예산표가 어떤 모양인지 보기 위해.
+        if detail_hits:
+            for dh in detail_hits[:2]:
+                lines.append(f"- '매체 세부내역'(행 {dh}) 주변 원본 셀 (col0~col{preview_cols - 1}, {max(0, dh - 2)}~{min(len(raw), dh + 15) - 1}행, 빈칸도 그대로 표시):")
+                lines.extend(dump_rows(dh - 2, dh + 15))
         lines.append("")
     return "\n".join(lines)
 
