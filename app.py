@@ -1504,6 +1504,62 @@ def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: i
     return None, {}
 
 
+def _diagnose_budget_sheet(xls: pd.ExcelFile) -> str:
+    """예산 파일 파싱이 실패했을 때, 형이 화면을 캡쳐해서 보내주면 바로 원인을 알 수 있도록
+    시트별로 무엇을 찾았는지/못 찾았는지 자세히 보여주는 진단 리포트를 만든다."""
+    lines = []
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+        lines.append(f"### 시트: '{sheet}' ({raw.shape[0]}행 x {raw.shape[1]}열)")
+        if raw.empty:
+            lines.append("- (빈 시트)")
+            continue
+
+        title_hits = {}
+        for t in ALL_BUDGET_SECTION_TITLES:
+            hit_rows = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains(t, na=False, regex=False).any()]
+            if hit_rows:
+                title_hits[t] = hit_rows
+        if title_hits:
+            for t, hit_rows in title_hits.items():
+                lines.append(f"- '{t}' 텍스트 발견: {hit_rows[:5]}행" + (" 등" if len(hit_rows) > 5 else ""))
+        else:
+            lines.append("- '온라인사업팀 현황'/'자사몰 현황'/'외부몰 현황' 텍스트를 이 시트에서 못 찾음")
+
+        all_month_headers = []
+        r = 0
+        while r < len(raw):
+            hr, mc = _find_budget_month_columns(raw, start_row=r, end_row=len(raw))
+            if hr is None:
+                break
+            all_month_headers.append((hr, len(mc), min(mc.values()), max(mc.values())))
+            r = hr + 1
+        if all_month_headers:
+            lines.append(f"- '1월~12월' 헤더 후보 {len(all_month_headers)}개: " + ", ".join(
+                f"{hr}행(월 {n}개, 컬럼 {c0}~{c1})" for hr, n, c0, c1 in all_month_headers[:8]
+            ))
+        else:
+            lines.append("- '1월'~'12월'이 10개 이상 나열된 헤더 행을 이 시트에서 못 찾음")
+
+        year_hits = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains("26년|25년", na=False, regex=True).any()]
+        lines.append(f"- '26년'/'25년' 텍스트 발견 행: {year_hits[:10]}" if year_hits else "- '26년'/'25년' 텍스트를 못 찾음")
+
+        detail_hits = [r for r in range(len(raw)) if raw.iloc[r].astype(str).str.contains(BUDGET_SUBSECTION_DETAIL, na=False, regex=False).any()]
+        lines.append(f"- '매체 세부내역' 텍스트 발견 행: {detail_hits[:10]}" if detail_hits else "- '매체 세부내역' 텍스트를 못 찾음")
+
+        # 시트 맨 앞부분 미리보기 (텍스트가 있는 셀 위주) — 실제 문구가 캡쳐 화면과 다른지 대조용.
+        preview_rows = []
+        for r in range(min(8, len(raw))):
+            vals = [str(v).strip() for v in raw.iloc[r].tolist()[:8] if pd.notna(v) and str(v).strip()]
+            if vals:
+                preview_rows.append(f"  {r}행: " + " | ".join(vals))
+        if preview_rows:
+            lines.append("- 앞부분 미리보기(첫 8행, 텍스트 있는 셀만):")
+            lines.extend(preview_rows)
+        lines.append("")
+    return "\n".join(lines)
+
+
 def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
     """'◆26년 월별 예산 정리' 파일에서 '자사몰 현황' 섹션의 26년 매체별 월간 예산(광고선전비)을
     파싱한다. 형이 캡쳐해준 화면 구조를 보고 만든 버전 — 한 시트 안에 온라인사업팀 현황/자사몰
@@ -3311,9 +3367,12 @@ def render_upload_panel():
             if budget_df.empty:
                 st.warning(
                     "인식 가능한 예산 데이터를 찾지 못했습니다. '자사몰 현황' 섹션, '26년' 블록, "
-                    "'매체 세부내역'이 있는 파일인지 확인해주세요. (1차 버전이라 원본 레이아웃과 "
-                    "다르면 못 읽을 수 있습니다 — 이 경우 형에게 알려주세요.)"
+                    "'매체 세부내역'이 있는 파일인지 확인해주세요. (구조가 원본과 다르면 못 읽을 "
+                    "수 있습니다 — 아래 '진단 정보 보기'를 펼쳐서 전체 화면을 캡쳐해서 보내주면 "
+                    "바로 원인을 알 수 있습니다.)"
                 )
+                with st.expander("🔍 진단 정보 보기 (안 읽히면 이 내용을 캡쳐해서 보내주세요)"):
+                    st.text(_diagnose_budget_sheet(budget_xls))
             else:
                 total_n = budget_df[budget_df["channel"] == "TOTAL"]["budget_cost"].sum()
                 st.write(
