@@ -1342,25 +1342,38 @@ def parse_inflow_revenue_sheet(xls: pd.ExcelFile):
     return out.reset_index(drop=True)
 
 
-# (엑셀 열 위치 0-based, 우리 컬럼명, 퍼센트 변환 배수) — 형이 준 'GA 매체별 유입 경로' 파일은
-# 뒤쪽에 빈 컬럼(Unnamed: 10)과 실수로 헤더 칸에 메모("평균체류시간은 0분 0초 이렇게 바꿔줄래?")가
-# 들어간 컬럼이 더 붙어있어서, 이름 기준이 아니라 위치 기준(앞 10개 컬럼만)으로 읽어야 안전하다.
-GA_CHANNEL_INFLOW_COL_MAP = [
-    (0, "report_date", None),
-    (1, "source_medium", None),
-    (2, "users", None),
-    (3, "new_users", None),
-    (4, "returning_users", None),
-    (5, "bounce_rate", 100),
-    (6, "pageviews", None),
-    (7, "avg_session_duration", None),  # 이 파일은 이미 초 단위 숫자라 텍스트 파싱이 필요 없음
-    (8, "conversions", None),
-    (9, "revenue", None),
-]
+# GA 내보내기 화면/버전마다 컬럼 순서·개수가 달라질 수 있어(뒤에 빈 컬럼이나 메모가 붙기도
+# 하고, '거래'/'세션수' 같은 컬럼이 추가/누락되기도 함) 위치가 아니라 헤더 '이름'으로 찾는다.
+# 후보를 여러 개 둔 건 GA4 내보내기 화면 언어/버전에 따라 라벨이 조금씩 달라질 수 있어서다.
+GA_CHANNEL_INFLOW_HEADER_CANDIDATES = {
+    "report_date": ["날짜"],
+    "source_medium": ["세션 소스/매체", "세션 소스 / 매체", "소스/매체", "소스 / 매체"],
+    "users": ["총 사용자", "사용자"],
+    "new_users": ["새 사용자 수", "새 사용자"],
+    "returning_users": ["재 사용자", "재방문 사용자", "재방문자"],
+    "bounce_rate": ["이탈률"],
+    "pageviews": ["조회수"],
+    "avg_session_duration": ["평균 세션 시간", "평균 참여 시간", "평균 체류 시간"],
+    "conversions": ["거래", "구매", "전환수"],
+    "revenue": ["총수익", "수익", "매출"],
+}
+GA_CHANNEL_INFLOW_PCT_FIELDS = {"bounce_rate"}  # 0~1 비율로 들어오면 %로 쓰기 위해 100을 곱함
+
+
+def _match_header_index(columns: list, candidates: list) -> int:
+    """컬럼명 리스트에서 후보 이름과 '정확히' 일치하는 첫 컬럼의 위치를 찾는다. 정확히 일치하는
+    것만 인정해서(부분일치 X) '조회수'와 '세션당 조회수'처럼 한쪽이 다른 쪽을 포함하는 헤더가
+    섞여 있어도 엉뚱한 컬럼을 잡지 않는다."""
+    cols_clean = [str(c).strip() for c in columns]
+    for cand in candidates:
+        for i, c in enumerate(cols_clean):
+            if c == cand:
+                return i
+    return None
 
 
 def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile, channel_map: dict = None):
-    """'GA 매체별 유입 경로 (기간).xlsx' 파일 전용 파서.
+    """'GA 세션소스 매체&일자별 데이터' 같은 GA 원본 내보내기 파일 전용 파서.
     날짜×세션 소스/매체 단위로 하루 단위 데이터가 들어있다(하루에 소스/매체별로 한 행씩).
     '매체'(채널 그룹핑, 예: (SA) 네이버/구글(P-MAX) 등)는 UTM 소스/매체 원본에는 없는 값이라,
     별도로 학습해둔 utm_channel_map(build_utm_channel_lookup) 매핑을 channel_map으로 받아
@@ -1373,9 +1386,19 @@ def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile, channel_map: dict = None):
     if raw.empty:
         return pd.DataFrame()
 
+    columns = list(raw.columns)
+    idx_map = {
+        name: _match_header_index(columns, candidates)
+        for name, candidates in GA_CHANNEL_INFLOW_HEADER_CANDIDATES.items()
+    }
+    # 날짜/소스매체 컬럼을 못 찾으면 이 파일은 GA 채널 유입 파일이 아니라고 보고 빈 결과를 낸다
+    # (같은 업로더에서 다른 파서들도 같이 시도되므로, 여기서 조용히 빠지는 게 맞다).
+    if idx_map.get("report_date") is None or idx_map.get("source_medium") is None:
+        return pd.DataFrame()
+
     out = pd.DataFrame(index=raw.index)
-    for idx, name, scale in GA_CHANNEL_INFLOW_COL_MAP:
-        if idx >= raw.shape[1]:
+    for name, idx in idx_map.items():
+        if idx is None:
             out[name] = pd.NA
             continue
         col = raw.iloc[:, idx]
@@ -1383,8 +1406,8 @@ def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile, channel_map: dict = None):
             out[name] = col
             continue
         col = pd.to_numeric(col, errors="coerce")
-        if scale:
-            col = col * scale
+        if name in GA_CHANNEL_INFLOW_PCT_FIELDS:
+            col = col * 100
         out[name] = col
 
     # 날짜가 "2026. 1. 1." 같은 텍스트 포맷이라 고정 포맷으로 우선 파싱하고, 혹시 다른 형식이
