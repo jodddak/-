@@ -638,6 +638,7 @@ TABLES = {
     "ga_channel_inflow": "ga_channel_inflow",
     "agency_notes": "agency_notes",
     "channel_weekly": "channel_weekly",
+    "utm_channel_map": "utm_channel_map",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -1358,12 +1359,13 @@ GA_CHANNEL_INFLOW_COL_MAP = [
 ]
 
 
-def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile):
-    """형이 새로 준 'GA 매체별 유입 경로 (기간).xlsx' 파일 전용 파서.
+def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile, channel_map: dict = None):
+    """'GA 매체별 유입 경로 (기간).xlsx' 파일 전용 파서.
     날짜×세션 소스/매체 단위로 하루 단위 데이터가 들어있다(하루에 소스/매체별로 한 행씩).
-    '매체'(채널 그룹핑, 예: 네이버 검색광고/구글(P-MAX) 등)는 아직 UTM 매핑 전이라 파일에
-    아예 없는 상태 — 여기서는 channel을 전부 None으로 저장해두고, 나중에 매핑이 채워진
-    파일을 다시 올리면 그 값으로 갱신되게 한다."""
+    '매체'(채널 그룹핑, 예: (SA) 네이버/구글(P-MAX) 등)는 UTM 소스/매체 원본에는 없는 값이라,
+    별도로 학습해둔 utm_channel_map(build_utm_channel_lookup) 매핑을 channel_map으로 받아
+    source_medium 문자열로 채운다(대소문자·공백 차이는 무시하고 매칭). 매핑에 없는 값은
+    None으로 남겨 화면에서 '미매핑'으로 구분할 수 있게 한다."""
     if not xls.sheet_names:
         return pd.DataFrame()
     sheet = xls.sheet_names[0]
@@ -1395,8 +1397,65 @@ def parse_ga_channel_inflow_sheet(xls: pd.ExcelFile):
 
     out = out.dropna(subset=["report_date", "source_medium"]).copy()
     out["report_date"] = out["report_date"].dt.date
-    out["channel"] = None
+    if channel_map:
+        out["channel"] = out["source_medium"].map(
+            lambda sm: channel_map.get(str(sm).strip().lower())
+        )
+    else:
+        out["channel"] = None
     return out.reset_index(drop=True)
+
+
+def parse_utm_channel_map(xls: pd.ExcelFile) -> pd.DataFrame:
+    """'STCO_UTM 리스트' 같은 UTM 소스/매체 ↔ 보고서 매체명 매핑표 파일을 파싱한다.
+    헤더 위치가 고정돼 있지 않을 수 있어(형이 셀을 밀거나 시트를 늘릴 수 있으니), '매체명'과
+    '소스'/'매체'가 같이 있는 행을 헤더로 찾고, 그 아래 두 컬럼(매체명/소스·매체)이 둘 다
+    채워진 행만 데이터로 읽는다. '비고' 컬럼이 있으면 참고용으로 같이 저장한다."""
+    rows = []
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+        if raw.empty:
+            continue
+        header_row, chan_col, src_col, note_col = None, None, None, None
+        for r in range(min(10, len(raw))):
+            row_vals = raw.iloc[r].tolist()
+            c_idx = next((i for i, v in enumerate(row_vals) if "매체명" in str(v)), None)
+            s_idx = next((i for i, v in enumerate(row_vals) if "소스" in str(v) and "매체" in str(v)), None)
+            if c_idx is not None and s_idx is not None:
+                header_row, chan_col, src_col = r, c_idx, s_idx
+                note_col = next((i for i, v in enumerate(row_vals) if "비고" in str(v)), None)
+                break
+        if header_row is None:
+            continue
+        for r in range(header_row + 1, len(raw)):
+            channel = raw.iloc[r, chan_col] if chan_col < raw.shape[1] else None
+            source_medium = raw.iloc[r, src_col] if src_col < raw.shape[1] else None
+            if pd.isna(channel) or pd.isna(source_medium) or not str(channel).strip() or not str(source_medium).strip():
+                continue
+            note = raw.iloc[r, note_col] if note_col is not None and note_col < raw.shape[1] else None
+            rows.append({
+                "source_medium": str(source_medium).strip(),
+                "channel": str(channel).strip(),
+                "note": str(note).strip() if pd.notna(note) else None,
+            })
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    # 같은 소스/매체가 여러 시트/행에 중복돼 있으면 마지막(가장 아래) 값을 채택한다.
+    out = out.drop_duplicates(subset=["source_medium"], keep="last").reset_index(drop=True)
+    return out
+
+
+def build_utm_channel_lookup(utm_map: pd.DataFrame) -> dict:
+    """utm_channel_map 테이블(source_medium/channel)을 대소문자·공백 차이에 안전한
+    lookup dict로 바꾼다 — GA 원본 값이 'Naver / cpc'처럼 대소문자가 섞여 올 수 있어서."""
+    if utm_map is None or utm_map.empty:
+        return {}
+    return {
+        str(sm).strip().lower(): ch
+        for sm, ch in zip(utm_map["source_medium"], utm_map["channel"])
+        if pd.notna(sm) and pd.notna(ch)
+    }
 
 
 CREATIVE_NAME_HINTS = ["소재성과", "소재별성과"]  # 예: 페이스북_소재성과요약
@@ -2944,37 +3003,49 @@ def render_upload_panel():
 
     st.sidebar.markdown("---")
     ga_file = st.sidebar.file_uploader(
-        "② GA 유입 데이터 업로드 (유입·매출 비교 또는 GA 매체별 유입 경로 xlsx)",
+        "② GA 유입 데이터 업로드 (유입·매출 비교 / GA 매체별 유입 경로 / UTM 매핑표 xlsx)",
         type=["xlsx", "xls"], key="ga_combined_uploader",
     )
     if ga_file is not None:
         with st.sidebar.status("파일 분석 중...", expanded=True) as status2:
-            # 두 파일은 시트 구조가 서로 달라서, 하나의 업로더에서 두 파서를 다 시도해보고
+            # 세 파일은 시트 구조가 서로 달라서, 하나의 업로더에서 세 파서를 다 시도해보고
             # 실제로 데이터가 나온 쪽만 채택한다(맞지 않는 파서는 항상 빈 결과를 내도록 이미
             # 각 파서 안에 시트명/필수컬럼 가드가 있어서 안전하게 겸용 가능).
             ga_xls = pd.ExcelFile(ga_file)
             inflow_df = parse_inflow_revenue_sheet(ga_xls)
-            ga_channel_df = parse_ga_channel_inflow_sheet(ga_xls)
+            utm_map_df = parse_utm_channel_map(ga_xls)
+            # 이번에 새로 올라온 매핑표 + 이미 저장돼있는 매핑표를 합쳐서 '매체' 채널 그룹핑에 쓴다
+            # (새 파일에 없는 소스/매체는 기존에 저장된 매핑을 그대로 쓰기 위함).
+            existing_utm_map = load_table("utm_channel_map")
+            combined_utm_map = pd.concat([existing_utm_map, utm_map_df], ignore_index=True) if not utm_map_df.empty else existing_utm_map
+            channel_lookup = build_utm_channel_lookup(combined_utm_map)
+            ga_channel_df = parse_ga_channel_inflow_sheet(ga_xls, channel_map=channel_lookup)
 
-            if inflow_df.empty and ga_channel_df.empty:
+            if inflow_df.empty and ga_channel_df.empty and utm_map_df.empty:
                 st.warning(
                     "인식 가능한 데이터를 찾지 못했습니다. '일별 GA,어드민 지표 비교' 시트가 있는 "
                     "유입·매출 비교 파일이거나, 날짜/세션 소스/매체 컬럼이 있는 GA 매체별 유입 경로 "
-                    "파일인지 확인해주세요."
+                    "파일, 또는 '매체명'/'소스 / 매체' 컬럼이 있는 UTM 매핑표 파일인지 확인해주세요."
                 )
             if not inflow_df.empty:
                 st.write(
                     f"🚶 일별 유입·매출 데이터 인식: {len(inflow_df)}일 "
                     f"({inflow_df['report_date'].min()} ~ {inflow_df['report_date'].max()})"
                 )
+            if not utm_map_df.empty:
+                st.write(f"🗺️ UTM 소스/매체 매핑 인식: {len(utm_map_df)}행")
             if not ga_channel_df.empty:
+                mapped_n = ga_channel_df["channel"].notna().sum()
                 st.write(
                     f"🔎 GA 매체별 유입 경로 인식: {len(ga_channel_df)}행 "
                     f"({ga_channel_df['report_date'].min()} ~ {ga_channel_df['report_date'].max()}, "
-                    f"소스/매체 {ga_channel_df['source_medium'].nunique()}종)"
+                    f"소스/매체 {ga_channel_df['source_medium'].nunique()}종, 매체 매핑 {mapped_n}행)"
                 )
-                if ga_channel_df["channel"].isna().all():
-                    st.caption("※ '매체'(채널 그룹핑) 컬럼은 아직 비어있습니다 — UTM 매핑이 반영된 파일을 다시 올리면 채워집니다.")
+                if mapped_n == 0:
+                    st.caption("※ '매체'(채널 그룹핑) 컬럼이 아직 비어있습니다 — UTM 매핑표를 같이/먼저 올리면 채워집니다.")
+                elif mapped_n < len(ga_channel_df):
+                    unmapped = sorted(ga_channel_df.loc[ga_channel_df["channel"].isna(), "source_medium"].unique())
+                    st.caption(f"※ 매핑표에 없는 소스/매체 {len(unmapped)}종은 미매핑 상태입니다: {', '.join(unmapped[:10])}{' 외' if len(unmapped) > 10 else ''}")
             status2.update(label="분석 완료", state="complete")
 
         if st.sidebar.button("💾 GA 유입 데이터 저장하기", type="primary", key="ga_combined_save_btn"):
@@ -2982,6 +3053,9 @@ def render_upload_panel():
             if not inflow_df.empty:
                 n_inflow = save_table("inflow_revenue_daily", inflow_df, "report_date", ga_file.name)
                 saved_msgs.append(f"유입·매출 비교 {n_inflow}일")
+            if not utm_map_df.empty:
+                n_utm = save_table("utm_channel_map", utm_map_df, "source_medium", ga_file.name)
+                saved_msgs.append(f"UTM 매핑 {n_utm}행")
             if not ga_channel_df.empty:
                 n_ga_channel = save_table(
                     "ga_channel_inflow", ga_channel_df, "report_date,source_medium", ga_file.name
