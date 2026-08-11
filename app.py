@@ -3437,22 +3437,28 @@ def render_upload_panel():
         with st.sidebar.status("파일 분석 중...", expanded=True) as status3:
             budget_xls = pd.ExcelFile(budget_file)
             budget_df = parse_channel_budget_sheet(budget_xls)
+            sentinels = {BUDGET_SENTINEL_EXPECTED_REVENUE, BUDGET_SENTINEL_ACTUAL_REVENUE}
             if budget_df.empty:
                 st.warning(
                     "인식 가능한 예산 데이터를 찾지 못했습니다. '자사몰 현황' 섹션, '26년' 블록, "
-                    "'매체 세부내역'이 있는 파일인지 확인해주세요. (구조가 원본과 다르면 못 읽을 "
-                    "수 있습니다 — 아래 '진단 정보 보기'를 펼쳐서 전체 화면을 캡쳐해서 보내주면 "
-                    "바로 원인을 알 수 있습니다.)"
+                    "'매체 세부내역'이 있는 파일인지 확인해주세요."
                 )
-                with st.expander("🔍 진단 정보 보기 (안 읽히면 이 내용을 캡쳐해서 보내주세요)"):
-                    st.text(_diagnose_budget_sheet(budget_xls))
             else:
-                total_n = budget_df[budget_df["channel"] == "TOTAL"]["budget_cost"].sum()
-                st.write(
-                    f"💰 자사몰 예산 인식: {len(budget_df)}행, "
-                    f"매체 {budget_df.loc[budget_df['channel'] != 'TOTAL', 'channel'].nunique()}종, "
-                    f"26년 TOTAL 연간 예산 {total_n:,.0f}원"
-                )
+                summary_bits = []
+                for scope in budget_df["scope"].unique():
+                    bsub = budget_df[budget_df["scope"] == scope]
+                    for year in sorted(bsub["year"].unique(), reverse=True):
+                        n_ch = bsub[(bsub["year"] == year) & (~bsub["channel"].isin(sentinels | {"TOTAL"}))]["channel"].nunique()
+                        summary_bits.append(f"{scope}·{year}년 매체 {n_ch}개")
+                st.write("💰 예산 인식: " + " · ".join(summary_bits))
+                if (budget_df[~budget_df["channel"].isin(sentinels | {"TOTAL"})].empty):
+                    st.warning(
+                        "매체 세부내역(개별 매체별 예산)은 하나도 못 찾았습니다 — 매출 지표만 "
+                        "인식됐습니다. 아래 진단 정보를 펼쳐서 캡쳐해서 보내주면 원인을 바로 알 수 "
+                        "있습니다."
+                    )
+            with st.expander("🔍 진단 정보 보기 (매체가 0개거나 이상하면 이 내용을 캡쳐해서 보내주세요)"):
+                st.text(_diagnose_budget_sheet(budget_xls))
             status3.update(label="분석 완료", state="complete")
 
         if st.sidebar.button("💾 예산 데이터 저장하기", type="primary", key="budget_save_btn"):
