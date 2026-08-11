@@ -3971,17 +3971,12 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
         # 원본 시트 값이 전부 0/NaN이면(int64) 실수 GA 매출을 대입할 때 타입 경고가 나므로,
         # 대입 전에 float으로 미리 맞춰둔다.
         df["ga_revenue"] = pd.to_numeric(df["ga_revenue"], errors="coerce").astype(float)
-        df["ga_roas"] = pd.to_numeric(df["ga_roas"], errors="coerce").astype(float)
         df = df.merge(ga_all, on="report_date", how="left")
         needs_fill = df["ga_revenue"].isna() | (df["ga_revenue"] == 0)
         df.loc[needs_fill, "ga_revenue"] = df.loc[needs_fill, "ga_revenue_all"]
         df = df.drop(columns=["ga_revenue_all", "ga_conversions_all"], errors="ignore")
-        # ga_revenue를 새로 채운 날짜는 ga_roas(원본 시트 값)도 다시 계산해야 값이 맞는다.
-        df.loc[needs_fill, "ga_roas"] = np.where(
-            df.loc[needs_fill, "cost_incl_vat"] > 0,
-            df.loc[needs_fill, "ga_revenue"] / df.loc[needs_fill, "cost_incl_vat"] * 100,
-            0,
-        )
+        # GA-ROAS(=GA매출/광고비)는 여기서 안 쓴다 — GA-매출은 자연유입 포함 사이트 전체 매출인데
+        # 광고비는 매체(광고)에만 든 비용이라, 둘을 나누면 범위가 안 맞는 숫자가 나온다(형 확인).
     st.subheader("🔎 기간 필터")
     min_d, max_d = df["report_date"].min(), df["report_date"].max()
     start, end = period_filter(min_d, max_d, key="inflow", default_preset="이번달")
@@ -4059,6 +4054,9 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
     # 페이지뷰→평균체류시간→어드민/매체/GA 매출→매체/GA-ROAS→어드민 대비 비교) 그대로 맞춘다.
     # "매출"/"ROAS"/"어드민 매출" 같은 이름은 다른 페이지에서도 공용으로 쓰는 라벨이라 KOR_COLS를
     # 바꾸면 거기까지 다 바뀌어버리므로, 이 표에서만 쓸 라벨을 따로 둔다.
+    # GA-ROAS(=GA매출/광고비)는 이 표에서 뺐다 — GA-매출은 자연유입 포함 사이트 전체 매출인데
+    # 광고비는 매체(광고)에만 쓴 비용이라 나누면 범위가 안 맞는 숫자가 나온다(형 확인). 매체 기준
+    # ROAS는 종합 대시보드·매체별 성과에서 보는 걸로 하고, 여기는 어드민 vs GA 매출 비교만 한다.
     INFLOW_DETAIL_LABELS = {
         "report_date": "일자",
         "users": "총 방문자",
@@ -4069,14 +4067,13 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
         "avg_session_duration": "평균 체류시간",
         "admin_revenue": "어드민-매출",
         "ga_revenue": "GA-매출",
-        "ga_roas": "GA-ROAS",
         "ga_gap_pct": "어드민-GA 매출 비교",
     }
     INFLOW_DETAIL_LABELS_REV = {v: k for k, v in INFLOW_DETAIL_LABELS.items()}
 
     detail_cols = [
         "report_date", "users", "new_users", "returning_users", "bounce_rate", "pageviews",
-        "avg_session_duration", "admin_revenue", "ga_revenue", "ga_roas",
+        "avg_session_duration", "admin_revenue", "ga_revenue",
     ]
     detail = fd[detail_cols].copy()
     detail["ga_gap_pct"] = np.where(
@@ -4113,33 +4110,28 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
         "avg_session_duration": _fmt_duration(fd["avg_session_duration"].mean()),
         "admin_revenue": f"{admin_sum:,.0f}",
         "ga_revenue": f"{ga_sum:,.0f}",
-        "ga_roas": f"{(ga_sum / cost_sum * 100) if cost_sum else 0:.0f}%",
         "ga_gap_pct": f"{'▲' if gap_ga >= 0 else '▼'}{gap_ga:+.1f}%",
     }
     table = pd.concat([pd.DataFrame([total_row])[final_cols], show[final_cols]], ignore_index=True)
     table = table.rename(columns=INFLOW_DETAIL_LABELS)
     raw_numeric_cols = [
         "users", "new_users", "returning_users", "bounce_rate", "pageviews", "avg_session_duration",
-        "admin_revenue", "ga_revenue", "ga_roas",
+        "admin_revenue", "ga_revenue",
     ]
     render_html_table(table, raw=detail[raw_numeric_cols], raw_label_map=INFLOW_DETAIL_LABELS_REV)
 
+    # 이 페이지는 ROAS(성과) 판단용이 아니라 '어드민 장부 매출 vs GA 추적 매출'이 서로 맞게
+    # 잡히고 있는지 보는 데이터 정합성 체크용이라, KPI 상태 표시 대신 격차 크기만 짚어준다.
     st.markdown("#### 💬 코멘트")
-    if cost_sum > 0:
-        period_garoas = ga_sum / cost_sum * 100
-        status = _ops_kpi_status(period_garoas)
-        st.markdown(f"**선택 기간 GA-ROAS {period_garoas:,.0f}%로 {status}** (KPI {OPS_KPI_ROAS_LOW}~{OPS_KPI_ROAS_HIGH}%)")
     comment_body = [
         f"총 방문자 {users_sum:,.0f}명(신규 비중 {new_ratio:.1f}%), 어드민 매출 대비 GA 매출 격차는 {_ops_fmt_pct(gap_ga)}입니다."
     ]
     st.markdown(" ".join(comment_body), unsafe_allow_html=True)
-    if cost_sum > 0:
-        _next = {
-            "목표 초과 달성": "다음 기간엔 상위 매체 위주로 증액을 검토하는 것을 권장합니다.",
-            "목표 구간 내": "다음 기간에도 현재 운영 기조를 유지하는 것을 권장합니다.",
-            "목표 미달": "다음 기간엔 매체별·소재별 코멘트를 참고해 원인을 좁혀보는 것을 권장합니다.",
-        }[status]
-        st.markdown(_ops_next_action(_next), unsafe_allow_html=True)
+    if abs(gap_ga) >= 20:
+        st.markdown(
+            _ops_next_action("격차가 큰 편이니 GA 전자상거래 추적 설정, 어드민 매출 집계 범위(취소·환불 반영 여부)를 확인해보는 것을 권장합니다."),
+            unsafe_allow_html=True,
+        )
 
     dl_df = format_display(detail[detail_cols])
     dl_df["avg_session_duration"] = detail["avg_session_duration"].map(_fmt_duration)
