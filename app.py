@@ -1471,8 +1471,8 @@ def parse_utm_channel_map(xls: pd.ExcelFile) -> pd.DataFrame:
 
 
 BUDGET_SCOPE_TITLES = {
-    "온라인사업팀": "온라인사업팀 현황",
     "자사몰": "자사몰 현황",
+    # "온라인사업팀": "온라인사업팀 현황",  # 형 요청으로 우선 제외 — 자사몰만 본다
     # "외부몰": "외부몰 현황",  # 구조가 더 복잡해서(직입점/벤더 중첩) 다음 단계에서 추가 예정
 }
 # 실제로 시트에 등장하는 모든 섹션 제목(파싱 대상이 아닌 것도 포함) — 섹션 경계(어디까지가
@@ -1491,6 +1491,9 @@ BUDGET_CHANNEL_NAME_KEYWORDS = [
     "법인카드", "촬영", "잔여", "기타 비용", "기타비용", "웹뜰", "AGENCY", "에이전시",
 ]
 BUDGET_CHANNEL_NAME_RE = re.compile("|".join(re.escape(k) for k in BUDGET_CHANNEL_NAME_KEYWORDS), re.IGNORECASE)
+# 화이트리스트를 통과해도, 이 키워드가 들어있으면 무조건 요약 행으로 보고 제외한다(이중 안전장치
+# — '매출 달성율'처럼 표기가 달라 화이트리스트/기존 블랙리스트 둘 다 놓친 사례가 실제로 있었음).
+BUDGET_HARD_EXCLUDE_RE = re.compile(r"매출|달성|증감|대비|비율|목표|누계|광고비|광고선전비")
 
 
 def _find_budget_month_columns(raw: pd.DataFrame, start_row: int = 0, end_row: int | None = None):
@@ -1708,6 +1711,17 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                 continue
             label_col_end = min(month_cols.values())
 
+            # 헤더 행에서 'TOTAL'/'연 목표' 컬럼과 '당월 누계' 컬럼 위치를 찾는다 — 이 값들은
+            # 월별 합계로 다시 계산하지 않고 원본 셀 값을 그대로 쓴다(월별로 아직 안 나뉜 금액이
+            # TOTAL에만 잡혀있는 항목이 있어서, 월별 합계로 대체하면 값이 달라진다).
+            total_col = mtd_col = None
+            for c in range(label_col_end):
+                v = str(raw.iat[header_row, c]).strip()
+                if v in ("TOTAL", "연 목표", "연목표"):
+                    total_col = c
+                elif v in ("당월 누계", "당월누계"):
+                    mtd_col = c
+
             # 연도 블록 시작 위치를 전부 찾고(26년, 25년 등장 순서대로) 각 블록의 끝을 다음 연도
             # 블록 시작(또는 섹션 끝)으로 잡는다.
             year_hits = []
@@ -1741,6 +1755,14 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                         v = pd.to_numeric(raw.iat[r, c], errors="coerce")
                         if pd.notna(v):
                             rows.append({"scope": scope, "channel": sentinel, "year": year_num, "month": m, "budget_cost": float(v)})
+                    # 원본 'TOTAL'/'당월 누계' 셀 값도 그대로 저장한다(month=0/-1로 구분) — 월별
+                    # 합계와 다를 수 있어서, 화면에는 계산값 대신 이 원본값을 우선 쓴다.
+                    for pseudo_m, col in ((0, total_col), (-1, mtd_col)):
+                        if col is None:
+                            continue
+                        v = pd.to_numeric(raw.iat[r, col], errors="coerce")
+                        if pd.notna(v):
+                            rows.append({"scope": scope, "channel": sentinel, "year": year_num, "month": pseudo_m, "budget_cost": float(v)})
 
                 # 매체 세부내역: 라벨 행 다음부터 y_end까지, 각 행의 첫 문자열 셀(라벨 컬럼 범위
                 # 안)을 매체명으로 쓴다. 숫자로 시작하는 값/빈 라벨/전부 빈 월별 값인 행은 건너뛴다.
@@ -1763,6 +1785,11 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                             label = v.strip()
                     if not label:
                         continue
+                    # '매체 세부내역' 라벨 아래에 있어도, 매출/달성/증감/비율 같은 요약성 단어가
+                    # 들어간 라벨은 무조건 제외한다(라벨이 있든 없든 항상 적용 — '매체 세부내역'
+                    # 구간 안에 요약 행이 섞여 들어온 사례가 실제로 있었음).
+                    if BUDGET_HARD_EXCLUDE_RE.search(label):
+                        continue
                     if not detail_start_candidates:
                         # '매체 세부내역' 라벨이 없을 때는 요약 행을 "제외"하는 대신, 알려진
                         # 매체명 키워드를 "포함"하는 라벨만 채널로 인정한다 — 요약 행 문구는
@@ -1774,6 +1801,12 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
                         v = pd.to_numeric(raw.iat[r, c], errors="coerce")
                         if pd.notna(v):
                             rows.append({"scope": scope, "channel": label, "year": year_num, "month": m, "budget_cost": float(v)})
+                    for pseudo_m, col in ((0, total_col), (-1, mtd_col)):
+                        if col is None:
+                            continue
+                        v = pd.to_numeric(raw.iat[r, col], errors="coerce")
+                        if pd.notna(v):
+                            rows.append({"scope": scope, "channel": label, "year": year_num, "month": pseudo_m, "budget_cost": float(v)})
 
     if not rows:
         return pd.DataFrame()
@@ -3536,23 +3569,41 @@ def render_upload_panel():
 # 예산 현황 (신규, 1차 버전) — '◆26년 월별 예산 정리' 파일 기반, 자사몰만
 # ──────────────────────────────────────────────────────────────
 def _budget_month_series(b: pd.DataFrame, year: int, channel: str) -> dict:
-    """b(scope='자사몰'로 이미 필터된 budget df)에서 특정 연도·channel의 {월: 값} dict를 만든다.
-    값이 없는 월은 None."""
+    """b(scope='자사몰'로 이미 필터된 budget df)에서 특정 연도·channel의 {월: 값} dict를 만든다
+    (1~12월만, month=0/-1인 원본 TOTAL/당월누계 값은 제외). 값이 없는 월은 None."""
     vals = {m: None for m in range(1, 13)}
-    sub = b[(b["year"] == year) & (b["channel"] == channel)]
+    sub = b[(b["year"] == year) & (b["channel"] == channel) & (b["month"] >= 1) & (b["month"] <= 12)]
     for _, r in sub.iterrows():
         vals[int(r["month"])] = float(r["budget_cost"])
     return vals
 
 
-def _budget_total_mtd(vals: dict, year: int, today) -> tuple:
-    """연간 합계와, 오늘 기준 '당월 누계'(해당 연도가 올해면 이번 달까지, 과거 연도면 12월까지
-    값이 있는 월만) 합계를 계산한다."""
+def _budget_raw_total_mtd(b: pd.DataFrame, year: int, channel: str) -> tuple:
+    """파일에 원본 'TOTAL'/'당월 누계' 셀 값이 있으면(month=0/-1로 저장됨) 그대로 돌려준다.
+    없으면 (None, None) — 이 경우 호출 쪽에서 월별 합계로 계산한다. 월별로 아직 안 나뉜 금액이
+    TOTAL 셀에만 있는 항목(예: 촬영샘플처럼 월별은 0인데 연간 합계만 있는 경우)이 있어서,
+    가능하면 원본 값을 우선 쓴다."""
+    sub = b[(b["year"] == year) & (b["channel"] == channel) & (b["month"].isin([0, -1]))]
+    total = mtd = None
+    for _, r in sub.iterrows():
+        if r["month"] == 0:
+            total = float(r["budget_cost"])
+        elif r["month"] == -1:
+            mtd = float(r["budget_cost"])
+    return total, mtd
+
+
+def _budget_total_mtd(vals: dict, year: int, today, raw_total=None, raw_mtd=None) -> tuple:
+    """연간 합계와 '당월 누계'를 계산한다. raw_total/raw_mtd(파일 원본 셀 값)가 주어지면 그걸
+    우선 쓰고, 없을 때만 월별 값을 더해서 계산한다(오늘 기준, 해당 연도가 올해면 이번 달까지,
+    과거 연도면 12월까지 값이 있는 월만)."""
     present = {m: v for m, v in vals.items() if v is not None}
-    total = sum(present.values()) if present else None
+    computed_total = sum(present.values()) if present else None
     cutoff = today.month if year == today.year else 12
     mtd_vals = [v for m, v in present.items() if m <= cutoff]
-    mtd = sum(mtd_vals) if mtd_vals else None
+    computed_mtd = sum(mtd_vals) if mtd_vals else None
+    total = raw_total if raw_total is not None else computed_total
+    mtd = raw_mtd if raw_mtd is not None else computed_mtd
     return total, mtd
 
 
@@ -3614,8 +3665,9 @@ def _render_budget_box_table(scope_label: str, b_scope: pd.DataFrame, years: lis
     def series(year, channel):
         return _budget_month_series(b_scope, year, channel)
 
-    def money_cells(vals, year, strong=False):
-        total, mtd = _budget_total_mtd(vals, year, today)
+    def money_cells(vals, year, channel, strong=False):
+        raw_total, raw_mtd = _budget_raw_total_mtd(b_scope, year, channel)
+        total, mtd = _budget_total_mtd(vals, year, today, raw_total, raw_mtd)
         cls = ' class="stco-budget-strong"' if strong else ""
         cells = f"<td{cls}>{_budget_fmt_money(total)}</td><td{cls}>{_budget_fmt_money(mtd)}</td>"
         for m in range(1, 13):
@@ -3675,10 +3727,10 @@ def _render_budget_box_table(scope_label: str, b_scope: pd.DataFrame, years: lis
         html.append(
             f'<tr><td rowspan="{year_rowspan}">{year}년</td>'
             f'<td rowspan="{sales_rowspan}">매출/광고비</td>'
-            f"<td>실매출</td>{money_cells(rev_a, year, strong=True)}</tr>"
+            f"<td>실매출</td>{money_cells(rev_a, year, BUDGET_SENTINEL_ACTUAL_REVENUE, strong=True)}</tr>"
         )
         html.append(f"<tr><td>매출 달성률</td>{pct_cells(achieve)}</tr>")
-        html.append(f"<tr><td>광고비</td>{money_cells(cost, year, strong=True)}</tr>")
+        html.append(f"<tr><td>광고비</td>{money_cells(cost, year, 'TOTAL', strong=True)}</tr>")
         html.append(f"<tr><td>광고비 비율</td>{pct_cells(cost_ratio)}</tr>")
         for label, yoy_vals in yoy_rows:
             html.append(f"<tr><td>{label}</td>{pct_cells(yoy_vals, _budget_fmt_pct_change)}</tr>")
@@ -3686,10 +3738,10 @@ def _render_budget_box_table(scope_label: str, b_scope: pd.DataFrame, years: lis
         if chs_sorted:
             html.append(
                 f'<tr><td rowspan="{detail_rowspan}">매체 세부내역</td>'
-                f"<td>{chs_sorted[0]}</td>{money_cells(series(year, chs_sorted[0]), year)}</tr>"
+                f"<td>{chs_sorted[0]}</td>{money_cells(series(year, chs_sorted[0]), year, chs_sorted[0])}</tr>"
             )
             for ch in chs_sorted[1:]:
-                html.append(f"<tr><td>{ch}</td>{money_cells(series(year, ch), year)}</tr>")
+                html.append(f"<tr><td>{ch}</td>{money_cells(series(year, ch), year, ch)}</tr>")
         else:
             html.append(
                 f'<tr><td rowspan="{detail_rowspan}">매체 세부내역</td>'
