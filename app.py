@@ -5264,9 +5264,132 @@ def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full
     except Exception as e:
         return 0, None, None, f"GA4 조회 실패: {e}"
     if df.empty:
-        return 0, start, end, None
+        return 0, start, end, "GA4에서 받아온 데이터가 0행입니다 (속성ID/뷰어 권한 확인 필요)"
     n = save_table("ga_channel_daily", df, "report_date,source_medium,user_type", "GA4 API")
+    if not n:
+        return 0, start, end, (
+            "GA4에서 데이터는 받았지만 Supabase 저장에 실패했습니다 — "
+            "ga_channel_daily 테이블이 없을 수 있습니다(ga4_tables.sql 실행 필요)"
+        )
     return n, start, end, None
+
+
+def diagnose_ga4_setup() -> str:
+    """GA4 자동 연동이 어느 단계에서 막혔는지 한 화면에서 보여준다.
+    비밀값(private_key 등)은 절대 출력하지 않고 '형식이 맞는지'만 검사한다.
+    예산 파일 진단 패널(_diagnose_budget_sheet)과 같은 용도 — 막히면 이걸 먼저 펼쳐본다."""
+    L = []
+    ok = lambda s: L.append(f"✅ {s}")
+    ng = lambda s: L.append(f"❌ {s}")
+    info = lambda s: L.append(f"   ↳ {s}")
+
+    # 1) 라이브러리
+    try:
+        import google.analytics.data_v1beta  # noqa: F401
+        ok("1. google-analytics-data 설치됨")
+    except Exception as e:
+        ng(f"1. google-analytics-data 없음 → requirements.txt에 추가 후 재배포 필요 ({e})")
+        return "\n".join(L)
+    try:
+        import google.oauth2.service_account  # noqa: F401
+        ok("2. google-auth 설치됨")
+    except Exception as e:
+        ng(f"2. google-auth 없음 → requirements.txt에 추가 필요 ({e})")
+        return "\n".join(L)
+
+    # 3) Secrets — 값은 안 보여주고 존재/형식만
+    try:
+        sa = dict(st.secrets["gcp_service_account"])
+        ok("3. Secrets [gcp_service_account] 있음")
+    except Exception:
+        ng("3. Secrets에 [gcp_service_account] 섹션이 없음 → 셋업 가이드 5단계 확인")
+        return "\n".join(L)
+
+    need = ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "token_uri"]
+    missing = [k for k in need if not str(sa.get(k, "")).strip()]
+    if missing:
+        ng(f"4. 빠진 항목: {', '.join(missing)}")
+    else:
+        ok("4. 필수 항목 모두 채워짐")
+    placeholders = [k for k, v in sa.items() if isinstance(v, str) and ("여기에" in v or v.strip() in ("...", "xxx"))]
+    if placeholders:
+        ng(f"5. 예시값이 그대로 남아있음: {', '.join(placeholders)} → 실제 JSON 값으로 교체 필요")
+    else:
+        ok("5. 예시값(여기에-값 / ...) 남은 것 없음")
+
+    pk = str(sa.get("private_key", ""))
+    if not pk.startswith("-----BEGIN"):
+        ng("6. private_key가 '-----BEGIN' 으로 시작하지 않음")
+    elif "END PRIVATE KEY" not in pk:
+        ng("6. private_key에 '-----END PRIVATE KEY-----' 가 없음(값이 잘렸을 수 있음)")
+    elif "\n" not in pk:
+        ng("6. private_key에 줄바꿈(\\n)이 없음 → JSON 원본의 \\n 을 지우지 말 것")
+    else:
+        # 진짜 RSA 2048 키는 본문만 1,600자 이상이다. 그보다 짧으면 예시값(...)이 남은 것.
+        body = pk.split("-----BEGIN PRIVATE KEY-----")[-1].split("-----END")[0].strip()
+        if len(body) < 500:
+            ng(f"6. private_key 본문이 너무 짧습니다({len(body)}자) → 예시의 '...' 자리에 "
+               "실제 키를 넣지 않은 것으로 보입니다. JSON 파일의 private_key 값 전체를 복사해주세요")
+        else:
+            ok(f"6. private_key 형식 정상 (본문 {len(body)}자, 줄 {pk.count(chr(10)) + 1}개)")
+    info(f"서비스 계정 이메일: {sa.get('client_email', '(없음)')}")
+    info("↑ 이 이메일이 GA4 [관리 → 속성 액세스 관리]에 '뷰어'로 추가돼 있어야 합니다")
+
+    # 7) 속성 ID
+    prop = _ga4_property_id()
+    if not prop:
+        ng("7. Secrets에 GA4_PROPERTY_ID 없음")
+        return "\n".join(L)
+    if not prop.isdigit():
+        ng(f"7. GA4_PROPERTY_ID가 숫자가 아님: '{prop}' (G-XXXX 측정ID가 아니라 숫자 속성ID여야 함)")
+    else:
+        ok(f"7. GA4_PROPERTY_ID = {prop}")
+
+    # 8) 인증
+    client, err = get_ga4_client()
+    if client is None:
+        ng(f"8. 인증 실패: {err}")
+        return "\n".join(L)
+    ok("8. 서비스 계정 인증 성공")
+
+    # 9) 실제 API 호출
+    try:
+        test_end = date.today() - timedelta(days=1)
+        test_start = test_end - timedelta(days=2)
+        df = fetch_ga4_channel_daily(test_start, test_end)
+        if df.empty:
+            ng(f"9. API는 응답했지만 데이터 0행 ({test_start}~{test_end})")
+            info("→ 속성ID가 다른 사이트이거나, 서비스 계정이 아직 뷰어로 추가 안 됐을 수 있습니다")
+        else:
+            ok(f"9. GA4 조회 성공: {len(df):,}행 ({test_start}~{test_end})")
+            info(f"소스/매체 예시: {', '.join(df['source_medium'].dropna().unique()[:3])}")
+            info(f"사용자수 합계 {df['users'].sum():,.0f} · 구매 {df['conversions'].sum():,.0f}건")
+    except Exception as e:
+        msg = str(e)
+        ng(f"9. GA4 조회 실패: {msg[:300]}")
+        if "PERMISSION_DENIED" in msg or "403" in msg:
+            info("→ 서비스 계정이 GA4 속성에 뷰어로 추가되지 않았습니다 (셋업 가이드 4단계)")
+        elif "404" in msg or "NOT_FOUND" in msg:
+            info("→ GA4_PROPERTY_ID가 잘못됐습니다 (GA4 관리 → 속성 설정의 숫자 ID)")
+        return "\n".join(L)
+
+    # 10) Supabase 테이블
+    sb = get_supabase_client()
+    if sb is None:
+        ng("10. Supabase 연결 없음 (로컬 메모리 모드로 동작 중 — 새로고침하면 사라집니다)")
+    else:
+        try:
+            sb.table("ga_channel_daily").select("report_date").limit(1).execute()
+            ok("10. Supabase ga_channel_daily 테이블 접근 가능")
+        except Exception as e:
+            ng(f"10. ga_channel_daily 테이블이 없거나 접근 불가 → ga4_tables.sql 실행 필요 ({str(e)[:200]})")
+        try:
+            sb.table("decision_log").select("decided_on").limit(1).execute()
+            ok("11. Supabase decision_log 테이블 접근 가능")
+        except Exception as e:
+            ng(f"11. decision_log 테이블 없음 → ga4_tables.sql 실행 필요 ({str(e)[:160]})")
+
+    return "\n".join(L)
 
 
 def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
@@ -5729,6 +5852,13 @@ def render_ga_channel_funnel_page(
         )
     if ga_last_date and (date.today() - ga_last_date).days > 2:
         st.warning(f"GA 데이터가 {(date.today() - ga_last_date).days}일 지연돼 있습니다 — 최신 수치가 아닐 수 있습니다.")
+
+    if ga_source_label != "GA4 API(자동)" or sync_err:
+        with st.expander("🔍 GA4 연동 진단 (연동이 안 되면 이걸 펼쳐서 캡쳐해주세요)", expanded=bool(sync_err)):
+            st.caption("비밀값(private_key 등)은 출력하지 않습니다 — 형식이 맞는지만 검사합니다.")
+            if st.button("진단 실행", key="fv4_diag_btn"):
+                with st.spinner("확인 중..."):
+                    st.code(diagnose_ga4_setup(), language=None)
 
     if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
         st.info(
