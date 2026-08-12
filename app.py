@@ -644,6 +644,7 @@ TABLES = {
     "channel_mix_budget": "channel_mix_budget",
     "ga_channel_daily": "ga_channel_daily",
     "decision_log": "decision_log",
+    "ad_spend_daily": "ad_spend_daily",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -5479,6 +5480,8 @@ FUNNEL_CANON_RULES = [
     ("네이버 브랜드검색광고", ["브랜드검색", "브검"]),
     ("네이버 쇼핑검색광고", ["쇼핑검색", "ssp"]),
     ("네이버 검색광고", ["네이버 검색", "네이버검색", "(sa)", "네이버sa"]),
+    ("네이버 애드부스트", ["애드부스트", "adboost", "advoost", "ad voost"]),
+    ("네이버 트렌드픽", ["트렌드픽", "trendpick", "trend pick"]),
     ("네이버 GFA", ["gfa"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
@@ -5837,6 +5840,777 @@ def _loop_review_decisions(decisions: pd.DataFrame, daily: pd.DataFrame, end: da
     return out
 
 
+# ──────────────────────────────────────────────────────────────
+# 광고비 소스 (신규) — API 실집행 > 대행사 주간 리포트 > 채널믹스 예산 일할
+# ──────────────────────────────────────────────────────────────
+# 이 대시보드의 목적은 '매일 보고 매체를 조절하는 것'인데, 매출은 GA로 어제까지 실시간인 반면
+# 광고비만 주간 대행사 리포트면 서로 다른 기간을 나눈 ROAS가 나와 판단 근거가 못 된다.
+# 그래서 광고비도 일 단위로 맞춘다. 매체마다 확보 난이도가 달라서 3단 폴백으로 설계했다.
+#   ① API 실집행 (메타/구글 등) — 가장 정확, 인증 필요
+#   ② 대행사 주간 리포트 일할 안분 — 실제 집행액이지만 주 단위
+#   ③ 채널믹스 월예산 일할 — 인증 없이도 항상 값이 나오는 기본선
+# 보장형 상품(네이버 맨즈탭 등)은 계약 금액이 고정이라 일별 변동이 없어서 ③이 오히려 정확하다.
+AD_SPEND_SOURCE_LABEL = {
+    "meta_api": "메타 API",
+    "google_ads_api": "구글 API",
+    "naver_api": "네이버 API",
+    "kakao_api": "카카오 API",
+    "criteo_api": "크리테오 API",
+    "naver_gfa_api": "GFA API",
+    "agency_weekly": "대행사 주간(일할)",
+    "budget_prorate": "예산 일할",
+}
+# '신규 매체'는 시기별로 실제 매체가 달랐다(사용자 확인):
+#   26년 4월      = 네이버 트렌드픽 모바일
+#   26년 5~8월    = 네이버 애드부스트
+# 애드부스트는 GFA 계정 안에 있지만 캠페인 분류가 'ADVoost 쇼핑'으로 따로 잡히는 별도 매체다.
+# GFA(웹사이트 전환)와 합쳐버리면 계획 대비 집행이 서로 섞여서 판단이 틀어지므로 분리해서 집계한다.
+NEW_MEDIA_BY_MONTH = {
+    4: "네이버 트렌드픽",
+    5: "네이버 애드부스트", 6: "네이버 애드부스트",
+    7: "네이버 애드부스트", 8: "네이버 애드부스트",
+}
+NEW_MEDIA_DEFAULT = "네이버 애드부스트"
+
+
+def _budget_daily_spend(channel_mix: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """채널믹스 월예산을 그 달의 일수로 나눠, 선택 기간과 겹치는 날짜만큼만 채널별로 합산한다.
+    보장형(맨즈탭 등)처럼 일별 변동이 없는 매체는 이 값이 실제와 가장 가깝다."""
+    cols = ["channel", "cost_incl_vat"]
+    if channel_mix is None or channel_mix.empty:
+        return pd.DataFrame(columns=cols)
+    m = channel_mix.copy()
+    m["year"] = pd.to_numeric(m["year"], errors="coerce")
+    m["month"] = pd.to_numeric(m["month"], errors="coerce")
+    m["budget"] = pd.to_numeric(m["budget"], errors="coerce").fillna(0)
+    m = m.dropna(subset=["year", "month"])
+
+    rows = []
+    for _, r in m.iterrows():
+        y, mo, amt = int(r["year"]), int(r["month"]), float(r["budget"])
+        if amt <= 0:
+            continue
+        try:
+            m_start = date(y, mo, 1)
+            m_end = date(y + (mo == 12), (mo % 12) + 1, 1) - timedelta(days=1)
+        except ValueError:
+            continue
+        ov_start, ov_end = max(m_start, start), min(m_end, end)
+        if ov_start > ov_end:
+            continue
+        days_in_month = (m_end - m_start).days + 1
+        ov_days = (ov_end - ov_start).days + 1
+        ch = str(r["channel"]).strip()
+        if ch in ("신규 매체", "신규매체"):
+            ch = NEW_MEDIA_BY_MONTH.get(mo, NEW_MEDIA_DEFAULT)
+        rows.append({"channel": _v4_canon_channel(ch), "cost_incl_vat": amt * ov_days / days_in_month})
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows).groupby("channel", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+def _secrets_section(name: str):
+    try:
+        return dict(st.secrets[name])
+    except Exception:
+        return None
+
+
+def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
+    """Meta Marketing API에서 일별 광고비를 받아온다(계정 단위). 인증이 없으면 빈 결과."""
+    cfg = _secrets_section("meta_ads")
+    if not cfg or not cfg.get("access_token") or not cfg.get("ad_account_id"):
+        return pd.DataFrame()
+    import requests
+
+    acct = str(cfg["ad_account_id"]).strip()
+    if not acct.startswith("act_"):
+        acct = f"act_{acct}"
+    ver = str(cfg.get("api_version", "v21.0")).strip()
+    url = f"https://graph.facebook.com/{ver}/{acct}/insights"
+    params = {
+        "fields": "spend",
+        "level": "account",
+        "time_increment": 1,
+        "time_range": json.dumps({"since": str(start), "until": str(end)}),
+        "access_token": cfg["access_token"],
+        "limit": 500,
+    }
+    rows = []
+    while url:
+        resp = requests.get(url, params=params, timeout=60)
+        payload = resp.json()
+        if "error" in payload:
+            raise RuntimeError(payload["error"].get("message", str(payload["error"])))
+        for d in payload.get("data", []):
+            rows.append({
+                "report_date": d.get("date_start"), "channel": "메타",
+                "cost_incl_vat": float(d.get("spend") or 0), "source": "meta_api",
+            })
+        nxt = (payload.get("paging") or {}).get("next")
+        url, params = (nxt, None) if nxt else (None, None)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
+    return out.dropna(subset=["report_date"]).reset_index(drop=True)
+
+
+def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
+    """Google Ads API(REST)에서 일별 광고비를 받아온다. 무거운 google-ads 라이브러리 대신
+    REST + refresh token 방식을 써서 Streamlit Cloud 배포를 가볍게 유지한다."""
+    cfg = _secrets_section("google_ads")
+    need = ["developer_token", "client_id", "client_secret", "refresh_token", "customer_id"]
+    if not cfg or any(not cfg.get(k) for k in need):
+        return pd.DataFrame()
+    import requests
+
+    tok = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": cfg["client_id"], "client_secret": cfg["client_secret"],
+            "refresh_token": cfg["refresh_token"], "grant_type": "refresh_token",
+        },
+        timeout=60,
+    ).json()
+    if "access_token" not in tok:
+        raise RuntimeError(f"구글 토큰 발급 실패: {tok.get('error_description') or tok}")
+
+    cid = str(cfg["customer_id"]).replace("-", "").strip()
+    headers = {
+        "Authorization": f"Bearer {tok['access_token']}",
+        "developer-token": str(cfg["developer_token"]).strip(),
+        "Content-Type": "application/json",
+    }
+    if cfg.get("login_customer_id"):
+        headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
+
+    ver = str(cfg.get("api_version", "v18")).strip()
+    query = (
+        "SELECT segments.date, metrics.cost_micros FROM customer "
+        f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
+    )
+    resp = requests.post(
+        f"https://googleads.googleapis.com/{ver}/customers/{cid}/googleAds:searchStream",
+        headers=headers, json={"query": query}, timeout=90,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"구글 조회 실패({resp.status_code}): {resp.text[:300]}")
+
+    rows = []
+    for chunk in resp.json():
+        for r in chunk.get("results", []):
+            d = (r.get("segments") or {}).get("date")
+            micros = float((r.get("metrics") or {}).get("costMicros") or 0)
+            if d:
+                rows.append({"report_date": d, "channel": "구글",
+                             "cost_incl_vat": micros / 1_000_000, "source": "google_ads_api"})
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
+    out = out.dropna(subset=["report_date"])
+    return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
+        cost_incl_vat=("cost_incl_vat", "sum")
+    )
+
+
+# 네이버 검색광고 API — 검색광고(파워링크)/쇼핑검색/브랜드검색 일별 광고비.
+# 인증은 HMAC-SHA256 서명 방식이다: "{timestamp}.{METHOD}.{path}" 를 비밀키로 서명해서 헤더에 넣는다.
+# 일별 분해는 /stats 가 지원하지 않아서 날짜별로 한 번씩(하루 1콜) 호출한다.
+# 캠페인 유형 → 예산 파일의 매체명 매핑:
+#   WEB_SITE(파워링크) · SHOPPING(쇼핑검색) → '네이버 검색광고'  (예산 파일에 쇼핑검색이 따로 없어 합침)
+#   BRAND_SEARCH                          → '네이버 브랜드검색광고'
+NAVER_CAMPAIGN_TYPE_CHANNEL = {
+    "WEB_SITE": "네이버 검색광고",
+    "SHOPPING": "네이버 검색광고",
+    "BRAND_SEARCH": "네이버 브랜드검색광고",
+    "POWER_CONTENTS": "네이버 검색광고",
+    "PLACE": "네이버 검색광고",
+}
+NAVER_API_BASE = "https://api.searchad.naver.com"
+
+
+def _naver_headers(method: str, path: str, cfg: dict) -> dict:
+    import base64, hashlib, hmac, time
+    ts = str(int(time.time() * 1000))
+    msg = f"{ts}.{method}.{path}"
+    sig = base64.b64encode(
+        hmac.new(str(cfg["secret_key"]).encode(), msg.encode(), hashlib.sha256).digest()
+    ).decode()
+    return {
+        "X-Timestamp": ts,
+        "X-API-KEY": str(cfg["api_key"]).strip(),
+        "X-Customer": str(cfg["customer_id"]).strip(),
+        "X-Signature": sig,
+        "Content-Type": "application/json; charset=UTF-8",
+    }
+
+
+def _naver_campaigns(cfg: dict) -> list:
+    """캠페인 목록 + 유형을 가져온다. (id, 매체명) 리스트."""
+    import requests
+    path = "/ncc/campaigns"
+    r = requests.get(NAVER_API_BASE + path, headers=_naver_headers("GET", path, cfg), timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"캠페인 조회 실패({r.status_code}): {r.text[:200]}")
+    out = []
+    for c in r.json():
+        ch = NAVER_CAMPAIGN_TYPE_CHANNEL.get(str(c.get("campaignTp", "")).upper())
+        if ch and c.get("nccCampaignId"):
+            out.append((c["nccCampaignId"], ch))
+    return out
+
+
+def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
+    """네이버 검색광고 일별 광고비. salesAmt가 '광고비'(집행 비용)다 — 이름이 헷갈리지만 매출 아님."""
+    cfg = _secrets_section("naver_searchad")
+    need = ["api_key", "secret_key", "customer_id"]
+    if not cfg or any(not cfg.get(k) for k in need):
+        return pd.DataFrame()
+    import requests, json as _json
+
+    campaigns = _naver_campaigns(cfg)
+    if not campaigns:
+        return pd.DataFrame()
+    ch_by_id = dict(campaigns)
+    ids = [cid for cid, _ in campaigns]
+
+    rows = []
+    d = start
+    while d <= end:
+        path = "/stats"
+        params = {
+            "ids": ids,
+            "fields": _json.dumps(["salesAmt", "impCnt", "clkCnt"]),
+            "timeRange": _json.dumps({"since": str(d), "until": str(d)}),
+        }
+        r = requests.get(NAVER_API_BASE + path, headers=_naver_headers("GET", path, cfg),
+                         params=params, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"통계 조회 실패({r.status_code}, {d}): {r.text[:200]}")
+        for item in (r.json() or {}).get("data", []):
+            ch = ch_by_id.get(item.get("id"))
+            if not ch:
+                continue
+            rows.append({"report_date": d, "channel": ch,
+                         "cost_incl_vat": float(item.get("salesAmt") or 0) * 1.1,  # 네이버는 VAT 제외 금액
+                         "source": "naver_api"})
+        d += timedelta(days=1)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).groupby(
+        ["report_date", "channel", "source"], as_index=False
+    ).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+# 카카오모먼트 API — 광고계정 보고서(일별 광고비).
+#   GET https://apis.moment.kakao.com/openapi/v4/adAccounts/report
+#   헤더: Authorization: Bearer {비즈니스 토큰}, adAccountId: {광고계정 ID}
+#   쿼리: adAccountId, start/end(yyyyMMdd), level=AD_ACCOUNT, metricsGroup=BASIC, timeUnit=DAY
+# 주의사항 (공식 문서 확인):
+#   · 조회 기간은 최대 31일. 그래서 31일씩 잘라서 여러 번 호출한다.
+#   · start/end 조회에서 '오늘'은 제외된다 (어차피 우리도 어제까지만 받는다).
+#   · 요청 제한: 광고계정당 5초에 1회 → 호출 사이에 텀을 둔다.
+#   · 비즈니스 토큰은 만료되므로 refresh_token으로 갱신해서 쓴다.
+KAKAO_REPORT_URL = "https://apis.moment.kakao.com/openapi/v4/adAccounts/report"
+KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
+KAKAO_MAX_RANGE_DAYS = 31
+KAKAO_RATE_LIMIT_SEC = 5.5
+
+
+def _kakao_access_token(cfg: dict) -> str:
+    """access_token이 직접 들어있으면 그대로 쓰고, refresh_token이 있으면 갱신해서 받는다."""
+    import requests
+    if cfg.get("refresh_token") and cfg.get("rest_api_key"):
+        r = requests.post(KAKAO_TOKEN_URL, data={
+            "grant_type": "refresh_token",
+            "client_id": str(cfg["rest_api_key"]).strip(),
+            "refresh_token": str(cfg["refresh_token"]).strip(),
+            **({"client_secret": cfg["client_secret"]} if cfg.get("client_secret") else {}),
+        }, timeout=60)
+        j = r.json()
+        if "access_token" not in j:
+            raise RuntimeError(f"토큰 갱신 실패: {j.get('error_description') or j}")
+        return j["access_token"]
+    if cfg.get("access_token"):
+        return str(cfg["access_token"]).strip()
+    raise RuntimeError("access_token 또는 (rest_api_key + refresh_token)이 필요합니다")
+
+
+def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
+    """카카오모먼트 일별 광고비. 채널명은 예산 파일의 '카카오톡 플친'과 맞춰 '카카오'로 정규화된다."""
+    cfg = _secrets_section("kakao_moment")
+    if not cfg or not cfg.get("ad_account_id"):
+        return pd.DataFrame()
+    import requests, time
+
+    token = _kakao_access_token(cfg)
+    acct = str(cfg["ad_account_id"]).strip()
+    headers = {"Authorization": f"Bearer {token}", "adAccountId": acct}
+
+    rows = []
+    chunk_start = start
+    first = True
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=KAKAO_MAX_RANGE_DAYS - 1), end)
+        if not first:
+            time.sleep(KAKAO_RATE_LIMIT_SEC)   # 광고계정당 5초 1회 제한
+        first = False
+        r = requests.get(KAKAO_REPORT_URL, headers=headers, params={
+            "adAccountId": acct,
+            "start": chunk_start.strftime("%Y%m%d"),
+            "end": chunk_end.strftime("%Y%m%d"),
+            "level": "AD_ACCOUNT",
+            "timeUnit": "DAY",
+            "metricsGroup": "BASIC",
+        }, timeout=90)
+        if r.status_code >= 400:
+            raise RuntimeError(f"카카오 조회 실패({r.status_code}): {r.text[:300]}")
+        payload = r.json()
+        if payload.get("code") not in (200, None):
+            raise RuntimeError(f"카카오 오류({payload.get('code')}): {payload.get('message')}")
+        for d in payload.get("data", []):
+            metrics = d.get("metrics") or {}
+            cost = metrics.get("cost")
+            if cost is None:
+                continue
+            day = d.get("start")
+            if not day:
+                continue
+            rows.append({"report_date": day, "channel": "카카오",
+                         "cost_incl_vat": float(cost) * 1.1,  # 카카오 cost는 VAT 제외
+                         "source": "kakao_api"})
+        chunk_start = chunk_end + timedelta(days=1)
+
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
+    out = out.dropna(subset=["report_date"])
+    return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
+        cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+# 크리테오 Marketing Solutions API — 일별 광고비.
+#   토큰: POST https://api.criteo.com/oauth2/token (grant_type=client_credentials)
+#   통계: POST https://api.criteo.com/{version}/statistics/report
+#         body: dimensions=[Day], metrics=[AdvertiserCost], currency, startDate/endDate
+# 크리테오는 API 버전이 날짜 형식(2024-07 등)이라 바뀔 수 있어서 Secrets에서 바꿀 수 있게 뒀다.
+# 버전이 안 맞으면 404가 나는데, 진단 패널에 그대로 표시되므로 거기서 바로 확인하면 된다.
+CRITEO_TOKEN_URL = "https://api.criteo.com/oauth2/token"
+CRITEO_DEFAULT_VERSION = "2024-07"
+
+
+def fetch_criteo_spend(start: date, end: date) -> pd.DataFrame:
+    cfg = _secrets_section("criteo")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return pd.DataFrame()
+    import requests
+
+    tok = requests.post(CRITEO_TOKEN_URL, data={
+        "grant_type": "client_credentials",
+        "client_id": str(cfg["client_id"]).strip(),
+        "client_secret": str(cfg["client_secret"]).strip(),
+    }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=60).json()
+    if "access_token" not in tok:
+        raise RuntimeError(f"크리테오 토큰 발급 실패: {tok.get('error_description') or tok}")
+
+    ver = str(cfg.get("api_version", CRITEO_DEFAULT_VERSION)).strip()
+    body = {
+        "dimensions": ["Day"],
+        "metrics": ["AdvertiserCost"],
+        "currency": str(cfg.get("currency", "KRW")).strip(),
+        "startDate": str(start),
+        "endDate": str(end),
+        "format": "json",
+    }
+    if cfg.get("advertiser_id"):
+        body["advertiserIds"] = str(cfg["advertiser_id"]).strip()
+
+    r = requests.post(
+        f"https://api.criteo.com/{ver}/statistics/report",
+        headers={"Authorization": f"Bearer {tok['access_token']}", "Content-Type": "application/json"},
+        json=body, timeout=90,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"크리테오 조회 실패({r.status_code}): {r.text[:300]}")
+
+    try:
+        payload = r.json()
+    except Exception:
+        raise RuntimeError(f"크리테오 응답 해석 실패: {r.text[:200]}")
+    # 응답이 {"Rows":[...]} 또는 [...] 형태로 올 수 있어 둘 다 받아준다.
+    rows_raw = payload.get("Rows") if isinstance(payload, dict) else payload
+    if not rows_raw:
+        return pd.DataFrame()
+
+    rows = []
+    for it in rows_raw:
+        day = it.get("Day") or it.get("day")
+        cost = it.get("AdvertiserCost", it.get("advertiserCost"))
+        if day is None or cost is None:
+            continue
+        rows.append({"report_date": day, "channel": "크리테오",
+                     "cost_incl_vat": float(cost) * 1.1, "source": "criteo_api"})
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
+    out = out.dropna(subset=["report_date"])
+    return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
+        cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+# 네이버 성과형 디스플레이(GFA) API — 캠페인 단위 일별 광고비.
+#   GET https://openapi.naver.com/v1/ad-api/{version}/adAccounts/{adAccountNo}/performance/past/campaigns
+#   헤더: Authorization: Bearer {네이버 로그인 액세스 토큰}
+#         AccessManagerAccountNo: {관리계정 번호}  ← 대행사(관리계정) 통해 접근할 때 필수
+#   쿼리: startDate/endDate(yyyy-MM-dd), timeUnit=daily, limit, next(페이징 토큰)
+#
+# 공식 문서 확인 사항:
+#   · 조회 기간 최대 31일 → 31일씩 잘라서 호출
+#   · 전일 데이터는 금일 02시부터 조회 가능
+#   · 한 번에 최대 1000행, 초과하면 응답의 next 토큰으로 페이징 (토큰 10분 유효)
+#   · API 사용 신청은 네이버 공식 파트너사만 가능 → 대행사가 발급받은 토큰을 넣어 쓰는 구조
+#
+# GFA 계정 안에 GFA(웹사이트 전환)와 애드부스트(ADVoost 쇼핑)가 같이 있어서, 캠페인명/목적으로
+# 두 매체를 갈라서 집계한다(사용자 확인 사항). 합치면 계획 대비 집행이 섞여 판단이 틀어진다.
+GFA_API_BASE = "https://openapi.naver.com/v1/ad-api"
+GFA_MAX_RANGE_DAYS = 31
+GFA_TOKEN_URL = "https://nid.naver.com/oauth2.0/token"
+
+
+def _gfa_access_token(cfg: dict) -> str:
+    """access_token이 직접 있으면 그대로 쓰고, refresh_token이 있으면 갱신해서 받는다.
+    네이버 액세스 토큰은 만료되므로 refresh_token 방식을 권장."""
+    import requests
+    if cfg.get("refresh_token") and cfg.get("client_id") and cfg.get("client_secret"):
+        r = requests.get(GFA_TOKEN_URL, params={
+            "grant_type": "refresh_token",
+            "client_id": str(cfg["client_id"]).strip(),
+            "client_secret": str(cfg["client_secret"]).strip(),
+            "refresh_token": str(cfg["refresh_token"]).strip(),
+        }, timeout=60)
+        j = r.json()
+        if "access_token" not in j:
+            raise RuntimeError(f"네이버 토큰 갱신 실패: {j.get('error_description') or j}")
+        return j["access_token"]
+    if cfg.get("access_token"):
+        return str(cfg["access_token"]).strip()
+    raise RuntimeError("access_token 또는 (client_id + client_secret + refresh_token)이 필요합니다")
+
+
+def _gfa_channel_of(row: dict) -> str:
+    """캠페인 정보로 'GFA'인지 '애드부스트'인지 가른다.
+    애드부스트는 캠페인 목적이 ADVoost 쇼핑 계열이라 이름/목적 어디든 걸리게 본다."""
+    blob = " ".join(
+        str(row.get(k, "")) for k in
+        ("campaignName", "campaignObjective", "campaignObjectiveType", "campaignTp", "name")
+    ).lower()
+    if any(kw in blob for kw in ["advoost", "adboost", "애드부스트", "쇼핑"]):
+        return "네이버 애드부스트"
+    return "네이버 GFA"
+
+
+def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
+    cfg = _secrets_section("naver_gfa")
+    if not cfg or not cfg.get("ad_account_no"):
+        return pd.DataFrame()
+    import requests
+
+    token = _gfa_access_token(cfg)
+    acct = str(cfg["ad_account_no"]).strip()
+    ver = str(cfg.get("api_version", "1.0")).strip()
+    headers = {"Authorization": f"Bearer {token}"}
+    if cfg.get("manager_account_no"):
+        # 대행사(관리계정) 밑의 광고계정을 볼 때 필수. 없으면 권한 에러가 난다.
+        headers["AccessManagerAccountNo"] = str(cfg["manager_account_no"]).strip()
+
+    url = f"{GFA_API_BASE}/{ver}/adAccounts/{acct}/performance/past/campaigns"
+    rows = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=GFA_MAX_RANGE_DAYS - 1), end)
+        next_token = None
+        while True:
+            params = {
+                "startDate": str(chunk_start), "endDate": str(chunk_end),
+                "timeUnit": "daily", "limit": 1000,
+            }
+            if next_token:
+                params["next"] = next_token
+            r = requests.get(url, headers=headers, params=params, timeout=90)
+            if r.status_code >= 400:
+                raise RuntimeError(f"GFA 조회 실패({r.status_code}): {r.text[:300]}")
+            payload = r.json() or {}
+            for it in payload.get("rows", []):
+                day = it.get("date") or it.get("statDate") or it.get("day")
+                cost = it.get("cost", it.get("salesAmt", it.get("spend")))
+                if day is None or cost is None:
+                    continue
+                rows.append({"report_date": day, "channel": _gfa_channel_of(it),
+                             "cost_incl_vat": float(cost) * 1.1,  # GFA cost는 VAT 제외
+                             "source": "naver_gfa_api"})
+            next_token = payload.get("next")
+            if not next_token:
+                break
+        chunk_start = chunk_end + timedelta(days=1)
+
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
+    out = out.dropna(subset=["report_date"])
+    return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
+        cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+AD_SPEND_FETCHERS = [
+    ("메타", fetch_meta_spend),
+    ("구글", fetch_google_ads_spend),
+    ("네이버 검색광고", fetch_naver_search_spend),
+    ("카카오", fetch_kakao_moment_spend),
+    ("크리테오", fetch_criteo_spend),
+    ("네이버 GFA", fetch_naver_gfa_spend),
+]
+AD_SPEND_LOOKBACK_DAYS = 30
+AD_SPEND_RESYNC_TAIL_DAYS = 3
+
+
+def sync_ad_spend(existing: pd.DataFrame):
+    """매체별로 일별 광고비를 받아 ad_spend_daily에 upsert한다. 한 매체가 실패해도 나머지는
+    계속 진행한다 — 하나 막히면 전체가 서는 구조를 만들지 않기 위함."""
+    today = date.today()
+    end = today - timedelta(days=1)
+    if existing is None or existing.empty or "report_date" not in existing.columns:
+        start = end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
+    else:
+        last = pd.to_datetime(existing["report_date"]).max().date()
+        start = min(last - timedelta(days=AD_SPEND_RESYNC_TAIL_DAYS - 1), end)
+    if start > end:
+        return 0, {}, {}
+
+    saved, errors = {}, {}
+    total = 0
+    for label, fn in AD_SPEND_FETCHERS:
+        try:
+            df = fn(start, end)
+        except Exception as e:
+            errors[label] = str(e)[:250]
+            continue
+        if df is None or df.empty:
+            continue
+        n = save_table("ad_spend_daily", df, "report_date,channel,source", f"{label} API")
+        saved[label] = n
+        total += n
+    return total, saved, errors
+
+
+def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
+                          channel_mix: pd.DataFrame, start: date, end: date):
+    """채널별 광고비를 3단 폴백으로 확정한다. (DataFrame[channel, cost_incl_vat, source], 요약문자열)
+    같은 채널에 여러 소스가 있으면 API > 대행사 주간 > 예산 일할 순으로 하나만 채택한다."""
+    api_df = pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
+    if ad_actual is not None and not ad_actual.empty:
+        a = ad_actual.copy()
+        a["report_date"] = pd.to_datetime(a["report_date"]).dt.date
+        a = a[(a["report_date"] >= start) & (a["report_date"] <= end)]
+        if not a.empty:
+            a["channel"] = a["channel"].map(_v4_canon_channel)
+            api_df = a.groupby(["channel", "source"], as_index=False).agg(
+                cost_incl_vat=("cost_incl_vat", "sum"))
+
+    weekly_df = _channel_spend_total(channels_weekly, start, end)
+    if weekly_df is not None and not weekly_df.empty:
+        weekly_df = weekly_df.copy()
+        weekly_df["channel"] = weekly_df["channel"].map(_v4_canon_channel)
+        weekly_df = weekly_df.groupby("channel", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+        weekly_df["source"] = "agency_weekly"
+    else:
+        weekly_df = pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
+
+    budget_df = _budget_daily_spend(channel_mix, start, end)
+    if budget_df is not None and not budget_df.empty:
+        budget_df = budget_df.copy()
+        budget_df["source"] = "budget_prorate"
+    else:
+        budget_df = pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
+
+    prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0, "criteo_api": 0, "naver_gfa_api": 0,
+            "agency_weekly": 1, "budget_prorate": 2}
+    # 빈 DataFrame을 concat하면 pandas가 향후 동작 변경 경고를 내므로 값이 있는 것만 합친다.
+    parts = [d for d in (api_df, weekly_df, budget_df) if d is not None and not d.empty]
+    stacked = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
+    if stacked.empty:
+        return pd.DataFrame(columns=["channel", "cost_incl_vat", "source"]), "광고비 데이터 없음"
+    stacked["_p"] = stacked["source"].map(prio).fillna(9)
+    stacked = stacked.sort_values("_p").drop_duplicates(subset=["channel"], keep="first").drop(columns="_p")
+
+    counts = stacked["source"].value_counts().to_dict()
+    summary = " · ".join(
+        f"{AD_SPEND_SOURCE_LABEL.get(k, k)} {v}개" for k, v in counts.items()
+    )
+    return stacked.reset_index(drop=True), summary
+
+
+def diagnose_ad_spend_setup() -> str:
+    """광고비 매체별 연동 상태 진단. 비밀값은 출력하지 않는다."""
+    L = []
+    ok = lambda s: L.append(f"✅ {s}")
+    ng = lambda s: L.append(f"❌ {s}")
+    info = lambda s: L.append(f"   ↳ {s}")
+    try:
+        import requests  # noqa: F401
+        ok("0. requests 설치됨")
+    except Exception:
+        ng("0. requests 없음 → requirements.txt에 requests 추가 필요")
+        return "\n".join(L)
+
+    test_end = date.today() - timedelta(days=1)
+    test_start = test_end - timedelta(days=6)
+
+    meta = _secrets_section("meta_ads")
+    if not meta:
+        ng("1. 메타: Secrets에 [meta_ads] 없음 (예산 일할값으로 대체 중)")
+    else:
+        miss = [k for k in ["access_token", "ad_account_id"] if not meta.get(k)]
+        if miss:
+            ng(f"1. 메타: 빠진 항목 {', '.join(miss)}")
+        else:
+            info(f"메타 광고계정: {meta.get('ad_account_id')}")
+            try:
+                df = fetch_meta_spend(test_start, test_end)
+                if df.empty:
+                    ng(f"1. 메타: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
+                else:
+                    ok(f"1. 메타 연동 성공: {len(df)}일, 합계 {df['cost_incl_vat'].sum():,.0f}원")
+            except Exception as e:
+                ng(f"1. 메타 조회 실패: {str(e)[:220]}")
+
+    g = _secrets_section("google_ads")
+    if not g:
+        ng("2. 구글: Secrets에 [google_ads] 없음 (예산 일할값으로 대체 중)")
+    else:
+        need = ["developer_token", "client_id", "client_secret", "refresh_token", "customer_id"]
+        miss = [k for k in need if not g.get(k)]
+        if miss:
+            ng(f"2. 구글: 빠진 항목 {', '.join(miss)}")
+        else:
+            info(f"구글 고객ID: {str(g.get('customer_id'))[:3]}****")
+            try:
+                df = fetch_google_ads_spend(test_start, test_end)
+                if df.empty:
+                    ng(f"2. 구글: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
+                else:
+                    ok(f"2. 구글 연동 성공: {len(df)}일, 합계 {df['cost_incl_vat'].sum():,.0f}원")
+            except Exception as e:
+                msg = str(e)[:250]
+                ng(f"2. 구글 조회 실패: {msg}")
+                if "DEVELOPER_TOKEN" in msg or "developer" in msg.lower():
+                    info("→ 개발자 토큰이 아직 승인 안 됐을 수 있습니다(구글 심사 며칠 소요)")
+
+    nv = _secrets_section("naver_searchad")
+    if not nv:
+        ng("2-1. 네이버 검색광고: Secrets에 [naver_searchad] 없음 (예산 일할값으로 대체 중)")
+    else:
+        miss = [k for k in ["api_key", "secret_key", "customer_id"] if not nv.get(k)]
+        if miss:
+            ng(f"2-1. 네이버: 빠진 항목 {', '.join(miss)}")
+        else:
+            info(f"네이버 CUSTOMER_ID: {nv.get('customer_id')}")
+            try:
+                df = fetch_naver_search_spend(test_start, test_end)
+                if df.empty:
+                    ng(f"2-1. 네이버: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
+                else:
+                    ok(f"2-1. 네이버 연동 성공: {len(df)}행, 합계 {df['cost_incl_vat'].sum():,.0f}원")
+            except Exception as e:
+                ng(f"2-1. 네이버 조회 실패: {str(e)[:220]}")
+
+    kk = _secrets_section("kakao_moment")
+    if not kk:
+        ng("2-2. 카카오: Secrets에 [kakao_moment] 없음 (예산 일할값으로 대체 중)")
+    else:
+        if not kk.get("ad_account_id"):
+            ng("2-2. 카카오: ad_account_id 없음")
+        else:
+            info(f"카카오 광고계정: {kk.get('ad_account_id')}")
+            try:
+                df = fetch_kakao_moment_spend(test_start, test_end)
+                if df.empty:
+                    ng(f"2-2. 카카오: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
+                else:
+                    ok(f"2-2. 카카오 연동 성공: {len(df)}일, 합계 {df['cost_incl_vat'].sum():,.0f}원")
+            except Exception as e:
+                msg = str(e)[:220]
+                ng(f"2-2. 카카오 조회 실패: {msg}")
+                if "권한" in msg or "401" in msg or "403" in msg:
+                    info("→ 카카오모먼트 API 사용 권한 신청/승인이 필요합니다")
+
+    cr = _secrets_section("criteo")
+    if not cr:
+        ng("2-3. 크리테오: Secrets에 [criteo] 없음 (예산 일할값으로 대체 중)")
+    else:
+        miss = [k for k in ["client_id", "client_secret"] if not cr.get(k)]
+        if miss:
+            ng(f"2-3. 크리테오: 빠진 항목 {', '.join(miss)}")
+        else:
+            info(f"크리테오 API 버전: {cr.get('api_version', CRITEO_DEFAULT_VERSION)}")
+            try:
+                df = fetch_criteo_spend(test_start, test_end)
+                if df.empty:
+                    ng(f"2-3. 크리테오: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
+                else:
+                    ok(f"2-3. 크리테오 연동 성공: {len(df)}일, 합계 {df['cost_incl_vat'].sum():,.0f}원")
+            except Exception as e:
+                msg = str(e)[:220]
+                ng(f"2-3. 크리테오 조회 실패: {msg}")
+                if "404" in msg:
+                    info("→ api_version이 안 맞을 수 있습니다. Secrets에서 api_version을 바꿔보세요(예: 2025-01)")
+                elif "consent" in msg.lower() or "403" in msg:
+                    info("→ 광고주 자산에 대한 앱 동의(consent)가 필요합니다")
+
+    gf = _secrets_section("naver_gfa")
+    if not gf:
+        ng("2-4. 네이버 GFA: Secrets에 [naver_gfa] 없음 (예산 일할값으로 대체 중)")
+        info("→ API 신청은 네이버 공식 파트너사만 가능합니다. 대행사에서 발급받은 토큰을 넣어야 합니다")
+    else:
+        if not gf.get("ad_account_no"):
+            ng("2-4. GFA: ad_account_no 없음")
+        else:
+            info(f"GFA 광고계정: {gf.get('ad_account_no')}"
+                 + (f" / 관리계정: {gf.get('manager_account_no')}" if gf.get("manager_account_no") else ""))
+            try:
+                df = fetch_naver_gfa_spend(test_start, test_end)
+                if df.empty:
+                    ng(f"2-4. GFA: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
+                else:
+                    by = df.groupby("channel")["cost_incl_vat"].sum().to_dict()
+                    ok(f"2-4. GFA 연동 성공: {len(df)}행 · " +
+                       " / ".join(f"{k} {v:,.0f}원" for k, v in by.items()))
+            except Exception as e:
+                msg = str(e)[:220]
+                ng(f"2-4. GFA 조회 실패: {msg}")
+                if "401" in msg or "token" in msg.lower():
+                    info("→ 액세스 토큰이 만료됐을 수 있습니다(refresh_token 방식 권장)")
+                elif "403" in msg or "권한" in msg:
+                    info("→ 관리계정 번호(manager_account_no)가 필요하거나 권한이 없습니다")
+    ng("2-5. 네이버 맨즈탭(보장형) / 카카오톡 플친(채널 월렛): 광고비 조회 API 자체가 없음 → 예산 일할값 사용")
+
+    sb = get_supabase_client()
+    if sb is None:
+        ng("3. Supabase 연결 없음 (로컬 세션 모드)")
+    else:
+        try:
+            sb.table("ad_spend_daily").select("report_date").limit(1).execute()
+            ok("3. Supabase ad_spend_daily 테이블 접근 가능")
+        except Exception as e:
+            ng(f"3. ad_spend_daily 테이블 없음 → ad_spend_table.sql 실행 필요 ({str(e)[:150]})")
+    return "\n".join(L)
+
+
 def render_ga_channel_funnel_page(
     audience: pd.DataFrame,
     ga_channel_inflow: pd.DataFrame,
@@ -5846,6 +6620,7 @@ def render_ga_channel_funnel_page(
     ga_daily: pd.DataFrame = None,
     utm_map: pd.DataFrame = None,
     decisions: pd.DataFrame = None,
+    ad_spend: pd.DataFrame = None,
 ):
     """채널 퍼널 리포트 V4 — '신규 고객 발굴' / '매출 확보' 두 목적축을 하나의 화면에서 본다.
     노출·클릭·가입·구매·매출은 channel_audience_snapshot(대행사 캠페인 신규/리타겟 태그 기준),
@@ -5865,6 +6640,17 @@ def render_ga_channel_funnel_page(
             st.cache_data.clear()
             ga_daily = load_table("ga_channel_daily")
             sync_note = f"GA4 자동 동기화 {n:,}행 ({s} ~ {e})"
+
+    # 광고비도 같은 시점에 동기화한다(매체별로 실패해도 나머지는 계속 진행).
+    ad_spend = ad_spend if ad_spend is not None else pd.DataFrame()
+    spend_sync_note, spend_errors = "", {}
+    if "fv4_spend_synced" not in st.session_state:
+        n_sp, saved, spend_errors = sync_ad_spend(ad_spend)
+        st.session_state["fv4_spend_synced"] = True
+        if n_sp:
+            st.cache_data.clear()
+            ad_spend = load_table("ad_spend_daily")
+            spend_sync_note = "광고비 동기화 " + ", ".join(f"{k} {v}행" for k, v in saved.items())
 
     # GA4 API로 받은 데이터가 있으면 그걸 우선 쓰고, 없으면 기존 엑셀 업로드분으로 폴백한다.
     ga_source_label = "GA4 API(자동)"
@@ -5892,6 +6678,8 @@ def render_ga_channel_funnel_page(
             bits.append(f"마지막 동기화 {last_sync:%m/%d %H:%M}")
         if sync_note:
             bits.append(sync_note)
+        if spend_sync_note:
+            bits.append(spend_sync_note)
         st.caption(" · ".join(bits))
     with c_btn:
         if st.button("🔄 지금 동기화", key="fv4_sync_btn", use_container_width=True):
@@ -5912,6 +6700,15 @@ def render_ga_channel_funnel_page(
             if st.button("진단 실행", key="fv4_diag_btn"):
                 with st.spinner("확인 중..."):
                     st.code(diagnose_ga4_setup(), language=None)
+
+    with st.expander("💰 광고비 연동 진단 (매체별 연동 상태)"):
+        st.caption("연동 안 된 매체는 채널믹스 예산 일할값으로 자동 대체됩니다 — 대시보드는 항상 동작합니다.")
+        if spend_errors:
+            for k, v in spend_errors.items():
+                st.warning(f"{k} 광고비 조회 실패: {v}")
+        if st.button("광고비 진단 실행", key="fv4_spend_diag_btn"):
+            with st.spinner("확인 중..."):
+                st.code(diagnose_ad_spend_setup(), language=None)
 
     if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
         st.info(
@@ -5986,7 +6783,9 @@ def render_ga_channel_funnel_page(
     aud_new = _funnel_from_audience(audience, start, end, "신규")
     aud_re = _funnel_from_audience(audience, start, end, "리타겟팅")
     visits = _ga_visits_by_channel(ga_channel_inflow, start, end)
-    spend_all = _channel_spend_total(channels_weekly, start, end)
+    # 광고비: API 실집행 > 대행사 주간(일할) > 채널믹스 예산(일할) 순으로 채널마다 확정한다.
+    spend_all, spend_src_summary = resolve_channel_spend(ad_spend, channels_weekly, channel_mix, start, end)
+    spend_by_channel_src = dict(zip(spend_all["channel"], spend_all["source"])) if not spend_all.empty else {}
     # 계획 비중은 '연간' 채널 믹스 기준으로 잡는다 — 표 헤더가 '연간 계획 / 실제 집행'이고,
     # 기간을 좁힐 때마다 계획 비중까지 흔들리면 계획 대비 이탈을 판단할 수 없기 때문이다.
     mix_ratio = pd.DataFrame(columns=["channel", "budget", "budget_ratio"])
@@ -5998,7 +6797,7 @@ def render_ga_channel_funnel_page(
         _yt = mix_ratio["budget"].sum()
         mix_ratio["budget_ratio"] = np.where(_yt > 0, mix_ratio["budget"] / _yt * 100, 0)
 
-    for _df in (aud_new, aud_re, visits, spend_all, mix_ratio):
+    for _df in (aud_new, aud_re, visits, mix_ratio):
         if _df is not None and not _df.empty:
             _df["channel"] = _df["channel"].map(_v4_canon_channel)
 
@@ -6010,7 +6809,7 @@ def render_ga_channel_funnel_page(
     aud_new = _regroup(aud_new, {c: "sum" for c in ["impressions", "clicks", "cost_incl_vat", "signups", "conversions", "revenue"]})
     aud_re = _regroup(aud_re, {c: "sum" for c in ["impressions", "clicks", "cost_incl_vat", "signups", "conversions", "revenue"]})
     visits = _regroup(visits, {"new_users": "sum", "returning_users": "sum"})
-    spend_all = _regroup(spend_all, {"cost_incl_vat": "sum"})
+
     if mix_ratio is not None and not mix_ratio.empty:
         mix_ratio = mix_ratio.groupby("channel", as_index=False).agg(budget=("budget", "sum"))
         _tot = mix_ratio["budget"].sum()
@@ -6018,9 +6817,10 @@ def render_ga_channel_funnel_page(
 
     spend_sum = float(spend_all["cost_incl_vat"].sum()) if (spend_all is not None and not spend_all.empty) else 0.0
 
-    if ad_spend_period <= 0 and spend_sum > 0:
+    # 이제 광고비는 항상 resolve_channel_spend에서 나오므로, 그 합계를 정식 광고비로 쓴다.
+    if spend_sum > 0:
         ad_spend_period = spend_sum
-        spend_src = "주간 매체 리포트(일할 안분)"
+        spend_src = spend_src_summary
     site_roas = (ad_revenue_period / ad_spend_period * 100) if ad_spend_period > 0 else 0.0
 
     def _build(base, visit_col):
@@ -6038,7 +6838,9 @@ def render_ga_channel_funnel_page(
         else:
             df["budget_ratio"] = np.nan
         if spend_all is not None and not spend_all.empty:
-            df = df.merge(spend_all.rename(columns={"cost_incl_vat": "_spend_all"}), on="channel", how="left")
+            # source 컬럼까지 붙으면 뒤쪽 표 로직과 컬럼이 꼬이므로 필요한 두 개만 가져온다.
+            _sp = spend_all[["channel", "cost_incl_vat"]].rename(columns={"cost_incl_vat": "_spend_all"})
+            df = df.merge(_sp, on="channel", how="left")
         else:
             df["_spend_all"] = df["cost_incl_vat"]
         df["_spend_all"] = df["_spend_all"].fillna(df["cost_incl_vat"])
@@ -6242,6 +7044,9 @@ def render_ga_channel_funnel_page(
                     f"광고비 {r['cost_incl_vat']:,.0f}원, 매출 {r['revenue']:,.0f}원, "
                     f"계획 비중 {plan:.1f}% 대비 집행 {r['act_ratio']:.1f}% ({r['drift']:+.1f}%p)"
                 )
+                _src = spend_by_channel_src.get(r["channel"])
+                if _src:
+                    reason += f" · 광고비 출처: {AD_SPEND_SOURCE_LABEL.get(_src, _src)}"
                 if r["cost_incl_vat"] < FUNNEL_MIN_SPEND:
                     reason += f" · 광고비가 {FUNNEL_MIN_SPEND:,}원 미만이라 판단 보류"
                 st.markdown(f"**{r['channel']} → {label}**  \n{reason}")
@@ -7045,6 +7850,7 @@ def main():
     ga_daily = load_table("ga_channel_daily")      # GA4 API 자동 수집분
     utm_map = load_table("utm_channel_map")
     decisions = load_table("decision_log")
+    ad_spend = load_table("ad_spend_daily")   # 매체 API 일별 실집행 광고비
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -7074,7 +7880,7 @@ def main():
     elif page == "채널 퍼널 리포트":
         render_ga_channel_funnel_page(
             audience, ga_channel_inflow, inflow_revenue, channels_weekly, channel_mix,
-            ga_daily=ga_daily, utm_map=utm_map, decisions=decisions,
+            ga_daily=ga_daily, utm_map=utm_map, decisions=decisions, ad_spend=ad_spend,
         )
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
