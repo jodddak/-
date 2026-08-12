@@ -18,6 +18,7 @@ STCO 온라인팀 광고/마케팅 성과 대시보드
 import base64
 import hashlib
 import io
+import json
 import re
 import urllib.parse
 from datetime import date, datetime, timedelta
@@ -5162,12 +5163,26 @@ GA4_RESYNC_TAIL_DAYS = 3    # GA는 하루이틀 뒤 값이 보정되므로 최�
 
 
 @st.cache_resource(show_spinner=False)
+def _build_ga4_client(sa_json: str):
+    """실제 클라이언트 생성. 캐시 키를 서비스 계정 JSON 문자열로 잡아서, Secrets를 고치면
+    캐시 키가 바뀌어 자동으로 다시 시도된다. 실패 시 예외를 그대로 올려보내는 게 핵심 —
+    st.cache_resource는 예외를 캐시하지 않으므로 '한 번 실패하면 Secrets를 고쳐도 계속
+    옛날 에러가 뜨는' 문제가 안 생긴다. (예전에 실패값을 캐시해서 실제로 이 버그가 있었다.)"""
+    from google.analytics.data_v1beta import BetaAnalyticsDataClient
+    from google.oauth2 import service_account
+
+    info = json.loads(sa_json)
+    creds = service_account.Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+    )
+    return BetaAnalyticsDataClient(credentials=creds)
+
+
 def get_ga4_client():
-    """서비스 계정으로 GA4 Data API 클라이언트를 만든다. secrets가 없으면 None을 돌려주고
-    화면에서는 '연동 전' 안내만 띄운다(앱이 죽지 않게)."""
+    """(클라이언트, 에러메시지)를 돌려준다. 실패는 캐시되지 않는다."""
     try:
-        from google.analytics.data_v1beta import BetaAnalyticsDataClient
-        from google.oauth2 import service_account
+        import google.analytics.data_v1beta  # noqa: F401
+        import google.oauth2.service_account  # noqa: F401
     except Exception:
         return None, "google-analytics-data 패키지가 없습니다. requirements.txt에 추가해주세요."
     try:
@@ -5175,10 +5190,7 @@ def get_ga4_client():
     except Exception:
         return None, "Secrets에 [gcp_service_account]가 없습니다."
     try:
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/analytics.readonly"]
-        )
-        return BetaAnalyticsDataClient(credentials=creds), None
+        return _build_ga4_client(json.dumps(info, sort_keys=True)), None
     except Exception as e:
         return None, f"서비스 계정 인증 실패: {e}"
 
@@ -5274,6 +5286,9 @@ def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full
     return n, start, end, None
 
 
+B64_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+
+
 def diagnose_ga4_setup() -> str:
     """GA4 자동 연동이 어느 단계에서 막혔는지 한 화면에서 보여준다.
     비밀값(private_key 등)은 절대 출력하지 않고 '형식이 맞는지'만 검사한다.
@@ -5311,11 +5326,21 @@ def diagnose_ga4_setup() -> str:
         ng(f"4. 빠진 항목: {', '.join(missing)}")
     else:
         ok("4. 필수 항목 모두 채워짐")
-    placeholders = [k for k, v in sa.items() if isinstance(v, str) and ("여기에" in v or v.strip() in ("...", "xxx"))]
+    # 예시값 검사는 '부분 포함'으로 본다 — 'stco-dashboard@xxx.iam.gserviceaccount.com' 처럼
+    # 예시 문자열이 값 중간에 박혀 있는 경우를 전체 일치 검사로는 놓쳤다(실제로 겪은 사례).
+    ph_marks = ["여기에", "xxx", "<JSON", "<GA4", "아주 긴 문자열"]
+    placeholders = []
+    for k, v in sa.items():
+        if k == "private_key" or not isinstance(v, str):
+            continue
+        if any(mk in v for mk in ph_marks):
+            placeholders.append(k)
     if placeholders:
-        ng(f"5. 예시값이 그대로 남아있음: {', '.join(placeholders)} → 실제 JSON 값으로 교체 필요")
+        ng(f"5. 예시값이 그대로 남아있음: {', '.join(placeholders)} → JSON 파일의 실제 값으로 교체 필요")
+        for k in placeholders:
+            info(f"{k} = {sa.get(k)}")
     else:
-        ok("5. 예시값(여기에-값 / ...) 남은 것 없음")
+        ok("5. 예시값(여기에-값 / xxx 등) 남은 것 없음")
 
     pk = str(sa.get("private_key", ""))
     if not pk.startswith("-----BEGIN"):
@@ -5327,11 +5352,30 @@ def diagnose_ga4_setup() -> str:
     else:
         # 진짜 RSA 2048 키는 본문만 1,600자 이상이다. 그보다 짧으면 예시값(...)이 남은 것.
         body = pk.split("-----BEGIN PRIVATE KEY-----")[-1].split("-----END")[0].strip()
+        body_lines = [ln for ln in body.split(chr(10)) if ln.strip()]
+        # 어디에 이상한 문자가 섞였는지 '위치'로 정확히 짚는다 — 추측으로 안내하지 않기 위함.
+        # 키 내용 자체는 출력하지 않고, 줄 번호와 문제 문자만 보여준다.
+        bad_spots = []
+        for li, ln in enumerate(body_lines, start=1):
+            for ci, chx in enumerate(ln.strip(), start=1):
+                if chx not in B64_CHARS:
+                    bad_spots.append((li, ci, chx))
+                    break
+        clean_body = "".join(c for c in body if c in B64_CHARS)
         if len(body) < 500:
-            ng(f"6. private_key 본문이 너무 짧습니다({len(body)}자) → 예시의 '...' 자리에 "
-               "실제 키를 넣지 않은 것으로 보입니다. JSON 파일의 private_key 값 전체를 복사해주세요")
+            ng(f"6. private_key 본문이 너무 짧습니다({len(body)}자) → 실제 키가 안 들어갔습니다. "
+               "JSON 파일의 private_key 값 전체를 복사해주세요")
+        elif bad_spots:
+            ng(f"6. private_key 안에 base64가 아닌 문자가 {len(bad_spots)}곳 있습니다")
+            for li, ci, chx in bad_spots[:5]:
+                info(f"본문 {li}번째 줄의 {ci}번째 글자: '{chx}' (코드 {ord(chx)})")
+            info("→ 손으로 고치지 마시고, JSON의 private_key 값을 통째로 다시 복사해 붙여넣으세요")
         else:
-            ok(f"6. private_key 형식 정상 (본문 {len(body)}자, 줄 {pk.count(chr(10)) + 1}개)")
+            # 정상 RSA 2048 키의 base64 본문은 1,624자 안팎이다. 크게 벗어나면 뭔가 섞인 것.
+            note = ""
+            if not (1500 <= len(clean_body) <= 1800):
+                note = f" ⚠ 보통 1,624자인데 {len(clean_body)}자입니다 — 값이 잘렸거나 덧붙었을 수 있습니다"
+            ok(f"6. private_key 형식 정상 (base64 {len(clean_body)}자, 줄 {len(body_lines)}개){note}")
     info(f"서비스 계정 이메일: {sa.get('client_email', '(없음)')}")
     info("↑ 이 이메일이 GA4 [관리 → 속성 액세스 관리]에 '뷰어'로 추가돼 있어야 합니다")
 
