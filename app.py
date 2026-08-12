@@ -6367,6 +6367,93 @@ def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
         cost_incl_vat=("cost_incl_vat", "sum"))
 
 
+NAVER_AUTH_URL = "https://nid.naver.com/oauth2.0/authorize"
+
+
+def render_gfa_token_helper():
+    """네이버 GFA용 refresh token을 대시보드 안에서 한 번에 발급받는 도우미.
+
+    흐름: ① 네이버 로그인 링크 클릭 → ② 콜백으로 code가 URL에 붙어 돌아옴
+          → ③ 교환 버튼 → refresh_token 출력 → Secrets에 붙여넣기.
+    refresh_token은 만료가 길어서 한 번 받아두면 계속 재사용된다.
+    """
+    from urllib.parse import urlencode
+
+    cfg = _secrets_section("naver_gfa") or {}
+    st.caption(
+        "네이버 개발자센터에 등록한 앱 정보로 refresh token을 받습니다. "
+        "대행사 API 사용 승인 전에도 토큰 발급 자체는 됩니다."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        cid = st.text_input("Client ID", value=str(cfg.get("client_id", "")), key="gfa_cid")
+    with c2:
+        csec = st.text_input("Client Secret", value=str(cfg.get("client_secret", "")),
+                             type="password", key="gfa_csec")
+    cb = st.text_input(
+        "Callback URL (개발자센터에 등록한 값과 글자 하나까지 같아야 합니다)",
+        value=str(cfg.get("callback_url", "")), key="gfa_cb",
+        placeholder="https://xxxx.streamlit.app",
+    )
+
+    if not (cid and csec and cb):
+        st.info("위 3개를 채우면 로그인 링크가 나타납니다.")
+        return
+
+    state = "stcogfa"
+    auth_url = NAVER_AUTH_URL + "?" + urlencode({
+        "response_type": "code",
+        "client_id": str(cid).strip(),
+        "redirect_uri": str(cb).strip(),
+        "state": state,
+    })
+    st.markdown(f"**① [네이버로 로그인하고 코드 받기]({auth_url})** — 새 탭에서 열어 로그인/동의하세요.")
+
+    code = None
+    try:
+        code = st.query_params.get("code")
+        qstate = st.query_params.get("state") or state
+    except Exception:
+        qstate = state
+    if not code:
+        st.caption("로그인하고 돌아오면 여기에 ② 발급 버튼이 생깁니다.")
+        return
+
+    st.success("로그인 코드가 확인됐습니다.")
+    if st.button("② refresh token 발급", key="gfa_token_btn"):
+        import requests
+        try:
+            r = requests.get(GFA_TOKEN_URL, params={
+                "grant_type": "authorization_code",
+                "client_id": str(cid).strip(),
+                "client_secret": str(csec).strip(),
+                "code": str(code).strip(),
+                "state": str(qstate).strip(),
+            }, timeout=60)
+            j = r.json() or {}
+        except Exception as e:
+            st.error(f"요청 실패: {e}")
+            return
+        if not j.get("refresh_token"):
+            st.error(
+                "발급 실패: " + str(j.get("error_description") or j.get("error") or j)[:300]
+                + "  · 코드는 1회용이라 이미 썼거나 시간이 지났으면 ①부터 다시 하세요."
+            )
+            return
+        st.success("발급 완료 — 아래 블록을 Streamlit Secrets 맨 아래에 그대로 덧붙이세요.")
+        st.code(
+            "[naver_gfa]\n"
+            f'client_id = "{str(cid).strip()}"\n'
+            f'client_secret = "{str(csec).strip()}"\n'
+            f'refresh_token = "{j["refresh_token"]}"\n'
+            'ad_account_no = "대행사에서 받은 STCO 광고계정 번호"\n'
+            'manager_account_no = "대행사 관리계정 번호"\n'
+            f'callback_url = "{str(cb).strip()}"',
+            language="toml",
+        )
+        st.caption("⚠️ 위 블록에는 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요.")
+
+
 AD_SPEND_FETCHERS = [
     ("메타", fetch_meta_spend),
     ("구글", fetch_google_ads_spend),
@@ -6709,6 +6796,9 @@ def render_ga_channel_funnel_page(
         if st.button("광고비 진단 실행", key="fv4_spend_diag_btn"):
             with st.spinner("확인 중..."):
                 st.code(diagnose_ad_spend_setup(), language=None)
+
+    with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)"):
+        render_gfa_token_helper()
 
     if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
         st.info(
