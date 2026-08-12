@@ -2021,6 +2021,8 @@ def _channel_spend_total(channels_weekly: pd.DataFrame, start: date, end: date) 
     if channels_weekly is None or channels_weekly.empty:
         return pd.DataFrame(columns=cols)
     w = channels_weekly.copy()
+    w["week_start"] = pd.to_datetime(w["week_start"]).dt.date
+    w["week_end"] = pd.to_datetime(w["week_end"]).dt.date
     overlap = (w["week_start"] <= end) & (w["week_end"] >= start)
     w = w[overlap]
     if w.empty:
