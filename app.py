@@ -2026,10 +2026,19 @@ def _channel_spend_total(channels_weekly: pd.DataFrame, start: date, end: date) 
     w = channels_weekly.copy()
     w["week_start"] = pd.to_datetime(w["week_start"]).dt.date
     w["week_end"] = pd.to_datetime(w["week_end"]).dt.date
-    overlap = (w["week_start"] <= end) & (w["week_end"] >= start)
-    w = w[overlap]
+    w = w[(w["week_start"] <= end) & (w["week_end"] >= start)]
     if w.empty:
         return pd.DataFrame(columns=cols)
+    # 주간 광고비를 그대로 더하면 기간을 8/1~8/11로 잘라도 그 주 '전체' 광고비가 들어가 과다 집계된다.
+    # 선택 기간과 겹치는 날짜 수만큼만 비례 배분한다.
+    def _prorate(r):
+        w_days = (r["week_end"] - r["week_start"]).days + 1
+        ov = (min(r["week_end"], end) - max(r["week_start"], start)).days + 1
+        if w_days <= 0 or ov <= 0:
+            return 0.0
+        return float(r["cost_incl_vat"]) * min(ov, w_days) / w_days
+    w = w.copy()
+    w["cost_incl_vat"] = w.apply(_prorate, axis=1)
     return w.groupby("channel", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
 
 
@@ -5954,7 +5963,11 @@ def render_ga_channel_funnel_page(
             bucket_share[b] = float(v)
     bucket_total = sum(bucket_share.values()) or 1.0
 
+    # 광고비 출처 ①: '유입·매출 비교' 파일. 최근 날짜가 비어 있는 경우가 많아서, 비어 있으면
+    # ②: 대행사 주간 매체 리포트(channel_weekly)의 일할 안분값으로 자동 대체한다.
+    # (①이 비어서 광고비가 0에 가깝게 잡히는 바람에 ROAS가 2000%대로 뻥튀기된 적 있음)
     ad_spend_period = 0.0
+    spend_src = "유입·매출 비교 파일"
     if not inflow_revenue.empty:
         ir = inflow_revenue.copy()
         ir["report_date"] = pd.to_datetime(ir["report_date"]).dt.date
@@ -5967,7 +5980,7 @@ def render_ga_channel_funnel_page(
         _t = fg.copy()
         _t["_b"] = _t.apply(classify_ga_bucket, axis=1)
         ad_revenue_period = float(_t.loc[_t["_b"] == "광고", "revenue"].sum())
-    site_roas = (ad_revenue_period / ad_spend_period * 100) if ad_spend_period > 0 else 0.0
+    site_roas = 0.0  # 실제 계산은 아래에서 spend_sum(주간 리포트 합계)을 구한 뒤에 한다
 
     # 채널 단위 — 대표 채널명으로 정규화해서 합산
     aud_new = _funnel_from_audience(audience, start, end, "신규")
@@ -6004,6 +6017,11 @@ def render_ga_channel_funnel_page(
         mix_ratio["budget_ratio"] = np.where(_tot > 0, mix_ratio["budget"] / _tot * 100, 0)
 
     spend_sum = float(spend_all["cost_incl_vat"].sum()) if (spend_all is not None and not spend_all.empty) else 0.0
+
+    if ad_spend_period <= 0 and spend_sum > 0:
+        ad_spend_period = spend_sum
+        spend_src = "주간 매체 리포트(일할 안분)"
+    site_roas = (ad_revenue_period / ad_spend_period * 100) if ad_spend_period > 0 else 0.0
 
     def _build(base, visit_col):
         if base is None or base.empty:
@@ -6104,6 +6122,11 @@ def render_ga_channel_funnel_page(
 
     # ── KPI 스트립 ──
     new_ratio = (new_now / users_now * 100) if users_now else 0
+    # 광고비를 못 구하면 ROAS를 억지로 계산하지 않고 '-'로 둔다(틀린 숫자로 판단하는 게 제일 위험).
+    roas_sub = (
+        f"광고 ROAS {site_roas:.0f}% · 광고비 {spend_src}"
+        if ad_spend_period > 0 else "광고 ROAS - (광고비 데이터 없음)"
+    )
     ad_p = bucket_share["광고"] / bucket_total * 100
     org_p = bucket_share["자연유입"] / bucket_total * 100
     etc_p = bucket_share["기타"] / bucket_total * 100
@@ -6120,7 +6143,7 @@ def render_ga_channel_funnel_page(
         f'<div class="fv4-kpi-sub">건</div></div>'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">GA 매출</div>'
         f'<div class="fv4-kpi-value">{_v4_money_short(rev_now)}{_v4_delta_html(rev_now, rev_prev)}</div>'
-        f'<div class="fv4-kpi-sub">광고 ROAS {site_roas:.0f}%</div></div>'
+        f'<div class="fv4-kpi-sub">{roas_sub}</div></div>'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">유입 구성</div>'
         f'<div class="fv4-stack"><i style="width:{ad_p:.1f}%;background:#17170f"></i>'
         f'<i style="width:{org_p:.1f}%;background:#6b5ce7"></i>'
