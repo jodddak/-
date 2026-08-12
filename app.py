@@ -641,6 +641,8 @@ TABLES = {
     "utm_channel_map": "utm_channel_map",
     "channel_budget": "channel_budget",
     "channel_mix_budget": "channel_mix_budget",
+    "ga_channel_daily": "ga_channel_daily",
+    "decision_log": "decision_log",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -5141,19 +5143,593 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# GA4 Data API 자동 연동 (신규) — 엑셀 수동 업로드 없이 매일 자동으로 끌어온다
+# ──────────────────────────────────────────────────────────────
+# 필요한 것 (Streamlit Secrets):
+#   [gcp_service_account]  ← 서비스 계정 JSON 내용 그대로
+#   GA4_PROPERTY_ID = "123456789"
+# requirements.txt 에 google-analytics-data 추가 필요.
+#
+# 스코프 주의: sessionSourceMedium은 '세션' 범위, totalUsers/newVsReturning은 '사용자' 범위라
+# 둘을 섞으면 합계가 미묘하게 안 맞을 수 있다(구글 이슈로도 보고된 사항). 그래서 사용자수와
+# 세션수를 둘 다 받아 저장해두고, 화면에는 기존 표들과 단위를 맞추기 위해 사용자수를 쓰되
+# 필요하면 세션 기준으로 언제든 바꿔볼 수 있게 한다.
+GA4_DIMENSIONS = ["date", "sessionSourceMedium", "newVsReturning"]
+GA4_METRICS = ["totalUsers", "sessions", "transactions", "purchaseRevenue"]
+GA4_LOOKBACK_DAYS = 30      # 최초 연동 시 끌어올 기간
+GA4_RESYNC_TAIL_DAYS = 3    # GA는 하루이틀 뒤 값이 보정되므로 최근 며칠은 매번 다시 받아 덮어쓴다
+
+
+@st.cache_resource(show_spinner=False)
+def get_ga4_client():
+    """서비스 계정으로 GA4 Data API 클라이언트를 만든다. secrets가 없으면 None을 돌려주고
+    화면에서는 '연동 전' 안내만 띄운다(앱이 죽지 않게)."""
+    try:
+        from google.analytics.data_v1beta import BetaAnalyticsDataClient
+        from google.oauth2 import service_account
+    except Exception:
+        return None, "google-analytics-data 패키지가 없습니다. requirements.txt에 추가해주세요."
+    try:
+        info = dict(st.secrets["gcp_service_account"])
+    except Exception:
+        return None, "Secrets에 [gcp_service_account]가 없습니다."
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+        )
+        return BetaAnalyticsDataClient(credentials=creds), None
+    except Exception as e:
+        return None, f"서비스 계정 인증 실패: {e}"
+
+
+def _ga4_property_id():
+    try:
+        return str(st.secrets["GA4_PROPERTY_ID"]).strip()
+    except Exception:
+        return None
+
+
+def fetch_ga4_channel_daily(start: date, end: date, channel_map: dict = None) -> pd.DataFrame:
+    """GA4에서 [날짜 × 세션 소스/매체 × 신규·재방문] 단위로 사용자수·세션수·구매·구매수익을 받아온다.
+    utm_channel_map 매핑이 있으면 '매체'(channel) 컬럼까지 채워서 돌려준다."""
+    client, err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return pd.DataFrame()
+
+    from google.analytics.data_v1beta.types import (
+        DateRange, Dimension, Metric, RunReportRequest,
+    )
+
+    rows_out, offset, page_size = [], 0, 100_000
+    while True:
+        req = RunReportRequest(
+            property=f"properties/{prop}",
+            date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+            dimensions=[Dimension(name=d) for d in GA4_DIMENSIONS],
+            metrics=[Metric(name=m) for m in GA4_METRICS],
+            limit=page_size,
+            offset=offset,
+        )
+        resp = client.run_report(req)
+        for r in resp.rows:
+            dv = [d.value for d in r.dimension_values]
+            mv = [m.value for m in r.metric_values]
+            rows_out.append({
+                "report_date": dv[0], "source_medium": dv[1], "user_type": dv[2],
+                "users": mv[0], "sessions": mv[1], "conversions": mv[2], "revenue": mv[3],
+            })
+        offset += page_size
+        if offset >= getattr(resp, "row_count", 0) or not resp.rows:
+            break
+
+    if not rows_out:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows_out)
+    out["report_date"] = pd.to_datetime(out["report_date"], format="%Y%m%d", errors="coerce")
+    out = out.dropna(subset=["report_date"])
+    out["report_date"] = out["report_date"].dt.date
+    for c in ["users", "sessions", "conversions", "revenue"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    # GA4의 newVsReturning은 'new'/'returning', 값이 없으면 빈 문자열로 온다.
+    out["user_type"] = out["user_type"].map(
+        lambda v: "신규" if str(v).lower().startswith("new") else ("재방문" if str(v).lower().startswith("return") else "미상")
+    )
+    if channel_map:
+        out["channel"] = out["source_medium"].map(lambda sm: channel_map.get(str(sm).strip().lower()))
+    else:
+        out["channel"] = None
+    return out.reset_index(drop=True)
+
+
+def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full: bool = False):
+    """저장된 마지막 날짜 이후(+최근 며칠 보정분)만 GA4에서 받아 upsert한다.
+    (받은 행수, 시작일, 종료일, 에러메시지) 를 돌려준다."""
+    client, err = get_ga4_client()
+    if client is None:
+        return 0, None, None, err
+    today = date.today()
+    end = today - timedelta(days=1)          # 어제까지 (오늘은 아직 집계 중이라 제외)
+    if force_full or existing is None or existing.empty or "report_date" not in existing.columns:
+        start = end - timedelta(days=GA4_LOOKBACK_DAYS - 1)
+    else:
+        last = pd.to_datetime(existing["report_date"]).max().date()
+        start = min(last - timedelta(days=GA4_RESYNC_TAIL_DAYS - 1), end)
+    if start > end:
+        return 0, None, None, None
+    try:
+        df = fetch_ga4_channel_daily(start, end, channel_map)
+    except Exception as e:
+        return 0, None, None, f"GA4 조회 실패: {e}"
+    if df.empty:
+        return 0, start, end, None
+    n = save_table("ga_channel_daily", df, "report_date,source_medium,user_type", "GA4 API")
+    return n, start, end, None
+
+
+def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
+    """ga_channel_daily(신규/재방문이 행으로 쪼개져 있음)를 기존 ga_channel_inflow와 같은
+    모양(날짜×소스매체 1행, new_users/returning_users 컬럼)으로 바꾼다. 이렇게 해두면 기존
+    집계 함수들(_ga_visits_by_channel, classify_ga_bucket 등)을 그대로 재사용할 수 있다."""
+    cols = ["report_date", "source_medium", "channel", "users", "new_users",
+            "returning_users", "sessions", "conversions", "revenue"]
+    if ga_daily is None or ga_daily.empty:
+        return pd.DataFrame(columns=cols)
+    g = ga_daily.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    for c in ["users", "sessions", "conversions", "revenue"]:
+        g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0)
+    g["new_users"] = np.where(g["user_type"] == "신규", g["users"], 0)
+    g["returning_users"] = np.where(g["user_type"] == "재방문", g["users"], 0)
+    out = g.groupby(["report_date", "source_medium"], as_index=False).agg(
+        channel=("channel", "first"), users=("users", "sum"), new_users=("new_users", "sum"),
+        returning_users=("returning_users", "sum"), sessions=("sessions", "sum"),
+        conversions=("conversions", "sum"), revenue=("revenue", "sum"),
+    )
+    return out[cols]
+
+
+# ──────────────────────────────────────────────────────────────
+# 채널 퍼널 리포트 V4 — 디자인/집계 상수
+# ──────────────────────────────────────────────────────────────
+# 채널명은 소스마다 표기가 다르다(채널믹스 파일 '네이버 맨즈탭' / 매체 리포트 시트 '(DA) 네이버_맨즈탭'
+# / GA 매핑 '네이버맨즈' 등). 계획(예산) 대비 실제 집행을 한 줄에 놓으려면 반드시 한 이름으로 모아야
+# 해서, 대표 채널명 → 매칭 키워드 목록으로 정규화한다. 위에서부터 먼저 걸리는 규칙을 쓰므로
+# 더 구체적인 규칙(네이버 맨즈탭)을 일반 규칙(네이버 검색광고)보다 앞에 둔다.
+FUNNEL_CANON_RULES = [
+    ("네이버 맨즈탭", ["맨즈탭", "맨즈", "mens"]),
+    ("네이버 브랜드검색광고", ["브랜드검색", "브검"]),
+    ("네이버 쇼핑검색광고", ["쇼핑검색", "ssp"]),
+    ("네이버 검색광고", ["네이버 검색", "네이버검색", "(sa)", "네이버sa"]),
+    ("네이버 GFA", ["gfa"]),
+    ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
+    ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
+    ("카카오", ["카카오", "kakao", "플친"]),
+    ("모비온", ["모비온", "mobon"]),
+    ("크리테오", ["크리테오", "criteo"]),
+    ("AEDI", ["aedi", "에디"]),
+]
+
+# 퍼널 단계별 전환율 벤치마크(%). 실행 트래커의 '벤치마크(목표)' 칸과 같은 역할로, 이 값보다
+# 낮은 단계를 병목(⚠)으로 표시한다. 베이스라인이 쌓이면 이 숫자만 바꾸면 된다.
+FUNNEL_BENCHMARK_NEW = {"클릭": 1.0, "방문": 80.0, "가입": 2.0, "첫구매": 25.0}
+FUNNEL_BENCHMARK_RETURN = {"재클릭": 1.0, "재방문": 80.0, "재구매": 3.0}
+FUNNEL_MIX_DRIFT_PP = 5.0        # 계획 대비 집행 비중이 이만큼(%p) 벌어지면 '예산 이탈'로 표시
+FUNNEL_MIN_SPEND = 100_000       # 이 미만 광고비 채널은 표본이 작아 '판단 보류'로 둔다
+
+FUNNEL_V4_CSS = """
+<style>
+.fv4-wrap { font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Segoe UI", sans-serif; }
+.fv4-banner {
+  background:#17170f; border-radius:14px; padding:22px 26px; display:flex; gap:26px;
+  align-items:stretch; flex-wrap:wrap; margin-bottom:14px;
+}
+.fv4-banner-lead { display:flex; gap:16px; align-items:flex-start; min-width:280px; flex:1 1 300px; }
+.fv4-count {
+  width:34px; height:34px; border-radius:50%; background:#c8f231; color:#17170f;
+  font-weight:800; font-size:16px; display:flex; align-items:center; justify-content:center; flex:none;
+}
+.fv4-banner-eyebrow { color:#8f8f80; font-size:12px; letter-spacing:.04em; margin-bottom:6px; }
+.fv4-banner-title { color:#fdfdf7; font-size:21px; font-weight:800; line-height:1.42; }
+.fv4-signals { display:flex; gap:30px; flex:2 1 520px; flex-wrap:wrap; }
+.fv4-signal { min-width:180px; flex:1 1 180px; }
+.fv4-chip {
+  display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
+}
+.fv4-chip.bad  { background:#fadadd; color:#a3172b; }
+.fv4-chip.good { background:#d9f5cf; color:#1f6b2c; }
+.fv4-chip.warn { background:#f7edc4; color:#7a5c14; }
+.fv4-chip.hold { background:#ececdf; color:#6d6d5d; }
+.fv4-signal-title { color:#fdfdf7; font-size:14px; font-weight:700; margin-bottom:5px; }
+.fv4-signal-sub { color:#96968a; font-size:12px; line-height:1.5; }
+
+.fv4-kpis { display:flex; border:1px solid #e6e4da; border-radius:12px; overflow:hidden; background:#fffef9; margin-bottom:26px; flex-wrap:wrap; }
+.fv4-kpi { flex:1 1 170px; padding:17px 20px; border-right:1px solid #eceadf; }
+.fv4-kpi:last-child { border-right:none; }
+.fv4-kpi-label { color:#8a8a7c; font-size:12px; margin-bottom:9px; }
+.fv4-kpi-value { color:#17170f; font-size:26px; font-weight:800; letter-spacing:-.02em; display:flex; align-items:baseline; gap:8px; }
+.fv4-kpi-delta { font-size:12px; font-weight:700; }
+.fv4-up   { color:#c0392b; }
+.fv4-down { color:#2563c9; }
+.fv4-kpi-sub { color:#9a9a8c; font-size:11px; margin-top:7px; }
+.fv4-stack { display:flex; height:9px; border-radius:5px; overflow:hidden; margin:12px 0 8px; background:#eceadf; }
+.fv4-stack i { display:block; height:100%; }
+
+.fv4-eyebrow { color:#9a9a88; font-size:11px; font-weight:700; letter-spacing:.14em; margin-bottom:5px; }
+.fv4-h2 { color:#17170f; font-size:23px; font-weight:800; margin:0 0 4px 0; }
+
+.fv4-card { border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:22px 24px; margin-bottom:16px; }
+.fv4-badge-dark { display:inline-block; background:#17170f; color:#fdfdf7; font-size:10px; font-weight:700;
+  letter-spacing:.1em; padding:4px 9px; border-radius:4px; margin-bottom:11px; }
+.fv4-card-title { color:#17170f; font-size:18px; font-weight:800; margin-bottom:4px; }
+.fv4-card-sub { color:#8a8a7c; font-size:12.5px; margin-bottom:18px; }
+
+.fv4-funnel { display:flex; align-items:stretch; background:#f0efe6; border-radius:10px; padding:6px; }
+.fv4-stage { flex:1 1 0; text-align:center; padding:18px 6px; border-radius:8px; }
+.fv4-stage.hot { background:#fdeaea; box-shadow:inset 0 0 0 1px #f3cccc; }
+.fv4-stage-v { color:#17170f; font-size:22px; font-weight:800; letter-spacing:-.02em; }
+.fv4-stage-l { color:#8a8a7c; font-size:12px; margin-top:6px; }
+.fv4-conv { flex:0 0 62px; display:flex; align-items:center; justify-content:center; color:#a3a396; font-size:11.5px; font-weight:600; }
+.fv4-conv.low { color:#c0392b; }
+
+.fv4-tbl { width:100%; border-collapse:collapse; font-size:13px; margin-top:18px; }
+.fv4-tbl th { color:#8a8a7c; font-weight:600; font-size:12px; text-align:right; padding:10px 12px;
+  border-bottom:1px solid #e6e4da; background:#f7f6ef; white-space:nowrap; }
+.fv4-tbl th:first-child, .fv4-tbl th:nth-child(2) { text-align:left; }
+.fv4-tbl td { color:#26261c; text-align:right; padding:13px 12px; border-bottom:1px solid #efeee4; white-space:nowrap; }
+.fv4-tbl td:first-child { text-align:left; font-weight:700; }
+.fv4-tbl td:nth-child(2) { text-align:left; }
+.fv4-tbl tr:hover td { background:#faf9f2; }
+.fv4-mix-bar { width:120px; height:6px; border-radius:3px; background:#e6e4da; position:relative; overflow:hidden; }
+.fv4-mix-bar b { position:absolute; left:0; top:0; height:100%; display:block; border-radius:3px; }
+.fv4-mix-plan { background:#17170f; }
+.fv4-mix-act  { background:#c8f231; }
+.fv4-mix-lbl { color:#9a9a8c; font-size:10.5px; margin-top:5px; }
+
+.fv4-bottom { display:flex; gap:16px; flex-wrap:wrap; }
+.fv4-mixpanel { flex:2 1 420px; border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:24px; display:flex; gap:30px; flex-wrap:wrap; }
+.fv4-mix-total { flex:0 0 190px; }
+.fv4-mix-amt { color:#17170f; font-size:31px; font-weight:800; letter-spacing:-.03em; margin:8px 0 6px; }
+.fv4-mix-list { flex:1 1 240px; }
+.fv4-mix-row { margin-bottom:11px; }
+.fv4-mix-row-top { display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; }
+.fv4-mix-row-top span:first-child { color:#26261c; font-weight:600; }
+.fv4-mix-row-top span:last-child { color:#26261c; font-weight:700; }
+.fv4-mix-track { height:7px; border-radius:4px; background:#eceadf; overflow:hidden; }
+.fv4-mix-track i { display:block; height:100%; background:#6b5ce7; border-radius:4px; }
+
+.fv4-nba { flex:1 1 300px; background:#ccf344; border-radius:12px; padding:24px; }
+.fv4-nba-eyebrow { color:#5a6b1c; font-size:11px; font-weight:700; letter-spacing:.12em; margin-bottom:6px; }
+.fv4-nba-title { color:#17170f; font-size:19px; font-weight:800; margin-bottom:16px; }
+.fv4-nba-item { border-top:1px solid rgba(23,23,15,.16); padding:13px 0; display:flex; gap:12px; }
+.fv4-nba-no { color:#5a6b1c; font-size:12px; font-weight:800; flex:none; padding-top:1px; }
+.fv4-nba-h { color:#17170f; font-size:14px; font-weight:700; margin-bottom:3px; }
+.fv4-nba-s { color:#4b5a1a; font-size:12px; line-height:1.5; }
+.fv4-chg { border:1px solid #e6e4da; border-left:3px solid #17170f; border-radius:10px; background:#fffef9;
+  padding:15px 18px; margin-bottom:14px; }
+.fv4-chg-h { color:#8a8a7c; font-size:11px; font-weight:700; letter-spacing:.1em; margin-bottom:10px; }
+.fv4-chg-item { color:#26261c; font-size:13.5px; padding:4px 0; display:flex; align-items:center; gap:9px; }
+.fv4-chg-dot { width:6px; height:6px; border-radius:50%; flex:none; }
+.fv4-chg-dot.down { background:#c0392b; }
+.fv4-chg-dot.up { background:#2f8f46; }
+.fv4-rev { border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:20px 24px; margin-top:16px; }
+.fv4-rev-item { border-top:1px solid #efeee4; padding:12px 0; }
+.fv4-rev-item:first-of-type { border-top:none; }
+.fv4-rev-h { color:#17170f; font-size:13.5px; font-weight:700; }
+.fv4-rev-s { color:#8a8a7c; font-size:12px; margin-top:3px; }
+.fv4-foot { display:flex; justify-content:space-between; color:#a3a396; font-size:11.5px; padding:14px 2px 0; flex-wrap:wrap; gap:8px; }
+</style>
+"""
+
+
+def _v4_canon_channel(name) -> str:
+    """어떤 소스에서 온 채널명이든 대표 채널명 하나로 모은다(계획 예산 ↔ 실제 집행 매칭용)."""
+    raw = str(name).strip()
+    low = raw.lower()
+    for canon, keywords in FUNNEL_CANON_RULES:
+        if any(kw.lower() in low for kw in keywords):
+            return canon
+    return raw
+
+
+def _v4_num(v, unit="") -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "-"
+    return f"{v:,.0f}{unit}"
+
+
+def _v4_compact(v) -> str:
+    """8,400,000 → 8.4M / 176,000 → 176K (퍼널 단계 숫자용)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "-"
+    v = float(v)
+    if abs(v) >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if abs(v) >= 10_000:
+        return f"{v / 1_000:.0f}K"
+    return f"{v:,.0f}"
+
+
+def _v4_money_short(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "-"
+    v = float(v)
+    if abs(v) >= 100_000_000:
+        return f"₩{v / 100_000_000:.1f}억"
+    if abs(v) >= 1_000_000:
+        return f"₩{v / 1_000_000:.1f}M"
+    return f"₩{v:,.0f}"
+
+
+def _v4_delta_html(cur, prev) -> str:
+    """직전 동일 길이 기간 대비 증감률. 표(render_html_table)와 같은 색 규칙(▲빨강/▼파랑)."""
+    if not prev or prev == 0 or pd.isna(prev):
+        return ""
+    pct = (cur - prev) / prev * 100
+    cls = "fv4-up" if pct >= 0 else "fv4-down"
+    arrow = "↗" if pct >= 0 else "↘"
+    return f'<span class="fv4-kpi-delta {cls}">{arrow} {abs(pct):.1f}%</span>'
+
+
+def _v4_verdict(roas: float, spend: float) -> tuple:
+    """(뱃지 라벨, 뱃지 클래스) — 표본이 작으면 단정하지 않고 '판단 보류'로 둔다
+    (performance-marketing-analysis 스킬의 소표본 처리 원칙)."""
+    if spend < FUNNEL_MIN_SPEND:
+        return "판단 보류", "hold"
+    if roas >= OPS_KPI_ROAS_HIGH:
+        return "증액 검토", "good"
+    if roas < OPS_KPI_ROAS_LOW:
+        return "효율 미달", "bad"
+    return "관찰", "warn"
+
+
+def _v4_funnel_html(stages: list, benchmarks: dict) -> str:
+    """stages: [(라벨, 값), ...] 순서대로. 앞 단계 대비 전환율을 사이에 표시하고,
+    벤치마크 미달 단계는 병목(⚠)으로 하이라이트한다."""
+    # 단계별 전환율과 벤치마크 대비 달성도를 먼저 구해서, '가장 많이 모자란 한 단계'만
+    # 병목으로 칠한다(미달 단계를 전부 칠하면 매번 두세 칸이 빨개져서 신호가 죽는다).
+    rates, ratios = {}, {}
+    for i, (label, value) in enumerate(stages):
+        if i == 0:
+            continue
+        prev_v = stages[i - 1][1]
+        rates[label] = (value / prev_v * 100) if prev_v else 0
+        bench = benchmarks.get(label)
+        if bench:
+            ratios[label] = rates[label] / bench
+    worst = min(ratios, key=ratios.get) if ratios else None
+    if worst is not None and ratios[worst] >= 1:
+        worst = None  # 모든 단계가 벤치마크 이상이면 병목 없음
+
+    parts = []
+    for i, (label, value) in enumerate(stages):
+        if i > 0:
+            parts.append(
+                f'<div class="fv4-conv{" low" if label == worst else ""}">{rates[label]:.1f}%</div>'
+            )
+        hot = label == worst
+        mark = " ⚠" if hot else ""
+        parts.append(
+            f'<div class="fv4-stage{" hot" if hot else ""}">'
+            f'<div class="fv4-stage-v">{_v4_compact(value)}</div>'
+            f'<div class="fv4-stage-l">{label}{mark}</div></div>'
+        )
+    return '<div class="fv4-funnel">' + "".join(parts) + "</div>"
+
+
+def _v4_mixbar_html(plan_pct: float, act_pct: float) -> str:
+    """계획 비중(검정) 위에 실제 집행 비중(라임)을 겹쳐 그린 미니 바."""
+    scale = max(plan_pct, act_pct, 1e-9)
+    pw = min(plan_pct / scale * 100, 100)
+    aw = min(act_pct / scale * 100, 100)
+    return (
+        f'<div class="fv4-mix-bar"><b class="fv4-mix-plan" style="width:{pw:.1f}%;opacity:.85"></b>'
+        f'<b class="fv4-mix-act" style="width:{aw:.1f}%;height:3px;top:auto;bottom:0"></b></div>'
+        f'<div class="fv4-mix-lbl">{plan_pct:.1f}% / {act_pct:.1f}%</div>'
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 의사결정 루프 헬퍼 — "어제와 뭐가 달라졌나 / 며칠째인가 / 저번 결정은 먹혔나"
+# ──────────────────────────────────────────────────────────────
+# 이 블록이 하는 일은 스냅샷(오늘 숫자가 얼마다)이 아니라 '변화'를 잡아내는 것이다.
+# 매일 같은 화면을 보는 사람에게 실제로 필요한 정보는 상태값이 아니라 델타라서,
+# 채널별 일별 이력(GA)에서 연속 추세와 어제 대비 변화를 뽑아 문장으로 만든다.
+CHANGE_MIN_USERS = 30        # 이보다 유입이 적은 채널은 변동률이 튀어서 변화 로그에서 제외
+CHANGE_ALERT_PCT = 20.0      # 이 이상 움직이면 '달라진 것'으로 본다
+STREAK_MIN_DAYS = 2          # 며칠 연속부터 표시할지
+
+
+def _loop_daily_by_channel(gci: pd.DataFrame) -> pd.DataFrame:
+    """GA 일별 데이터를 [날짜 × 매체] 단위로 합산한다(광고 매핑된 채널만)."""
+    if gci is None or gci.empty:
+        return pd.DataFrame(columns=["report_date", "channel", "users", "new_users", "conversions", "revenue"])
+    g = gci.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    g = g[g["channel"].notna()]
+    if g.empty:
+        return pd.DataFrame(columns=["report_date", "channel", "users", "new_users", "conversions", "revenue"])
+    g["channel"] = g["channel"].map(_v4_canon_channel)
+    return g.groupby(["report_date", "channel"], as_index=False).agg(
+        users=("users", "sum"), new_users=("new_users", "sum"),
+        conversions=("conversions", "sum"), revenue=("revenue", "sum"),
+    )
+
+
+def _loop_streak(series: list) -> int:
+    """[(날짜, 값)] 을 날짜 오름차순으로 받아, 마지막 값 기준으로 같은 방향(증가/감소)이
+    며칠 연속됐는지 센다. 부호가 바뀌면 거기서 끊는다."""
+    if len(series) < 2:
+        return 0
+    diffs = [series[i][1] - series[i - 1][1] for i in range(1, len(series))]
+    if not diffs or diffs[-1] == 0:
+        return 0
+    sign = 1 if diffs[-1] > 0 else -1
+    streak = 0
+    for d in reversed(diffs):
+        if (d > 0 and sign > 0) or (d < 0 and sign < 0):
+            streak += 1
+        else:
+            break
+    return streak * sign
+
+
+def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7) -> list:
+    """마지막 날(end) vs 그 전날을 비교해서 '달라진 것'만 문장으로 만든다.
+    연속 추세가 있으면 '3일째'를 같이 붙인다. [(종류, 문장), ...] 형태로 돌려준다."""
+    if daily is None or daily.empty:
+        return []
+    d = daily[daily["report_date"] <= end]
+    if d.empty:
+        return []
+    days = sorted(d["report_date"].unique())
+    if len(days) < 2:
+        return []
+    today_d, prev_d = days[-1], days[-2]
+    cur = d[d["report_date"] == today_d].set_index("channel")
+    prv = d[d["report_date"] == prev_d].set_index("channel")
+
+    logs = []
+    for ch in cur.index:
+        if ch not in prv.index:
+            continue
+        u_now, u_prev = float(cur.loc[ch, "users"]), float(prv.loc[ch, "users"])
+        if u_now < CHANGE_MIN_USERS and u_prev < CHANGE_MIN_USERS:
+            continue
+        hist = [(dd, float(d[(d["report_date"] == dd) & (d["channel"] == ch)]["users"].sum()))
+                for dd in days[-lookback:]]
+        streak = _loop_streak(hist)
+        streak_txt = f" ({abs(streak)}일째)" if abs(streak) >= STREAK_MIN_DAYS else ""
+
+        if u_prev > 0:
+            pct = (u_now - u_prev) / u_prev * 100
+            if abs(pct) >= CHANGE_ALERT_PCT:
+                kind = "down" if pct < 0 else "up"
+                logs.append((kind, f"{ch} 유입 {u_now:,.0f}명 ({pct:+.0f}%){streak_txt}"))
+
+        r_now, r_prev = float(cur.loc[ch, "revenue"]), float(prv.loc[ch, "revenue"])
+        if r_prev > 0:
+            rp = (r_now - r_prev) / r_prev * 100
+            if abs(rp) >= CHANGE_ALERT_PCT:
+                logs.append(("down" if rp < 0 else "up", f"{ch} 매출 {_v4_money_short(r_now)} ({rp:+.0f}%)"))
+
+    order = {"down": 0, "up": 1}
+    logs.sort(key=lambda x: order.get(x[0], 9))
+    return logs[:6]
+
+
+def _loop_signal_streak(daily: pd.DataFrame, channel: str, end: date, lookback: int = 7) -> str:
+    """특정 채널의 유입이 며칠 연속 빠지고 있는지(또는 오르고 있는지) 짧은 문구로."""
+    if daily is None or daily.empty:
+        return ""
+    d = daily[(daily["channel"] == channel) & (daily["report_date"] <= end)]
+    if d.empty:
+        return ""
+    days = sorted(d["report_date"].unique())[-lookback:]
+    hist = [(dd, float(d[d["report_date"] == dd]["users"].sum())) for dd in days]
+    s = _loop_streak(hist)
+    if abs(s) < STREAK_MIN_DAYS:
+        return ""
+    return f"유입 {abs(s)}일째 {'하락' if s < 0 else '상승'}"
+
+
+def _loop_review_decisions(decisions: pd.DataFrame, daily: pd.DataFrame, end: date) -> list:
+    """지난 결정들이 먹혔는지 되짚는다. 결정일 이전 7일 평균 vs 이후 7일 평균 유입/매출 비교.
+    [(채널, 결정문구, 결정일, 판정문장)] 형태."""
+    if decisions is None or decisions.empty or daily is None or daily.empty:
+        return []
+    out = []
+    for _, row in decisions.sort_values("decided_on", ascending=False).head(5).iterrows():
+        ch, when = row.get("channel"), pd.to_datetime(row.get("decided_on")).date()
+        d = daily[daily["channel"] == ch]
+        if d.empty:
+            continue
+        before = d[(d["report_date"] < when) & (d["report_date"] >= when - timedelta(days=7))]
+        after = d[(d["report_date"] >= when) & (d["report_date"] <= min(end, when + timedelta(days=7)))]
+        if before.empty or after.empty:
+            out.append((ch, row.get("action", ""), when, "아직 결과를 볼 만큼 기간이 지나지 않았습니다."))
+            continue
+        b_rev, a_rev = before["revenue"].mean(), after["revenue"].mean()
+        b_u, a_u = before["users"].mean(), after["users"].mean()
+        rev_p = ((a_rev - b_rev) / b_rev * 100) if b_rev else 0
+        usr_p = ((a_u - b_u) / b_u * 100) if b_u else 0
+        verdict = "개선" if rev_p > 5 else ("악화" if rev_p < -5 else "변화 없음")
+        out.append((ch, row.get("action", ""), when,
+                    f"결정 후 일평균 매출 {rev_p:+.0f}%, 유입 {usr_p:+.0f}% — {verdict}"))
+    return out
+
+
 def render_ga_channel_funnel_page(
     audience: pd.DataFrame,
     ga_channel_inflow: pd.DataFrame,
     inflow_revenue: pd.DataFrame,
     channels_weekly: pd.DataFrame,
     channel_mix: pd.DataFrame,
+    ga_daily: pd.DataFrame = None,
+    utm_map: pd.DataFrame = None,
+    decisions: pd.DataFrame = None,
 ):
-    """채널 퍼널 리포트(신규) — '신규 고객 발굴' / '매출 확보' 두 목적축으로 나눠서 채널별
-    성과를 보여준다. 노출/클릭/가입/구매/매출은 channel_audience_snapshot(매체 리포트 기준,
-    캠페인·그룹명으로 이미 신규/리타겟팅 분류됨)에서, 방문(신규유입)/재방문은
-    ga_channel_inflow(GA 신규/재방문 세션 기준)에서 가져와 붙인다. 채널 하나가 두 표에
-    동시에 나타날 수 있다 — 채널에 고정 라벨(발굴/회수/수확 등)을 붙이지 않고, 실제 캠페인
-    태그·GA 사용자 유형으로 사후 집계하는 방식이다."""
+    """채널 퍼널 리포트 V4 — '신규 고객 발굴' / '매출 확보' 두 목적축을 하나의 화면에서 본다.
+    노출·클릭·가입·구매·매출은 channel_audience_snapshot(대행사 캠페인 신규/리타겟 태그 기준),
+    방문·재방문은 ga_channel_inflow(GA 신규/재방문 사용자 기준), 계획 예산은 channel_mix_budget에서
+    가져와 채널명을 정규화(_v4_canon_channel)해서 한 줄에 놓는다."""
+    st.markdown(FUNNEL_V4_CSS, unsafe_allow_html=True)
+
+    # ── GA4 자동 연동 ── 엑셀 업로드 없이, 페이지를 열 때 저장된 마지막 날짜 이후만 받아 채운다.
+    # (Streamlit Community Cloud는 크론을 못 돌리므로 '열 때 자동 동기화'가 가장 현실적이다.)
+    ga_daily = ga_daily if ga_daily is not None else pd.DataFrame()
+    lookup = build_utm_channel_lookup(utm_map) if utm_map is not None and not utm_map.empty else {}
+    sync_note, sync_err = "", None
+    if "fv4_synced" not in st.session_state:
+        n, s, e, sync_err = sync_ga4_channel_daily(ga_daily, lookup)
+        st.session_state["fv4_synced"] = True
+        if n:
+            st.cache_data.clear()
+            ga_daily = load_table("ga_channel_daily")
+            sync_note = f"GA4 자동 동기화 {n:,}행 ({s} ~ {e})"
+
+    # GA4 API로 받은 데이터가 있으면 그걸 우선 쓰고, 없으면 기존 엑셀 업로드분으로 폴백한다.
+    ga_source_label = "GA4 API(자동)"
+    if ga_daily is not None and not ga_daily.empty:
+        ga_channel_inflow = ga4_daily_to_inflow_shape(ga_daily)
+    else:
+        ga_source_label = "GA 엑셀 업로드(수동)"
+
+    last_sync = None
+    if ga_daily is not None and not ga_daily.empty and "uploaded_at" in ga_daily.columns:
+        try:
+            last_sync = pd.to_datetime(ga_daily["uploaded_at"]).max()
+        except Exception:
+            last_sync = None
+    ga_last_date = None
+    if ga_channel_inflow is not None and not ga_channel_inflow.empty:
+        ga_last_date = pd.to_datetime(ga_channel_inflow["report_date"]).max().date()
+
+    c_fresh, c_btn = st.columns([5, 1])
+    with c_fresh:
+        bits = [f"데이터 출처: {ga_source_label}"]
+        if ga_last_date:
+            bits.append(f"GA 최신 일자 {ga_last_date}")
+        if last_sync is not None and pd.notna(last_sync):
+            bits.append(f"마지막 동기화 {last_sync:%m/%d %H:%M}")
+        if sync_note:
+            bits.append(sync_note)
+        st.caption(" · ".join(bits))
+    with c_btn:
+        if st.button("🔄 지금 동기화", key="fv4_sync_btn", use_container_width=True):
+            st.session_state.pop("fv4_synced", None)
+            st.cache_data.clear()
+            st.rerun()
+    if sync_err:
+        st.warning(
+            f"GA4 자동 연동이 아직 안 됐습니다 — {sync_err} "
+            "(설정 전까지는 기존 엑셀 업로드 데이터로 표시됩니다.)"
+        )
+    if ga_last_date and (date.today() - ga_last_date).days > 2:
+        st.warning(f"GA 데이터가 {(date.today() - ga_last_date).days}일 지연돼 있습니다 — 최신 수치가 아닐 수 있습니다.")
+
     if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
         st.info(
             "아직 데이터가 없습니다. 사이드바 '① 주간 리포트 업로드'(캠페인 신규/리타겟 분류) · "
@@ -5161,193 +5737,407 @@ def render_ga_channel_funnel_page(
         )
         return
 
-    date_candidates = []
+    date_pool = []
     if not audience.empty:
-        date_candidates.append(pd.to_datetime(audience["as_of_date"]))
+        date_pool.append(pd.to_datetime(audience["as_of_date"]))
     if not ga_channel_inflow.empty:
-        date_candidates.append(pd.to_datetime(ga_channel_inflow["report_date"]))
+        date_pool.append(pd.to_datetime(ga_channel_inflow["report_date"]))
     if not inflow_revenue.empty:
-        date_candidates.append(pd.to_datetime(inflow_revenue["report_date"]))
-    if not date_candidates:
+        date_pool.append(pd.to_datetime(inflow_revenue["report_date"]))
+    if not date_pool:
         st.info("선택 가능한 기간 데이터가 없습니다.")
         return
-    all_dates = pd.concat(date_candidates)
+    all_dates = pd.concat(date_pool)
     min_d, max_d = all_dates.min().date(), all_dates.max().date()
     st.subheader("🔎 기간 필터")
     start, end = period_filter(min_d, max_d, key="channel_funnel", default_preset="이번달")
 
-    # ── 북극성 지표 (사이트 전체, GA 기준 정확치) ──
-    st.markdown("##### ⭐ 북극성 지표 — 신규 고객 발굴 (사이트 전체, GA 기준)")
+    span = (end - start).days + 1
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=span - 1)
+
+    # ── 집계 ──
+    gci = pd.DataFrame()
+    if not ga_channel_inflow.empty:
+        gci = ga_channel_inflow.copy()
+        gci["report_date"] = pd.to_datetime(gci["report_date"]).dt.date
+    fg = gci[(gci["report_date"] >= start) & (gci["report_date"] <= end)] if not gci.empty else pd.DataFrame()
+    pg = gci[(gci["report_date"] >= prev_start) & (gci["report_date"] <= prev_end)] if not gci.empty else pd.DataFrame()
+
+    def _sum(df, col):
+        return float(df[col].sum()) if (df is not None and not df.empty and col in df.columns) else 0.0
+
+    users_now, users_prev = _sum(fg, "users"), _sum(pg, "users")
+    new_now, new_prev = _sum(fg, "new_users"), _sum(pg, "new_users")
+    conv_now, conv_prev = _sum(fg, "conversions"), _sum(pg, "conversions")
+    rev_now, rev_prev = _sum(fg, "revenue"), _sum(pg, "revenue")
+
+    bucket_share = {"광고": 0.0, "자연유입": 0.0, "기타": 0.0}
+    if not fg.empty:
+        tmp = fg.copy()
+        tmp["_b"] = tmp.apply(classify_ga_bucket, axis=1)
+        for b, v in tmp.groupby("_b")["users"].sum().items():
+            bucket_share[b] = float(v)
+    bucket_total = sum(bucket_share.values()) or 1.0
+
+    ad_spend_period = 0.0
     if not inflow_revenue.empty:
         ir = inflow_revenue.copy()
         ir["report_date"] = pd.to_datetime(ir["report_date"]).dt.date
         fir = ir[(ir["report_date"] >= start) & (ir["report_date"] <= end)]
-    else:
-        fir = pd.DataFrame()
-    if fir.empty:
-        st.info("'유입·매출 비교' 데이터가 없어 북극성 지표를 계산할 수 없습니다.")
-    else:
-        signups_sum = fir["signups"].sum()
-        new_paying_sum = fir["new_paying_customers"].sum()
-        cost_sum_site = fir["cost_incl_vat"].sum()
-        ga_revenue_sum = fir["ga_revenue"].sum()
-        signup_cac = (cost_sum_site / signups_sum) if signups_sum > 0 else 0
-        first_purchase_cac = (cost_sum_site / new_paying_sum) if new_paying_sum > 0 else 0
-        site_ga_roas = (ga_revenue_sum / cost_sum_site * 100) if cost_sum_site > 0 else 0
-        n1, n2, n3, n4 = st.columns(4)
-        n1.metric("신규가입 수", f"{signups_sum:,.0f} 명")
-        n2.metric("신규가입 CAC", f"{signup_cac:,.0f} 원")
-        n3.metric("신규 첫구매 CAC", f"{first_purchase_cac:,.0f} 원")
-        n4.metric("사이트 전체 GA-ROAS", f"{site_ga_roas:,.1f} %")
-        st.caption(
-            f"KPI 판정: {_ops_kpi_status(site_ga_roas)} (GA-ROAS 목표 200~300%, 300%+가 목표) · "
-            "사이트 전체(모든 채널 합산) 기준 정확치입니다."
-        )
+        ad_spend_period = float(fir["cost_incl_vat"].sum()) if not fir.empty else 0.0
+    # GA-매출 전체(자연유입 포함)를 광고비로 나누면 범위가 안 맞으므로, ROAS는 '광고' 버킷
+    # 매출만 광고비로 나눈다(유입·매출 비교 페이지에서 이미 정리된 원칙과 동일).
+    ad_revenue_period = 0.0
+    if not fg.empty:
+        _t = fg.copy()
+        _t["_b"] = _t.apply(classify_ga_bucket, axis=1)
+        ad_revenue_period = float(_t.loc[_t["_b"] == "광고", "revenue"].sum())
+    site_roas = (ad_revenue_period / ad_spend_period * 100) if ad_spend_period > 0 else 0.0
 
-    # ── ① 오늘의 전체 그림 — 대분류별 유입 ──
-    st.markdown("##### ① 오늘의 전체 그림 — 대분류별 유입 (광고 / 자연유입 / 기타)")
-    if ga_channel_inflow.empty:
-        st.info("GA 매체별 유입 데이터가 없어 대분류 표를 계산할 수 없습니다.")
-    else:
-        gci = ga_channel_inflow.copy()
-        gci["report_date"] = pd.to_datetime(gci["report_date"]).dt.date
-        fgci = gci[(gci["report_date"] >= start) & (gci["report_date"] <= end)]
-        if fgci.empty:
-            st.info("선택한 기간에 GA 유입 데이터가 없습니다.")
-        else:
-            fgci = fgci.copy()
-            fgci["대분류"] = fgci.apply(classify_ga_bucket, axis=1)
-            bucket_agg = fgci.groupby("대분류", as_index=False).agg(
-                users=("users", "sum"), new_users=("new_users", "sum"),
-                returning_users=("returning_users", "sum"),
-                conversions=("conversions", "sum"), revenue=("revenue", "sum"),
-            )
-            order = {"광고": 0, "자연유입": 1, "기타": 2}
-            bucket_agg["_order"] = bucket_agg["대분류"].map(order).fillna(9)
-            bucket_agg = bucket_agg.sort_values("_order").drop(columns="_order")
-            rename_map = {
-                "users": "총유입", "new_users": "신규유입", "returning_users": "재방문유입",
-                "conversions": "GA구매건수", "revenue": "GA매출",
-            }
-            total_row = pd.DataFrame([{
-                "대분류": "전체 합계",
-                "users": bucket_agg["users"].sum(), "new_users": bucket_agg["new_users"].sum(),
-                "returning_users": bucket_agg["returning_users"].sum(),
-                "conversions": bucket_agg["conversions"].sum(), "revenue": bucket_agg["revenue"].sum(),
-            }])
-            show_bucket = format_display(bucket_agg.rename(columns=rename_map))
-            show_total = format_display(total_row.rename(columns=rename_map))
-            bcol, _spacer1 = st.columns([2, 1])
-            with bcol:
-                render_html_table(pd.concat([show_total, show_bucket], ignore_index=True))
-            st.caption("'신규유입'은 GA 신규 세션 기준이며, 위 북극성 지표의 '신규가입 수'와는 다른 지표입니다(방문 단계 선행지표).")
+    # 채널 단위 — 대표 채널명으로 정규화해서 합산
+    aud_new = _funnel_from_audience(audience, start, end, "신규")
+    aud_re = _funnel_from_audience(audience, start, end, "리타겟팅")
+    visits = _ga_visits_by_channel(ga_channel_inflow, start, end)
+    spend_all = _channel_spend_total(channels_weekly, start, end)
+    # 계획 비중은 '연간' 채널 믹스 기준으로 잡는다 — 표 헤더가 '연간 계획 / 실제 집행'이고,
+    # 기간을 좁힐 때마다 계획 비중까지 흔들리면 계획 대비 이탈을 판단할 수 없기 때문이다.
+    mix_ratio = pd.DataFrame(columns=["channel", "budget", "budget_ratio"])
+    if channel_mix is not None and not channel_mix.empty:
+        _m = channel_mix.copy()
+        _m["year"] = pd.to_numeric(_m["year"], errors="coerce")
+        _m = _m[_m["year"] == _m["year"].max()]
+        mix_ratio = _m.groupby("channel", as_index=False).agg(budget=("budget", "sum"))
+        _yt = mix_ratio["budget"].sum()
+        mix_ratio["budget_ratio"] = np.where(_yt > 0, mix_ratio["budget"] / _yt * 100, 0)
 
-    # ── ② 채널 믹스 — 계획 대비 실제 집행 ──
-    st.markdown("##### ② 채널 믹스 — 계획(연예산) 대비 실제 집행")
-    mix_ratio = _channel_mix_ratio(channel_mix, start, end)
-    spend_total = _channel_spend_total(channels_weekly, start, end)
-    if mix_ratio.empty:
-        st.info("채널 믹스(연간 예산) 데이터가 없습니다. 사이드바 '④ 채널 믹스 업로드'에서 파일을 올려주세요.")
-    else:
-        mix_view = mix_ratio.merge(spend_total, on="channel", how="left")
-        spend_total_sum = mix_view["cost_incl_vat"].fillna(0).sum()
-        mix_view["실제집행비중"] = np.where(
-            spend_total_sum > 0, mix_view["cost_incl_vat"].fillna(0) / spend_total_sum * 100, 0
-        )
-        mix_view["이탈폭"] = mix_view["실제집행비중"] - mix_view["budget_ratio"]
-        mix_view = mix_view.sort_values("budget_ratio", ascending=False)
-        mix_show = mix_view[["channel", "budget_ratio", "실제집행비중", "이탈폭"]].copy()
-        mix_show.columns = ["채널", "연예산비중(%)", "실제집행비중(%)", "이탈폭(%p)"]
-        mix_show["연예산비중(%)"] = mix_view["budget_ratio"].map(lambda v: f"{v:.1f}")
-        mix_show["실제집행비중(%)"] = mix_view["실제집행비중"].map(lambda v: f"{v:.1f}")
-        mix_show["이탈폭(%p)"] = mix_view["이탈폭"].map(lambda v: f"{chr(9650) if v >= 0 else chr(9660)}{abs(v):.1f}")
-        mcol, _spacer2 = st.columns([2, 1])
-        with mcol:
-            render_html_table(mix_show)
-        st.caption("실제집행비중은 channel_weekly(매체 리포트 원본 광고비, 신규+리타겟 합계) 기준이며, 선택한 기간과 겹치는 월의 예산만 비교합니다.")
+    for _df in (aud_new, aud_re, visits, spend_all, mix_ratio):
+        if _df is not None and not _df.empty:
+            _df["channel"] = _df["channel"].map(_v4_canon_channel)
 
-    # ── ③ / ④ 채널별 두 퍼널 ──
-    audience_new = _funnel_from_audience(audience, start, end, "신규")
-    audience_retarget = _funnel_from_audience(audience, start, end, "리타겟팅")
-    ga_visits = _ga_visits_by_channel(ga_channel_inflow, start, end)
+    def _regroup(df, how):
+        if df is None or df.empty:
+            return df
+        return df.groupby("channel", as_index=False).agg(how)
 
-    def _build_funnel_table(base: pd.DataFrame, visit_col: str) -> pd.DataFrame:
-        if base.empty:
+    aud_new = _regroup(aud_new, {c: "sum" for c in ["impressions", "clicks", "cost_incl_vat", "signups", "conversions", "revenue"]})
+    aud_re = _regroup(aud_re, {c: "sum" for c in ["impressions", "clicks", "cost_incl_vat", "signups", "conversions", "revenue"]})
+    visits = _regroup(visits, {"new_users": "sum", "returning_users": "sum"})
+    spend_all = _regroup(spend_all, {"cost_incl_vat": "sum"})
+    if mix_ratio is not None and not mix_ratio.empty:
+        mix_ratio = mix_ratio.groupby("channel", as_index=False).agg(budget=("budget", "sum"))
+        _tot = mix_ratio["budget"].sum()
+        mix_ratio["budget_ratio"] = np.where(_tot > 0, mix_ratio["budget"] / _tot * 100, 0)
+
+    spend_sum = float(spend_all["cost_incl_vat"].sum()) if (spend_all is not None and not spend_all.empty) else 0.0
+
+    def _build(base, visit_col):
+        if base is None or base.empty:
             return pd.DataFrame()
-        df = base.merge(ga_visits[["channel", visit_col]], on="channel", how="left")
+        df = base.copy()
+        if visits is not None and not visits.empty:
+            df = df.merge(visits[["channel", visit_col]], on="channel", how="left")
+        else:
+            df[visit_col] = np.nan
         df = add_kpis(df)
         df["signup_cac"] = np.where(df["signups"] > 0, df["cost_incl_vat"] / df["signups"], 0)
-        return df.sort_values("cost_incl_vat", ascending=False)
+        if mix_ratio is not None and not mix_ratio.empty:
+            df = df.merge(mix_ratio[["channel", "budget_ratio"]], on="channel", how="left")
+        else:
+            df["budget_ratio"] = np.nan
+        if spend_all is not None and not spend_all.empty:
+            df = df.merge(spend_all.rename(columns={"cost_incl_vat": "_spend_all"}), on="channel", how="left")
+        else:
+            df["_spend_all"] = df["cost_incl_vat"]
+        df["_spend_all"] = df["_spend_all"].fillna(df["cost_incl_vat"])
+        df["act_ratio"] = np.where(spend_sum > 0, df["_spend_all"] / spend_sum * 100, 0)
+        df["drift"] = df["act_ratio"] - df["budget_ratio"].fillna(df["act_ratio"])
+        return df.sort_values("budget_ratio", ascending=False, na_position="last")
 
-    new_funnel = _build_funnel_table(audience_new, "new_users")
-    retarget_funnel = _build_funnel_table(audience_retarget, "returning_users")
+    new_df = _build(aud_new, "new_users")
+    re_df = _build(aud_re, "returning_users")
 
-    st.markdown("##### ③ 신규 고객 발굴 퍼널 (채널별)")
-    st.caption("노출/클릭/가입/구매/매출: 대행사 캠페인 신규 태그 기준 · 방문(신규유입): GA 신규 세션 기준")
-    if new_funnel.empty:
-        st.info("선택한 기간에 신규 발굴 캠페인 데이터가 없습니다.")
+    # ── 액션 신호 ──
+    signals = []
+    pool = new_df if not new_df.empty else re_df
+    if not pool.empty:
+        scored = pool[pool["cost_incl_vat"] >= FUNNEL_MIN_SPEND]
+        if not scored.empty:
+            worst = scored.sort_values("roas").iloc[0]
+            if worst["roas"] < OPS_KPI_ROAS_LOW:
+                signals.append(("bad", "효율 미달", worst["channel"],
+                                f"{worst['channel']} 신규 ROAS {worst['roas']:.0f}%",
+                                f"목표 {OPS_KPI_ROAS_LOW:.0f}% 미만 · 소재/타겟팅 점검 필요"))
+            best = scored.sort_values("roas", ascending=False).iloc[0]
+            if best["roas"] >= OPS_KPI_ROAS_HIGH:
+                signals.append(("good", "증액 후보", best["channel"],
+                                f"{best['channel']} 신규 ROAS {best['roas']:.0f}%",
+                                f"목표 하단({OPS_KPI_ROAS_LOW:.0f}%) 대비 {best['roas'] / OPS_KPI_ROAS_LOW:.1f}배 · 단계적 증액 검토"))
+        # 이미 다른 신호로 잡힌 채널은 건너뛴다 — 배너 3칸이 같은 매체로 채워지면
+        # "볼 곳이 세 군데"라는 신호의 의미가 없어진다.
+        used = {ch for _, _, ch, _, _ in signals}
+        drifted = pool[(pool["drift"].abs() >= FUNNEL_MIX_DRIFT_PP) & (~pool["channel"].isin(used))]
+        if not drifted.empty:
+            d = drifted.reindex(drifted["drift"].abs().sort_values(ascending=False).index).iloc[0]
+            signals.append(("warn", "예산 이탈", d["channel"],
+                            f"{d['channel']} 집행 {d['drift']:+.1f}%p",
+                            "연간 계획 비중 대비 · 예산 소진 속도 점검"))
+    if not signals:
+        signals.append(("hold", "이상 없음", "", "긴급 신호 없음", "목표 구간 안에서 운영 중입니다"))
+
+    # 헤드라인은 "A 효율을 점검하고, B 증액 여지를 확인하고, C 예산 속도를 조정하세요." 처럼
+    # 마지막 절만 종결어미가 되도록 '하고'로 이어 붙였다가 끝을 '하세요.'로 바꾼다.
+    verb = {"bad": "효율을 점검하고", "good": "증액 여지를 확인하고", "warn": "예산 속도를 조정하고"}
+    head_bits = [f"{ch} {verb[k]}" for k, _, ch, _, _ in signals if k in verb]
+    if head_bits:
+        headline = ",<br>".join(head_bits)
+        headline = headline[: -len("하고")] + "하세요." if headline.endswith("하고") else headline + "."
     else:
-        show_new = new_funnel[[
-            "channel", "impressions", "clicks", "new_users", "signups", "conversions",
-            "revenue", "signup_cac", "roas",
-        ]].copy()
-        show_new.columns = [
-            "채널", "노출", "클릭", "방문(신규유입)", "회원가입", "첫구매", "신규매출",
-            "신규가입CAC", "신규 ROAS(%)",
-        ]
-        for c in ["노출", "클릭", "방문(신규유입)", "회원가입", "첫구매", "신규매출", "신규가입CAC"]:
-            show_new[c] = show_new[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "-")
-        show_new["신규 ROAS(%)"] = show_new["신규 ROAS(%)"].map(lambda v: f"{v:,.1f}")
-        render_html_table(show_new)
-        for _, row in new_funnel.iterrows():
-            status = _ops_kpi_status(row["roas"])
-            if status == "목표 미달":
-                st.markdown(f"🔻 {row['channel']}: 신규 ROAS {row['roas']:.0f}% — {status}")
-            elif status == "목표 초과 달성":
-                st.markdown(f"▲ {row['channel']}: 신규 ROAS {row['roas']:.0f}% — {status}, 단계적 증액 후보")
+        headline = "오늘은 큰 이상 신호가 없습니다."
 
-    st.markdown("##### ④ 매출 확보 퍼널 (채널별)")
-    st.caption("재노출/재클릭/재구매/재구매매출: 대행사 캠페인 리타겟 태그 기준 · 재방문: GA 재방문 세션 기준")
-    if retarget_funnel.empty:
-        st.info("선택한 기간에 리타겟팅 캠페인 데이터가 없습니다.")
-    else:
-        show_re = retarget_funnel[[
-            "channel", "impressions", "clicks", "returning_users", "conversions", "revenue", "roas",
-        ]].copy()
-        show_re.columns = ["채널", "재노출", "재클릭", "재방문", "재구매", "재구매매출", "재구매 ROAS(%)"]
-        for c in ["재노출", "재클릭", "재방문", "재구매", "재구매매출"]:
-            show_re[c] = show_re[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "-")
-        show_re["재구매 ROAS(%)"] = show_re["재구매 ROAS(%)"].map(lambda v: f"{v:,.1f}")
-        render_html_table(show_re)
-        for _, row in retarget_funnel.iterrows():
-            status = _ops_kpi_status(row["roas"])
-            if status == "목표 미달":
-                st.markdown(f"🔻 {row['channel']}: 재구매 ROAS {row['roas']:.0f}% — {status}")
-            elif status == "목표 초과 달성":
-                st.markdown(f"▲ {row['channel']}: 재구매 ROAS {row['roas']:.0f}% — {status}, 단계적 증액 후보")
-
-    st.markdown("#### 💬 코멘트")
-    comment_lines = []
-    if not fir.empty:
-        comment_lines.append(
-            f"선택 기간 신규가입 {signups_sum:,.0f}명(신규가입CAC {signup_cac:,.0f}원), "
-            f"신규 첫구매 CAC {first_purchase_cac:,.0f}원, 사이트 전체 GA-ROAS {site_ga_roas:.1f}%입니다."
+    # 신호마다 '며칠째'를 덧붙인다 — 오늘 처음 빨개진 것과 5일째 빨간 것은 액션이 다르다.
+    _daily_for_streak = _loop_daily_by_channel(gci)
+    sig_html = ""
+    for k, chip, _ch, t, s in signals:
+        streak_txt = _loop_signal_streak(_daily_for_streak, _ch, end) if _ch else ""
+        extra = f' · {streak_txt}' if streak_txt else ""
+        sig_html += (
+            f'<div class="fv4-signal"><span class="fv4-chip {k}">{chip}</span>'
+            f'<div class="fv4-signal-title">{t}</div><div class="fv4-signal-sub">{s}{extra}</div></div>'
         )
-    if not new_funnel.empty:
-        worst_new = new_funnel.sort_values("roas").iloc[0]
-        comment_lines.append(f"신규 발굴 퍼널에서 ROAS가 가장 낮은 채널은 {worst_new['channel']}({worst_new['roas']:.0f}%)입니다.")
-    if not retarget_funnel.empty:
-        best_re = retarget_funnel.sort_values("roas", ascending=False).iloc[0]
-        comment_lines.append(f"매출 확보 퍼널에서 ROAS가 가장 높은 채널은 {best_re['channel']}({best_re['roas']:.0f}%)입니다.")
-    if comment_lines:
-        st.markdown(" ".join(comment_lines))
     st.markdown(
-        _ops_next_action(
-            "🔻 표시된 채널은 예산 축소 또는 소재·타겟팅 재검토를, ▲ 표시된 채널은 단계적 증액(10~20%)을 검토해보세요. "
-            "소재 문제는 '소재별 성과', 캠페인/타겟팅 문제는 '타겟팅별 성과' 탭에서 이어서 확인할 수 있습니다."
-        ),
+        '<div class="fv4-wrap"><div class="fv4-banner">'
+        '<div class="fv4-banner-lead">'
+        f'<div class="fv4-count">{len(signals)}</div>'
+        f'<div><div class="fv4-banner-eyebrow">오늘의 액션 신호</div>'
+        f'<div class="fv4-banner-title">{headline}</div></div></div>'
+        f'<div class="fv4-signals">{sig_html}</div></div></div>',
         unsafe_allow_html=True,
     )
+
+    # ── 어제 대비 달라진 것 ── 스냅샷이 아니라 '변화'를 먼저 보여준다.
+    daily_ch = _loop_daily_by_channel(gci)
+    change_logs = _loop_change_log(daily_ch, end)
+    if change_logs:
+        items = "".join(
+            f'<div class="fv4-chg-item"><span class="fv4-chg-dot {k}"></span>{t}</div>'
+            for k, t in change_logs
+        )
+        st.markdown(
+            f'<div class="fv4-wrap"><div class="fv4-chg"><div class="fv4-chg-h">어제 대비 달라진 것</div>{items}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── KPI 스트립 ──
+    new_ratio = (new_now / users_now * 100) if users_now else 0
+    ad_p = bucket_share["광고"] / bucket_total * 100
+    org_p = bucket_share["자연유입"] / bucket_total * 100
+    etc_p = bucket_share["기타"] / bucket_total * 100
+    st.markdown(
+        '<div class="fv4-wrap"><div class="fv4-kpis">'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 유입</div>'
+        f'<div class="fv4-kpi-value">{users_now:,.0f}{_v4_delta_html(users_now, users_prev)}</div>'
+        f'<div class="fv4-kpi-sub">명</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">신규 유입</div>'
+        f'<div class="fv4-kpi-value">{new_now:,.0f}{_v4_delta_html(new_now, new_prev)}</div>'
+        f'<div class="fv4-kpi-sub">{new_ratio:.1f}%</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">GA 구매</div>'
+        f'<div class="fv4-kpi-value">{conv_now:,.0f}{_v4_delta_html(conv_now, conv_prev)}</div>'
+        f'<div class="fv4-kpi-sub">건</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">GA 매출</div>'
+        f'<div class="fv4-kpi-value">{_v4_money_short(rev_now)}{_v4_delta_html(rev_now, rev_prev)}</div>'
+        f'<div class="fv4-kpi-sub">광고 ROAS {site_roas:.0f}%</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">유입 구성</div>'
+        f'<div class="fv4-stack"><i style="width:{ad_p:.1f}%;background:#17170f"></i>'
+        f'<i style="width:{org_p:.1f}%;background:#6b5ce7"></i>'
+        f'<i style="width:{etc_p:.1f}%;background:#cfcdbf"></i></div>'
+        f'<div class="fv4-kpi-sub">광고 {ad_p:.0f}% · 자연 {org_p:.0f}% · 기타 {etc_p:.0f}%</div></div>'
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 목적별 퍼널 (토글) ──
+    st.markdown(
+        '<div class="fv4-wrap"><div class="fv4-eyebrow">TWO FUNNELS, ONE DECISION</div>'
+        '<div class="fv4-h2">목적별 퍼널 성과</div></div>',
+        unsafe_allow_html=True,
+    )
+    if "fv4_mode" not in st.session_state:
+        st.session_state["fv4_mode"] = "신규 고객 발굴"
+    _sp, c_new, c_re = st.columns([6, 2, 2])
+    with c_new:
+        if st.button("신규 고객 발굴", key="fv4_btn_new", use_container_width=True,
+                     type="primary" if st.session_state["fv4_mode"] == "신규 고객 발굴" else "secondary"):
+            st.session_state["fv4_mode"] = "신규 고객 발굴"
+            st.rerun()
+    with c_re:
+        if st.button("매출 확보", key="fv4_btn_re", use_container_width=True,
+                     type="primary" if st.session_state["fv4_mode"] == "매출 확보" else "secondary"):
+            st.session_state["fv4_mode"] = "매출 확보"
+            st.rerun()
+
+    mode = st.session_state["fv4_mode"]
+    is_new = mode == "신규 고객 발굴"
+    cur = new_df if is_new else re_df
+
+    if cur.empty:
+        st.info(f"선택한 기간에 '{mode}' 퍼널 데이터가 없습니다.")
+    else:
+        if is_new:
+            stages = [
+                ("노출", cur["impressions"].sum()), ("클릭", cur["clicks"].sum()),
+                ("방문", cur["new_users"].fillna(0).sum()), ("가입", cur["signups"].sum()),
+                ("첫구매", cur["conversions"].sum()),
+            ]
+            bench = FUNNEL_BENCHMARK_NEW
+            badge, title, sub = "ACQUISITION", "노출에서 첫구매까지", "계획한 채널 믹스와 실제 성과를 한 줄에서 비교합니다."
+            head = ["채널", "연간 계획 / 실제 집행", "방문", "회원가입", "첫구매", "가입 CAC", "신규 ROAS", "판정"]
+        else:
+            stages = [
+                ("재노출", cur["impressions"].sum()), ("재클릭", cur["clicks"].sum()),
+                ("재방문", cur["returning_users"].fillna(0).sum()), ("재구매", cur["conversions"].sum()),
+            ]
+            bench = FUNNEL_BENCHMARK_RETURN
+            badge, title, sub = "RETENTION", "재노출에서 재구매까지", "이미 방문한 고객이 다시 사는 구간을 봅니다."
+            head = ["채널", "연간 계획 / 실제 집행", "재방문", "재구매", "재구매 매출", "재구매 ROAS", "판정"]
+
+        rows = []
+        for _, r in cur.iterrows():
+            label, cls = _v4_verdict(r["roas"], r["cost_incl_vat"])
+            plan = 0.0 if pd.isna(r.get("budget_ratio")) else float(r["budget_ratio"])
+            bar = _v4_mixbar_html(plan, float(r["act_ratio"]))
+            if is_new:
+                cells = [
+                    _v4_num(r["new_users"]), _v4_num(r["signups"]), _v4_num(r["conversions"]),
+                    f"₩{r['signup_cac']:,.0f}" if r["signup_cac"] else "-", f"{r['roas']:.0f}%",
+                ]
+            else:
+                cells = [
+                    _v4_num(r["returning_users"]), _v4_num(r["conversions"]),
+                    f"₩{r['revenue']:,.0f}", f"{r['roas']:.0f}%",
+                ]
+            rows.append(
+                f"<tr><td>{r['channel']}</td><td>{bar}</td>"
+                + "".join(f"<td>{c}</td>" for c in cells)
+                + f'<td><span class="fv4-chip {cls}">{label}</span></td></tr>'
+            )
+        st.markdown(
+            '<div class="fv4-wrap"><div class="fv4-card">'
+            f'<span class="fv4-badge-dark">{badge}</span>'
+            f'<div class="fv4-card-title">{title}</div><div class="fv4-card-sub">{sub}</div>'
+            + _v4_funnel_html(stages, bench)
+            + '<table class="fv4-tbl"><thead><tr>'
+            + "".join(f"<th>{h}</th>" for h in head)
+            + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div></div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"⚠ 표시는 해당 단계 전환율이 벤치마크 미만이라는 뜻입니다 · "
+            f"노출·클릭·가입·구매·매출 출처: 대행사 리포트(캠페인 {'신규' if is_new else '리타겟'} 태그) · "
+            f"방문 출처: {ga_source_label} · 광고비 {FUNNEL_MIN_SPEND:,}원 미만은 '판단 보류'"
+        )
+        with st.expander("🔍 판정 근거 보기 (왜 이 판정인지)"):
+            for _, r in cur.iterrows():
+                label, _cls = _v4_verdict(r["roas"], r["cost_incl_vat"])
+                plan = 0.0 if pd.isna(r.get("budget_ratio")) else float(r["budget_ratio"])
+                reason = (
+                    f"ROAS {r['roas']:.0f}% (목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%), "
+                    f"광고비 {r['cost_incl_vat']:,.0f}원, 매출 {r['revenue']:,.0f}원, "
+                    f"계획 비중 {plan:.1f}% 대비 집행 {r['act_ratio']:.1f}% ({r['drift']:+.1f}%p)"
+                )
+                if r["cost_incl_vat"] < FUNNEL_MIN_SPEND:
+                    reason += f" · 광고비가 {FUNNEL_MIN_SPEND:,}원 미만이라 판단 보류"
+                st.markdown(f"**{r['channel']} → {label}**  \n{reason}")
+
+    # ── 하단: 채널 믹스 + Next Best Action ──
+    mix_rows = ""
+    mix_total_amt = float(mix_ratio["budget"].sum()) if (mix_ratio is not None and not mix_ratio.empty) else 0.0
+    if mix_ratio is not None and not mix_ratio.empty:
+        top_mix = mix_ratio.sort_values("budget_ratio", ascending=False).head(6)
+        top_share = float(top_mix["budget_ratio"].max()) or 1.0
+        for _, m in top_mix.iterrows():
+            w = m["budget_ratio"] / top_share * 100
+            mix_rows += (
+                f'<div class="fv4-mix-row"><div class="fv4-mix-row-top">'
+                f'<span>{m["channel"]}</span><span>{m["budget_ratio"]:.1f}%</span></div>'
+                f'<div class="fv4-mix-track"><i style="width:{w:.1f}%"></i></div></div>'
+            )
+    nba_items = ""
+    for i, (kind, chip, ch, title, sub) in enumerate(signals[:3], start=1):
+        if kind == "bad":
+            act, det = f"{ch} 신규발굴 예산 10% 보류", "가입 전환율 회복 전까지 증액 중단"
+        elif kind == "good":
+            act, det = f"{ch} 예산 +10% 테스트", f"ROAS {OPS_KPI_ROAS_HIGH:.0f}% 이상 유지 여부를 48시간 관찰"
+        elif kind == "warn":
+            act, det = f"{ch} 집행 속도 조정", "월말 잔여 예산 기준으로 일예산 재설정"
+        else:
+            act, det = "현행 유지", "다음 리포트까지 현재 배분 유지"
+        nba_items += (
+            f'<div class="fv4-nba-item"><div class="fv4-nba-no">{i:02d}</div>'
+            f'<div><div class="fv4-nba-h">{act}</div><div class="fv4-nba-s">{det}</div></div></div>'
+        )
+    mix_year = int(pd.to_numeric(channel_mix["year"], errors="coerce").max()) \
+        if (channel_mix is not None and not channel_mix.empty) else start.year
+    mix_list_html = mix_rows or '<div class="fv4-card-sub">채널 믹스 파일을 올리면 표시됩니다.</div>'
+
+    st.markdown(
+        '<div class="fv4-wrap"><div class="fv4-bottom">'
+        '<div class="fv4-mixpanel"><div class="fv4-mix-total">'
+        f'<div class="fv4-eyebrow">{mix_year} CHANNEL MIX</div>'
+        f'<div class="fv4-mix-amt">{_v4_money_short(mix_total_amt)}</div>'
+        '<div class="fv4-kpi-sub">연간 매체 예산</div></div>'
+        f'<div class="fv4-mix-list">{mix_list_html}</div>'
+        "</div>"
+        '<div class="fv4-nba"><div class="fv4-nba-eyebrow">NEXT BEST ACTION</div>'
+        '<div class="fv4-nba-title">오늘의 예산 판단</div>'
+        f"{nba_items}</div>"
+        "</div>"
+        '<div class="fv4-foot"><span>STCO PERFORMANCE · 내부 의사결정용</span>'
+        f"<span>{start:%Y-%m-%d} ~ {end:%Y-%m-%d}</span></div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 의사결정 기록 & 회고 ──
+    # 대시보드를 보고 내린 결정을 남겨두면, 다음에 열었을 때 그 결정이 먹혔는지 자동으로
+    # 되짚어준다. 이게 있어야 '보기만 하는 대시보드'가 아니라 루프가 닫힌다.
+    st.markdown("---")
+    st.markdown("#### 🧾 의사결정 기록 & 회고")
+    decisions = decisions if decisions is not None else pd.DataFrame()
+
+    reviews = _loop_review_decisions(decisions, daily_ch, end)
+    if reviews:
+        items = "".join(
+            f'<div class="fv4-rev-item"><div class="fv4-rev-h">{ch} · {act}</div>'
+            f'<div class="fv4-rev-s">{when} 결정 → {verdict}</div></div>'
+            for ch, act, when, verdict in reviews
+        )
+        st.markdown(f'<div class="fv4-wrap"><div class="fv4-rev">{items}</div></div>', unsafe_allow_html=True)
+    else:
+        st.caption("아직 기록된 결정이 없습니다. 아래에서 오늘 내린 결정을 남겨두면 다음 주에 결과를 자동으로 되짚어드립니다.")
+
+    with st.expander("➕ 오늘 내린 결정 기록하기"):
+        ch_options = sorted(set(pd.concat([new_df, re_df])["channel"].dropna())) if not (new_df.empty and re_df.empty) else []
+        with st.form("fv4_decision_form", clear_on_submit=True):
+            d1, d2 = st.columns([1, 2])
+            with d1:
+                dch = st.selectbox("매체", ch_options if ch_options else ["(없음)"], key="fv4_dec_ch")
+                dwhen = st.date_input("결정일", value=date.today(), key="fv4_dec_when")
+            with d2:
+                dact = st.text_input("결정 내용", placeholder="예: 메타 신규발굴 예산 10% 축소", key="fv4_dec_act")
+                dnote = st.text_input("근거 / 메모", placeholder="예: ROAS 192%로 3일 연속 목표 미달", key="fv4_dec_note")
+            if st.form_submit_button("기록 저장", type="primary"):
+                if not dact.strip():
+                    st.warning("결정 내용을 입력해주세요.")
+                else:
+                    row = pd.DataFrame([{
+                        "decided_on": str(dwhen), "channel": dch, "action": dact.strip(),
+                        "note": dnote.strip() or None,
+                    }])
+                    n = save_table("decision_log", row, "decided_on,channel,action", "대시보드 입력")
+                    if n:
+                        st.cache_data.clear()
+                        st.success("기록했습니다. 다음 기간에 결과를 자동으로 되짚어드립니다.")
+                        st.rerun()
 
 
 def render_ga4_page():
@@ -6055,6 +6845,9 @@ def main():
     channels_weekly = load_table("channel_weekly")
     budget = load_table("channel_budget")
     channel_mix = load_table("channel_mix_budget")
+    ga_daily = load_table("ga_channel_daily")      # GA4 API 자동 수집분
+    utm_map = load_table("utm_channel_map")
+    decisions = load_table("decision_log")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -6082,7 +6875,10 @@ def main():
             inflow_revenue, ga_channel_inflow, agency_notes,
         )
     elif page == "채널 퍼널 리포트":
-        render_ga_channel_funnel_page(audience, ga_channel_inflow, inflow_revenue, channels_weekly, channel_mix)
+        render_ga_channel_funnel_page(
+            audience, ga_channel_inflow, inflow_revenue, channels_weekly, channel_mix,
+            ga_daily=ga_daily, utm_map=utm_map, decisions=decisions,
+        )
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
     elif page == "GA4 라이브 리포트":
