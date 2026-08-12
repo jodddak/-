@@ -6371,19 +6371,39 @@ NAVER_AUTH_URL = "https://nid.naver.com/oauth2.0/authorize"
 
 
 def render_gfa_token_helper():
-    """네이버 GFA용 refresh token을 대시보드 안에서 한 번에 발급받는 도우미.
+    """네이버 GFA용 refresh token을 대시보드 안에서 발급받는 도우미.
 
-    흐름: ① 네이버 로그인 링크 클릭 → ② 콜백으로 code가 URL에 붙어 돌아옴
-          → ③ 교환 버튼 → refresh_token 출력 → Secrets에 붙여넣기.
-    refresh_token은 만료가 길어서 한 번 받아두면 계속 재사용된다.
+    네이버 로그인은 외부 사이트로 나갔다 돌아오기 때문에 그 순간 Streamlit 세션이 새로
+    시작된다(입력칸이 비워짐). 그래서 client_id/secret/callback은 Secrets에서 읽어
+    자동으로 채워지게 하고, 돌아왔을 때 URL에 붙은 code만 있으면 바로 교환할 수 있게 한다.
     """
     from urllib.parse import urlencode
 
     cfg = _secrets_section("naver_gfa") or {}
-    st.caption(
-        "네이버 개발자센터에 등록한 앱 정보로 refresh token을 받습니다. "
-        "대행사 API 사용 승인 전에도 토큰 발급 자체는 됩니다."
-    )
+
+    code = None
+    qstate = "stcogfa"
+    try:
+        code = st.query_params.get("code")
+        qstate = st.query_params.get("state") or "stcogfa"
+    except Exception:
+        code = None
+
+    has_secrets = bool(cfg.get("client_id") and cfg.get("client_secret") and cfg.get("callback_url"))
+    if not has_secrets:
+        st.warning(
+            "**먼저 Secrets에 아래 3줄을 넣어주세요.** 네이버 로그인은 외부 사이트로 나갔다 "
+            "돌아오는 방식이라, 그 사이 화면에 직접 입력한 값은 지워집니다. "
+            "Secrets에 있으면 돌아왔을 때 자동으로 채워집니다."
+        )
+        st.code(
+            '[naver_gfa]\n'
+            'client_id = "네이버 개발자센터 Client ID"\n'
+            'client_secret = "네이버 개발자센터 Client Secret"\n'
+            'callback_url = "개발자센터에 등록한 Callback URL"',
+            language="toml",
+        )
+
     c1, c2 = st.columns(2)
     with c1:
         cid = st.text_input("Client ID", value=str(cfg.get("client_id", "")), key="gfa_cid")
@@ -6396,62 +6416,73 @@ def render_gfa_token_helper():
         placeholder="https://xxxx.streamlit.app",
     )
 
-    if not (cid and csec and cb):
-        st.info("위 3개를 채우면 로그인 링크가 나타납니다.")
-        return
+    cid, csec, cb = str(cid).strip(), str(csec).strip(), str(cb).strip()
 
-    state = "stcogfa"
-    auth_url = NAVER_AUTH_URL + "?" + urlencode({
-        "response_type": "code",
-        "client_id": str(cid).strip(),
-        "redirect_uri": str(cb).strip(),
-        "state": state,
-    })
-    st.markdown(f"**① [네이버로 로그인하고 코드 받기]({auth_url})** — 새 탭에서 열어 로그인/동의하세요.")
-
-    code = None
-    try:
-        code = st.query_params.get("code")
-        qstate = st.query_params.get("state") or state
-    except Exception:
-        qstate = state
-    if not code:
-        st.caption("로그인하고 돌아오면 여기에 ② 발급 버튼이 생깁니다.")
-        return
-
-    st.success("로그인 코드가 확인됐습니다.")
-    if st.button("② refresh token 발급", key="gfa_token_btn"):
-        import requests
-        try:
-            r = requests.get(GFA_TOKEN_URL, params={
-                "grant_type": "authorization_code",
-                "client_id": str(cid).strip(),
-                "client_secret": str(csec).strip(),
-                "code": str(code).strip(),
-                "state": str(qstate).strip(),
-            }, timeout=60)
-            j = r.json() or {}
-        except Exception as e:
-            st.error(f"요청 실패: {e}")
-            return
-        if not j.get("refresh_token"):
+    # ── 돌아온 상태: URL에 code가 있으면 교환부터 처리한다 ────────────────────
+    if code:
+        st.success("네이버 로그인 코드가 확인됐습니다.")
+        if not (cid and csec):
             st.error(
-                "발급 실패: " + str(j.get("error_description") or j.get("error") or j)[:300]
-                + "  · 코드는 1회용이라 이미 썼거나 시간이 지났으면 ①부터 다시 하세요."
+                "Client ID / Secret이 비어 있어서 교환을 못 합니다. "
+                "Secrets에 넣고 다시 시도하시거나, 위 칸에 직접 채운 뒤 아래 버튼을 눌러주세요."
             )
-            return
-        st.success("발급 완료 — 아래 블록을 Streamlit Secrets 맨 아래에 그대로 덧붙이세요.")
-        st.code(
-            "[naver_gfa]\n"
-            f'client_id = "{str(cid).strip()}"\n'
-            f'client_secret = "{str(csec).strip()}"\n'
-            f'refresh_token = "{j["refresh_token"]}"\n'
-            'ad_account_no = "대행사에서 받은 STCO 광고계정 번호"\n'
-            'manager_account_no = "대행사 관리계정 번호"\n'
-            f'callback_url = "{str(cb).strip()}"',
-            language="toml",
-        )
-        st.caption("⚠️ 위 블록에는 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요.")
+        elif st.button("② refresh token 발급", key="gfa_token_btn", type="primary"):
+            import requests
+            try:
+                r = requests.get(GFA_TOKEN_URL, params={
+                    "grant_type": "authorization_code",
+                    "client_id": cid, "client_secret": csec,
+                    "code": str(code).strip(), "state": str(qstate).strip(),
+                }, timeout=60)
+                j = r.json() or {}
+            except Exception as e:
+                st.error(f"요청 실패: {e}")
+                return
+            if not j.get("refresh_token"):
+                st.error(
+                    "발급 실패: " + str(j.get("error_description") or j.get("error") or j)[:300]
+                    + " · 인증 코드는 1회용이라, 이미 썼거나 시간이 지났으면 아래 '처음부터 다시'를 "
+                    "누르고 ①부터 하세요."
+                )
+            else:
+                st.success("발급 완료 — 아래 블록을 Streamlit Secrets의 [naver_gfa] 부분에 반영하세요.")
+                st.code(
+                    "[naver_gfa]\n"
+                    f'client_id = "{cid}"\n'
+                    f'client_secret = "{csec}"\n'
+                    f'callback_url = "{cb}"\n'
+                    f'refresh_token = "{j["refresh_token"]}"\n'
+                    'ad_account_no = "대행사에서 받은 STCO 광고계정 번호"\n'
+                    'manager_account_no = "대행사 관리계정 번호"',
+                    language="toml",
+                )
+                st.caption("⚠️ 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요.")
+        if st.button("처음부터 다시", key="gfa_reset_btn"):
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.rerun()
+        return
+
+    # ── 시작 상태: 로그인 링크 만들기 ────────────────────────────────────────
+    if not (cid and csec and cb):
+        st.info("Client ID · Client Secret · Callback URL 3개가 모두 채워지면 로그인 링크가 나타납니다.")
+        return
+
+    auth_url = NAVER_AUTH_URL + "?" + urlencode({
+        "response_type": "code", "client_id": cid,
+        "redirect_uri": cb, "state": "stcogfa",
+    })
+    st.markdown(
+        f"### ① [네이버로 로그인하고 코드 받기]({auth_url})\n"
+        "위 링크를 **같은 탭에서** 클릭해 로그인·동의하면 대시보드로 돌아옵니다. "
+        "돌아온 뒤 다시 이 패널을 펼치면 ② 발급 버튼이 보입니다."
+    )
+    st.caption(
+        "돌아왔는데 ② 버튼이 안 보이면, 주소창에 `?code=` 가 붙어 있는지 확인해주세요. "
+        "없으면 Callback URL이 개발자센터 등록값과 다른 경우입니다."
+    )
 
 
 AD_SPEND_FETCHERS = [
