@@ -640,6 +640,7 @@ TABLES = {
     "channel_weekly": "channel_weekly",
     "utm_channel_map": "utm_channel_map",
     "channel_budget": "channel_budget",
+    "channel_mix_budget": "channel_mix_budget",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -1470,6 +1471,63 @@ def parse_utm_channel_map(xls: pd.ExcelFile) -> pd.DataFrame:
     return out
 
 
+# '26년 매체별 채널 믹스' 같은 연간 채널 예산 파일 전용 파서. '◆26년 월별 예산 정리'(자사몰
+# 예산 박스형 표, parse_channel_budget_sheet)와는 다른 파일이다 — 이쪽은 전체 매체 집행
+# 예산(자사몰 한정 아님)을 채널 1행 = 연간합계 + 1~12월로 단순하게 정리한 표다.
+# '매체'(합계행)·법인카드정산·촬영샘플·잔여비용은 매체 집행이 아니라서 채널 믹스에서 제외한다.
+CHANNEL_MIX_NON_MEDIA_ROWS = {"매체", "법인카드정산", "촬영샘플", "잔여비용"}
+
+
+def parse_channel_mix_sheet(xls: pd.ExcelFile, source_name: str = "") -> pd.DataFrame:
+    """B열=채널명, C열=연간 합계, D~O열=1~12월인 고정 양식을 위치 기준으로 읽는다.
+    'TOTAL' 라벨과 그 오른쪽에 1~12가 순서대로 나열된 헤더 행을 찾아서, 그 아래 채널명이
+    있는 행만 데이터로 삼는다. 연도는 파일명(예: '26년 매체별 채널 믹스.xlsx')에서 'NN년'
+    패턴을 찾아 20NN으로 추정하고, 못 찾으면 오늘 날짜 기준 연도를 쓴다."""
+    sheet = xls.sheet_names[0]
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+    if raw.empty:
+        return pd.DataFrame()
+
+    header_row = None
+    for r in range(min(6, len(raw))):
+        row_vals = raw.iloc[r].tolist()
+        if not any(str(v).strip().upper() == "TOTAL" for v in row_vals if pd.notna(v)):
+            continue
+        nums = [v for v in row_vals if isinstance(v, (int, float)) and pd.notna(v)]
+        if len(nums) >= 12 and [int(x) for x in nums[:12]] == list(range(1, 13)):
+            header_row = r
+            break
+    if header_row is None:
+        return pd.DataFrame()
+
+    year_guess = date.today().year
+    ym = re.search(r"(\d{2})년", source_name)
+    if ym:
+        year_guess = 2000 + int(ym.group(1))
+
+    rows = []
+    for r in range(header_row + 1, len(raw)):
+        if raw.shape[1] <= 2:
+            break
+        name = raw.iloc[r, 1]
+        if pd.isna(name):
+            continue
+        name = str(name).strip()
+        if not name or name in CHANNEL_MIX_NON_MEDIA_ROWS or len(name) > 20:
+            continue
+        total_val = pd.to_numeric(raw.iloc[r, 2], errors="coerce")
+        if pd.isna(total_val):
+            continue
+        for month in range(1, 13):
+            col_idx = 2 + month
+            val = pd.to_numeric(raw.iloc[r, col_idx], errors="coerce") if raw.shape[1] > col_idx else 0
+            rows.append({
+                "channel": name, "year": year_guess, "month": month,
+                "budget": float(val) if pd.notna(val) else 0.0,
+            })
+    return pd.DataFrame(rows)
+
+
 BUDGET_SCOPE_TITLES = {
     "자사몰": "자사몰 현황",
     # "온라인사업팀": "온라인사업팀 현황",  # 형 요청으로 우선 제외 — 자사몰만 본다
@@ -1901,6 +1959,91 @@ def _ga_channel_agg(ga_channel_inflow: pd.DataFrame, start: date, end: date) -> 
     return g.groupby("channel", as_index=False).agg(
         ga_conversions=("conversions", "sum"), ga_revenue=("revenue", "sum")
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# 채널 퍼널 리포트 (신규 — 신규 고객 발굴 / 매출 확보 2목적축) 전용 집계 헬퍼
+# ──────────────────────────────────────────────────────────────
+def classify_ga_bucket(row) -> str:
+    """ga_channel_inflow 한 행(세션 소스/매체)을 광고/자연유입/기타로 나눈다.
+    '매체'(channel) 컬럼이 채워져 있으면(=UTM 매핑된 유료 매체) 광고로 보고,
+    그 외에는 source_medium 문자열(organic/referral/direct 등)로 자연유입/기타를 구분한다."""
+    if pd.notna(row.get("channel")):
+        return "광고"
+    sm = str(row.get("source_medium", "")).lower()
+    if "organic" in sm or "referral" in sm or "direct" in sm:
+        return "자연유입"
+    return "기타"
+
+
+def _funnel_from_audience(audience: pd.DataFrame, start: date, end: date, audience_type: str) -> pd.DataFrame:
+    """channel_audience_snapshot(캠페인/그룹명 기준 신규·리타겟팅 분류, 매체 리포트 원본)에서
+    기간 내 채널×오디언스타입 '최신 스냅샷'만 채널 단위로 합산한다. render_targeting_performance_page
+    와 동일한 dedup 로직(같은 달 여러 번 업로드해도 최신 값만 사용)을 그대로 따른다."""
+    cols = ["channel", "impressions", "clicks", "cost_incl_vat", "signups", "conversions", "revenue"]
+    if audience is None or audience.empty:
+        return pd.DataFrame(columns=cols)
+    a = audience.copy()
+    a["as_of_date"] = pd.to_datetime(a["as_of_date"]).dt.date
+    a = a[(a["as_of_date"] >= start) & (a["as_of_date"] <= end) & (a["audience_type"] == audience_type)]
+    if a.empty:
+        return pd.DataFrame(columns=cols)
+    a = a.sort_values("as_of_date").drop_duplicates(subset=["channel", "audience_type"], keep="last")
+    return a.groupby("channel", as_index=False).agg(
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+        cost_incl_vat=("cost_incl_vat", "sum"), signups=("signups", "sum"),
+        conversions=("conversions", "sum"), revenue=("revenue", "sum"),
+    )
+
+
+def _ga_visits_by_channel(ga_channel_inflow: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """ga_channel_inflow(UTM 매핑 완료)에서 기간 내 채널 단위 신규/재방문 세션수를 합산한다.
+    매출 확보 퍼널의 '재방문' 단계, 신규 발굴 퍼널의 '방문(신규유입)' 단계에 쓴다."""
+    cols = ["channel", "new_users", "returning_users"]
+    if ga_channel_inflow is None or ga_channel_inflow.empty:
+        return pd.DataFrame(columns=cols)
+    g = ga_channel_inflow.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
+    g = g[(g["report_date"] >= start) & (g["report_date"] <= end) & g["channel"].notna()]
+    if g.empty:
+        return pd.DataFrame(columns=cols)
+    return g.groupby("channel", as_index=False).agg(
+        new_users=("new_users", "sum"), returning_users=("returning_users", "sum")
+    )
+
+
+def _channel_spend_total(channels_weekly: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """channel_weekly(주간 매체 리포트, 신규/리타겟 구분 없는 채널 전체 광고비)에서 기간과
+    겹치는 주(week_start~week_end)만 채널 단위로 합산한다. 채널 믹스(연예산) 대비 '실제
+    집행비중'을 계산할 때, 오디언스타입 한쪽(신규/리타겟)만이 아니라 채널 전체 지출을 써야
+    26년 채널믹스 파일(전체 매체 집행 기준)과 스코프가 맞는다."""
+    cols = ["channel", "cost_incl_vat"]
+    if channels_weekly is None or channels_weekly.empty:
+        return pd.DataFrame(columns=cols)
+    w = channels_weekly.copy()
+    overlap = (w["week_start"] <= end) & (w["week_end"] >= start)
+    w = w[overlap]
+    if w.empty:
+        return pd.DataFrame(columns=cols)
+    return w.groupby("channel", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+def _channel_mix_ratio(mix: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """channel_mix_budget(26년 채널 믹스 예산)에서 선택 기간과 겹치는 연/월만 채널 단위로
+    합산해 연예산비중(%)을 계산한다."""
+    cols = ["channel", "budget", "budget_ratio"]
+    if mix is None or mix.empty:
+        return pd.DataFrame(columns=cols)
+    m = mix.copy()
+    period_months = pd.period_range(start, end, freq="M")
+    keys = {(p.year, p.month) for p in period_months}
+    m = m[m.apply(lambda r: (int(r["year"]), int(r["month"])) in keys, axis=1)]
+    if m.empty:
+        return pd.DataFrame(columns=cols)
+    agg = m.groupby("channel", as_index=False).agg(budget=("budget", "sum"))
+    total = agg["budget"].sum()
+    agg["budget_ratio"] = np.where(total > 0, agg["budget"] / total * 100, 0)
+    return agg
 
 
 CREATIVE_NAME_HINTS = ["소재성과", "소재별성과"]  # 예: 페이스북_소재성과요약
@@ -3558,6 +3701,34 @@ def render_upload_panel():
                 st.rerun()
 
     st.sidebar.markdown("---")
+    mix_file = st.sidebar.file_uploader(
+        "④ 채널 믹스(연간 예산) 업로드 (26년 매체별 채널 믹스 xlsx)",
+        type=["xlsx", "xls"], key="channel_mix_uploader",
+    )
+    if mix_file is not None:
+        with st.sidebar.status("파일 분석 중...", expanded=True) as status4:
+            mix_xls = pd.ExcelFile(mix_file)
+            mix_df = parse_channel_mix_sheet(mix_xls, source_name=mix_file.name)
+            if mix_df.empty:
+                st.warning(
+                    "인식 가능한 채널 믹스 데이터를 찾지 못했습니다. 'TOTAL' + 1~12월 헤더가 있는 "
+                    "채널별 예산 표 파일인지 확인해주세요."
+                )
+            else:
+                yr = mix_df["year"].iloc[0]
+                st.write(f"📊 채널 믹스 인식: {yr}년 · 매체 {mix_df['channel'].nunique()}개")
+            status4.update(label="분석 완료", state="complete")
+
+        if st.sidebar.button("💾 채널 믹스 저장하기", type="primary", key="channel_mix_save_btn"):
+            if mix_df.empty:
+                st.sidebar.warning("저장할 채널 믹스 데이터가 없습니다.")
+            else:
+                n_mix = save_table("channel_mix_budget", mix_df, "channel,year,month", mix_file.name)
+                st.cache_data.clear()
+                st.sidebar.success(f"저장 완료! 채널 믹스 {n_mix}행")
+                st.rerun()
+
+    st.sidebar.markdown("---")
     wk = load_table("weekly_overview")
     st.sidebar.metric("누적 주간 데이터", f"{len(wk):,} 주")
     if st.sidebar.button("🔄 새로고침 (캐시 비우기)"):
@@ -4008,7 +4179,7 @@ def render_creative_performance(creatives: pd.DataFrame):
 NAV_GROUPS = {
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
-    "GA 유입 리포트": ["GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
+    "GA 유입 리포트": ["채널 퍼널 리포트", "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
     "가이드": ["가이드"],
 }
@@ -4968,6 +5139,215 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     )
 
 
+def render_ga_channel_funnel_page(
+    audience: pd.DataFrame,
+    ga_channel_inflow: pd.DataFrame,
+    inflow_revenue: pd.DataFrame,
+    channels_weekly: pd.DataFrame,
+    channel_mix: pd.DataFrame,
+):
+    """채널 퍼널 리포트(신규) — '신규 고객 발굴' / '매출 확보' 두 목적축으로 나눠서 채널별
+    성과를 보여준다. 노출/클릭/가입/구매/매출은 channel_audience_snapshot(매체 리포트 기준,
+    캠페인·그룹명으로 이미 신규/리타겟팅 분류됨)에서, 방문(신규유입)/재방문은
+    ga_channel_inflow(GA 신규/재방문 세션 기준)에서 가져와 붙인다. 채널 하나가 두 표에
+    동시에 나타날 수 있다 — 채널에 고정 라벨(발굴/회수/수확 등)을 붙이지 않고, 실제 캠페인
+    태그·GA 사용자 유형으로 사후 집계하는 방식이다."""
+    if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
+        st.info(
+            "아직 데이터가 없습니다. 사이드바 '① 주간 리포트 업로드'(캠페인 신규/리타겟 분류) · "
+            "'② GA 유입 데이터 업로드'를 먼저 진행해주세요."
+        )
+        return
+
+    date_candidates = []
+    if not audience.empty:
+        date_candidates.append(pd.to_datetime(audience["as_of_date"]))
+    if not ga_channel_inflow.empty:
+        date_candidates.append(pd.to_datetime(ga_channel_inflow["report_date"]))
+    if not inflow_revenue.empty:
+        date_candidates.append(pd.to_datetime(inflow_revenue["report_date"]))
+    if not date_candidates:
+        st.info("선택 가능한 기간 데이터가 없습니다.")
+        return
+    all_dates = pd.concat(date_candidates)
+    min_d, max_d = all_dates.min().date(), all_dates.max().date()
+    st.subheader("🔎 기간 필터")
+    start, end = period_filter(min_d, max_d, key="channel_funnel", default_preset="이번달")
+
+    # ── 북극성 지표 (사이트 전체, GA 기준 정확치) ──
+    st.markdown("##### ⭐ 북극성 지표 — 신규 고객 발굴 (사이트 전체, GA 기준)")
+    if not inflow_revenue.empty:
+        ir = inflow_revenue.copy()
+        ir["report_date"] = pd.to_datetime(ir["report_date"]).dt.date
+        fir = ir[(ir["report_date"] >= start) & (ir["report_date"] <= end)]
+    else:
+        fir = pd.DataFrame()
+    if fir.empty:
+        st.info("'유입·매출 비교' 데이터가 없어 북극성 지표를 계산할 수 없습니다.")
+    else:
+        signups_sum = fir["signups"].sum()
+        new_paying_sum = fir["new_paying_customers"].sum()
+        cost_sum_site = fir["cost_incl_vat"].sum()
+        ga_revenue_sum = fir["ga_revenue"].sum()
+        signup_cac = (cost_sum_site / signups_sum) if signups_sum > 0 else 0
+        first_purchase_cac = (cost_sum_site / new_paying_sum) if new_paying_sum > 0 else 0
+        site_ga_roas = (ga_revenue_sum / cost_sum_site * 100) if cost_sum_site > 0 else 0
+        n1, n2, n3, n4 = st.columns(4)
+        n1.metric("신규가입 수", f"{signups_sum:,.0f} 명")
+        n2.metric("신규가입 CAC", f"{signup_cac:,.0f} 원")
+        n3.metric("신규 첫구매 CAC", f"{first_purchase_cac:,.0f} 원")
+        n4.metric("사이트 전체 GA-ROAS", f"{site_ga_roas:,.1f} %")
+        st.caption(
+            f"KPI 판정: {_ops_kpi_status(site_ga_roas)} (GA-ROAS 목표 200~300%, 300%+가 목표) · "
+            "사이트 전체(모든 채널 합산) 기준 정확치입니다."
+        )
+
+    # ── ① 오늘의 전체 그림 — 대분류별 유입 ──
+    st.markdown("##### ① 오늘의 전체 그림 — 대분류별 유입 (광고 / 자연유입 / 기타)")
+    if ga_channel_inflow.empty:
+        st.info("GA 매체별 유입 데이터가 없어 대분류 표를 계산할 수 없습니다.")
+    else:
+        gci = ga_channel_inflow.copy()
+        gci["report_date"] = pd.to_datetime(gci["report_date"]).dt.date
+        fgci = gci[(gci["report_date"] >= start) & (gci["report_date"] <= end)]
+        if fgci.empty:
+            st.info("선택한 기간에 GA 유입 데이터가 없습니다.")
+        else:
+            fgci = fgci.copy()
+            fgci["대분류"] = fgci.apply(classify_ga_bucket, axis=1)
+            bucket_agg = fgci.groupby("대분류", as_index=False).agg(
+                users=("users", "sum"), new_users=("new_users", "sum"),
+                returning_users=("returning_users", "sum"),
+                conversions=("conversions", "sum"), revenue=("revenue", "sum"),
+            )
+            order = {"광고": 0, "자연유입": 1, "기타": 2}
+            bucket_agg["_order"] = bucket_agg["대분류"].map(order).fillna(9)
+            bucket_agg = bucket_agg.sort_values("_order").drop(columns="_order")
+            rename_map = {
+                "users": "총유입", "new_users": "신규유입", "returning_users": "재방문유입",
+                "conversions": "GA구매건수", "revenue": "GA매출",
+            }
+            total_row = pd.DataFrame([{
+                "대분류": "전체 합계",
+                "users": bucket_agg["users"].sum(), "new_users": bucket_agg["new_users"].sum(),
+                "returning_users": bucket_agg["returning_users"].sum(),
+                "conversions": bucket_agg["conversions"].sum(), "revenue": bucket_agg["revenue"].sum(),
+            }])
+            show_bucket = format_display(bucket_agg.rename(columns=rename_map))
+            show_total = format_display(total_row.rename(columns=rename_map))
+            bcol, _spacer1 = st.columns([2, 1])
+            with bcol:
+                render_html_table(pd.concat([show_total, show_bucket], ignore_index=True))
+            st.caption("'신규유입'은 GA 신규 세션 기준이며, 위 북극성 지표의 '신규가입 수'와는 다른 지표입니다(방문 단계 선행지표).")
+
+    # ── ② 채널 믹스 — 계획 대비 실제 집행 ──
+    st.markdown("##### ② 채널 믹스 — 계획(연예산) 대비 실제 집행")
+    mix_ratio = _channel_mix_ratio(channel_mix, start, end)
+    spend_total = _channel_spend_total(channels_weekly, start, end)
+    if mix_ratio.empty:
+        st.info("채널 믹스(연간 예산) 데이터가 없습니다. 사이드바 '④ 채널 믹스 업로드'에서 파일을 올려주세요.")
+    else:
+        mix_view = mix_ratio.merge(spend_total, on="channel", how="left")
+        spend_total_sum = mix_view["cost_incl_vat"].fillna(0).sum()
+        mix_view["실제집행비중"] = np.where(
+            spend_total_sum > 0, mix_view["cost_incl_vat"].fillna(0) / spend_total_sum * 100, 0
+        )
+        mix_view["이탈폭"] = mix_view["실제집행비중"] - mix_view["budget_ratio"]
+        mix_view = mix_view.sort_values("budget_ratio", ascending=False)
+        mix_show = mix_view[["channel", "budget_ratio", "실제집행비중", "이탈폭"]].copy()
+        mix_show.columns = ["채널", "연예산비중(%)", "실제집행비중(%)", "이탈폭(%p)"]
+        mix_show["연예산비중(%)"] = mix_view["budget_ratio"].map(lambda v: f"{v:.1f}")
+        mix_show["실제집행비중(%)"] = mix_view["실제집행비중"].map(lambda v: f"{v:.1f}")
+        mix_show["이탈폭(%p)"] = mix_view["이탈폭"].map(lambda v: f"{chr(9650) if v >= 0 else chr(9660)}{abs(v):.1f}")
+        mcol, _spacer2 = st.columns([2, 1])
+        with mcol:
+            render_html_table(mix_show)
+        st.caption("실제집행비중은 channel_weekly(매체 리포트 원본 광고비, 신규+리타겟 합계) 기준이며, 선택한 기간과 겹치는 월의 예산만 비교합니다.")
+
+    # ── ③ / ④ 채널별 두 퍼널 ──
+    audience_new = _funnel_from_audience(audience, start, end, "신규")
+    audience_retarget = _funnel_from_audience(audience, start, end, "리타겟팅")
+    ga_visits = _ga_visits_by_channel(ga_channel_inflow, start, end)
+
+    def _build_funnel_table(base: pd.DataFrame, visit_col: str) -> pd.DataFrame:
+        if base.empty:
+            return pd.DataFrame()
+        df = base.merge(ga_visits[["channel", visit_col]], on="channel", how="left")
+        df = add_kpis(df)
+        df["signup_cac"] = np.where(df["signups"] > 0, df["cost_incl_vat"] / df["signups"], 0)
+        return df.sort_values("cost_incl_vat", ascending=False)
+
+    new_funnel = _build_funnel_table(audience_new, "new_users")
+    retarget_funnel = _build_funnel_table(audience_retarget, "returning_users")
+
+    st.markdown("##### ③ 신규 고객 발굴 퍼널 (채널별)")
+    st.caption("노출/클릭/가입/구매/매출: 대행사 캠페인 신규 태그 기준 · 방문(신규유입): GA 신규 세션 기준")
+    if new_funnel.empty:
+        st.info("선택한 기간에 신규 발굴 캠페인 데이터가 없습니다.")
+    else:
+        show_new = new_funnel[[
+            "channel", "impressions", "clicks", "new_users", "signups", "conversions",
+            "revenue", "signup_cac", "roas",
+        ]].copy()
+        show_new.columns = [
+            "채널", "노출", "클릭", "방문(신규유입)", "회원가입", "첫구매", "신규매출",
+            "신규가입CAC", "신규 ROAS(%)",
+        ]
+        for c in ["노출", "클릭", "방문(신규유입)", "회원가입", "첫구매", "신규매출", "신규가입CAC"]:
+            show_new[c] = show_new[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "-")
+        show_new["신규 ROAS(%)"] = show_new["신규 ROAS(%)"].map(lambda v: f"{v:,.1f}")
+        render_html_table(show_new)
+        for _, row in new_funnel.iterrows():
+            status = _ops_kpi_status(row["roas"])
+            if status == "목표 미달":
+                st.markdown(f"🔻 {row['channel']}: 신규 ROAS {row['roas']:.0f}% — {status}")
+            elif status == "목표 초과 달성":
+                st.markdown(f"▲ {row['channel']}: 신규 ROAS {row['roas']:.0f}% — {status}, 단계적 증액 후보")
+
+    st.markdown("##### ④ 매출 확보 퍼널 (채널별)")
+    st.caption("재노출/재클릭/재구매/재구매매출: 대행사 캠페인 리타겟 태그 기준 · 재방문: GA 재방문 세션 기준")
+    if retarget_funnel.empty:
+        st.info("선택한 기간에 리타겟팅 캠페인 데이터가 없습니다.")
+    else:
+        show_re = retarget_funnel[[
+            "channel", "impressions", "clicks", "returning_users", "conversions", "revenue", "roas",
+        ]].copy()
+        show_re.columns = ["채널", "재노출", "재클릭", "재방문", "재구매", "재구매매출", "재구매 ROAS(%)"]
+        for c in ["재노출", "재클릭", "재방문", "재구매", "재구매매출"]:
+            show_re[c] = show_re[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "-")
+        show_re["재구매 ROAS(%)"] = show_re["재구매 ROAS(%)"].map(lambda v: f"{v:,.1f}")
+        render_html_table(show_re)
+        for _, row in retarget_funnel.iterrows():
+            status = _ops_kpi_status(row["roas"])
+            if status == "목표 미달":
+                st.markdown(f"🔻 {row['channel']}: 재구매 ROAS {row['roas']:.0f}% — {status}")
+            elif status == "목표 초과 달성":
+                st.markdown(f"▲ {row['channel']}: 재구매 ROAS {row['roas']:.0f}% — {status}, 단계적 증액 후보")
+
+    st.markdown("#### 💬 코멘트")
+    comment_lines = []
+    if not fir.empty:
+        comment_lines.append(
+            f"선택 기간 신규가입 {signups_sum:,.0f}명(신규가입CAC {signup_cac:,.0f}원), "
+            f"신규 첫구매 CAC {first_purchase_cac:,.0f}원, 사이트 전체 GA-ROAS {site_ga_roas:.1f}%입니다."
+        )
+    if not new_funnel.empty:
+        worst_new = new_funnel.sort_values("roas").iloc[0]
+        comment_lines.append(f"신규 발굴 퍼널에서 ROAS가 가장 낮은 채널은 {worst_new['channel']}({worst_new['roas']:.0f}%)입니다.")
+    if not retarget_funnel.empty:
+        best_re = retarget_funnel.sort_values("roas", ascending=False).iloc[0]
+        comment_lines.append(f"매출 확보 퍼널에서 ROAS가 가장 높은 채널은 {best_re['channel']}({best_re['roas']:.0f}%)입니다.")
+    if comment_lines:
+        st.markdown(" ".join(comment_lines))
+    st.markdown(
+        _ops_next_action(
+            "🔻 표시된 채널은 예산 축소 또는 소재·타겟팅 재검토를, ▲ 표시된 채널은 단계적 증액(10~20%)을 검토해보세요. "
+            "소재 문제는 '소재별 성과', 캠페인/타겟팅 문제는 '타겟팅별 성과' 탭에서 이어서 확인할 수 있습니다."
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def render_ga4_page():
     looker_view_url = (
         "https://lookerstudio.google.com/u/0/reporting/"
@@ -5672,6 +6052,7 @@ def main():
     agency_notes = load_table("agency_notes")
     channels_weekly = load_table("channel_weekly")
     budget = load_table("channel_budget")
+    channel_mix = load_table("channel_mix_budget")
 
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
@@ -5698,6 +6079,8 @@ def main():
             weekly, monthly, daily, channels, snapshot, creatives, audience,
             inflow_revenue, ga_channel_inflow, agency_notes,
         )
+    elif page == "채널 퍼널 리포트":
+        render_ga_channel_funnel_page(audience, ga_channel_inflow, inflow_revenue, channels_weekly, channel_mix)
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
     elif page == "GA4 라이브 리포트":
