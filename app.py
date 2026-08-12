@@ -5857,6 +5857,7 @@ AD_SPEND_SOURCE_LABEL = {
     "kakao_api": "카카오 API",
     "criteo_api": "크리테오 API",
     "naver_gfa_api": "GFA API",
+    "manual": "직접 입력(실집행)",
     "agency_weekly": "대행사 주간(일할)",
     "budget_prorate": "예산 일할",
 }
@@ -6315,6 +6316,13 @@ def _gfa_channel_of(row: dict) -> str:
 
 
 def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
+    """GFA 일별 광고비. 관리계정 번호는 여러 개를 콤마로 넣을 수 있고, 되는 걸 자동으로 찾는다.
+
+    GFA 계정 구조가 '대표 관리계정 → 담당 관리계정 → 광고계정' 3단이라, AccessManagerAccountNo에
+    어느 번호를 넣어야 하는지는 내 네이버 계정이 어느 관리계정의 멤버냐에 따라 달라진다.
+    문서상으로는 '광고계정을 직접 품고 있는 관리계정'이 맞지만, 권한 부여 방식에 따라
+    대표 관리계정이어야 하는 경우도 있어서 순서대로 시도하고 성공한 것을 쓴다.
+    """
     cfg = _secrets_section("naver_gfa")
     if not cfg or not cfg.get("ad_account_no"):
         return pd.DataFrame()
@@ -6323,48 +6331,68 @@ def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
     token = _gfa_access_token(cfg)
     acct = str(cfg["ad_account_no"]).strip()
     ver = str(cfg.get("api_version", "1.0")).strip()
-    headers = {"Authorization": f"Bearer {token}"}
-    if cfg.get("manager_account_no"):
-        # 대행사(관리계정) 밑의 광고계정을 볼 때 필수. 없으면 권한 에러가 난다.
-        headers["AccessManagerAccountNo"] = str(cfg["manager_account_no"]).strip()
-
     url = f"{GFA_API_BASE}/{ver}/adAccounts/{acct}/performance/past/campaigns"
-    rows = []
-    chunk_start = start
-    while chunk_start <= end:
-        chunk_end = min(chunk_start + timedelta(days=GFA_MAX_RANGE_DAYS - 1), end)
-        next_token = None
-        while True:
-            params = {
-                "startDate": str(chunk_start), "endDate": str(chunk_end),
-                "timeUnit": "daily", "limit": 1000,
-            }
-            if next_token:
-                params["next"] = next_token
-            r = requests.get(url, headers=headers, params=params, timeout=90)
-            if r.status_code >= 400:
-                raise RuntimeError(f"GFA 조회 실패({r.status_code}): {r.text[:300]}")
-            payload = r.json() or {}
-            for it in payload.get("rows", []):
-                day = it.get("date") or it.get("statDate") or it.get("day")
-                cost = it.get("cost", it.get("salesAmt", it.get("spend")))
-                if day is None or cost is None:
-                    continue
-                rows.append({"report_date": day, "channel": _gfa_channel_of(it),
-                             "cost_incl_vat": float(cost) * 1.1,  # GFA cost는 VAT 제외
-                             "source": "naver_gfa_api"})
-            next_token = payload.get("next")
-            if not next_token:
-                break
-        chunk_start = chunk_end + timedelta(days=1)
+
+    mgr_raw = str(cfg.get("manager_account_no", "") or "").replace("/", ",").replace(" ", ",")
+    candidates = [m.strip() for m in mgr_raw.split(",") if m.strip()]
+    candidates.append(None)  # 헤더 없이(광고계정 직접 멤버인 경우)도 마지막에 시도
+
+    def _pull(mgr):
+        headers = {"Authorization": f"Bearer {token}"}
+        if mgr:
+            headers["AccessManagerAccountNo"] = mgr
+        rows = []
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(chunk_start + timedelta(days=GFA_MAX_RANGE_DAYS - 1), end)
+            next_token = None
+            while True:
+                params = {"startDate": str(chunk_start), "endDate": str(chunk_end),
+                          "timeUnit": "daily", "limit": 1000}
+                if next_token:
+                    params["next"] = next_token
+                r = requests.get(url, headers=headers, params=params, timeout=90)
+                if r.status_code >= 400:
+                    raise RuntimeError(f"GFA 조회 실패({r.status_code}): {r.text[:300]}")
+                payload = r.json() or {}
+                for it in payload.get("rows", []):
+                    day = it.get("date") or it.get("statDate") or it.get("day")
+                    cost = it.get("cost", it.get("salesAmt", it.get("spend")))
+                    if day is None or cost is None:
+                        continue
+                    rows.append({"report_date": day, "channel": _gfa_channel_of(it),
+                                 "cost_incl_vat": float(cost) * 1.1,  # GFA cost는 VAT 제외
+                                 "source": "naver_gfa_api"})
+                next_token = payload.get("next")
+                if not next_token:
+                    break
+            chunk_start = chunk_end + timedelta(days=1)
+        return rows
+
+    rows, last_err, used = [], None, None
+    for mgr in candidates:
+        try:
+            rows = _pull(mgr)
+            used = mgr
+            break
+        except Exception as ex:
+            last_err = ex
+            continue
+    if used is None and last_err is not None:
+        raise RuntimeError(
+            f"{last_err} · 시도한 관리계정 번호: "
+            + ", ".join(str(c) for c in candidates if c) + " (모두 실패)"
+        )
 
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
     out = out.dropna(subset=["report_date"])
-    return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
+    out = out.groupby(["report_date", "channel", "source"], as_index=False).agg(
         cost_incl_vat=("cost_incl_vat", "sum"))
+    out.attrs["gfa_manager_used"] = used
+    return out
 
 
 NAVER_AUTH_URL = "https://nid.naver.com/oauth2.0/authorize"
@@ -6526,6 +6554,131 @@ def sync_ad_spend(existing: pd.DataFrame):
     return total, saved, errors
 
 
+MANUAL_SPEND_CHANNELS = [
+    "네이버 GFA", "네이버 애드부스트", "네이버 맨즈탭", "카카오톡 플친",
+    "카카오", "크리테오", "구글", "메타", "네이버 검색광고",
+    "네이버 브랜드검색광고", "네이버 쇼핑검색광고", "모비온", "AEDI",
+]
+
+
+def _parse_manual_spend_file(file) -> pd.DataFrame:
+    """네이버 광고주센터 '결제 > 기간별 내역' 다운로드 파일처럼 '날짜 + 금액' 두 열만 있으면
+    형태가 조금 달라도 읽어낸다. 헤더 위치가 제각각이라 컬럼명을 넓게 매칭한다."""
+    name = getattr(file, "name", "")
+    if name.lower().endswith(".csv"):
+        raw = pd.read_csv(file, header=None, dtype=str)
+    else:
+        raw = pd.read_excel(file, header=None, dtype=str)
+
+    DATE_KEYS = ["기간", "날짜", "일자", "date", "day"]
+    COST_KEYS = ["소진액", "소진", "광고비", "총비용", "비용", "지출", "cost", "spend"]
+
+    hdr = None
+    for i in range(min(len(raw), 30)):
+        cells = [str(v).strip().lower() for v in raw.iloc[i].tolist()]
+        if any(any(k in c for k in DATE_KEYS) for c in cells) and \
+           any(any(k in c for k in COST_KEYS) for c in cells):
+            hdr = i
+            break
+    if hdr is None:
+        raise RuntimeError("날짜 열과 금액 열을 못 찾았습니다 — 파일 안에 '기간/날짜'와 '소진액/광고비' 같은 머리글이 있어야 합니다.")
+
+    df = raw.iloc[hdr + 1:].copy()
+    df.columns = [str(v).strip() for v in raw.iloc[hdr].tolist()]
+    lower = {c: str(c).lower() for c in df.columns}
+    dcol = next((c for c in df.columns if any(k in lower[c] for k in DATE_KEYS)), None)
+    ccol = next((c for c in df.columns if any(k in lower[c] for k in COST_KEYS)), None)
+
+    out = pd.DataFrame({
+        "report_date": pd.to_datetime(df[dcol], errors="coerce").dt.date,
+        "cost_incl_vat": pd.to_numeric(
+            df[ccol].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce"),
+    })
+    out = out.dropna(subset=["report_date", "cost_incl_vat"])
+    out = out[out["cost_incl_vat"] > 0]
+    if out.empty:
+        raise RuntimeError("읽을 수 있는 행이 없습니다 — 날짜/금액 형식을 확인해주세요.")
+    return out.groupby("report_date", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+def render_manual_spend_panel(ad_spend: pd.DataFrame):
+    """API가 막힌 매체(GFA·애드부스트·맨즈탭 등)의 광고비를 직접 넣는 곳.
+
+    API로 못 가져오는 매체가 있다는 이유로 대시보드 전체를 계획값으로 두면 판단이 흐려진다.
+    직접 넣은 값은 '실집행'으로 취급해서 예산 일할보다 위에 놓되, 출처를 '직접 입력'으로
+    화면에 남겨 API 수치와 섞이지 않게 한다.
+    """
+    st.caption(
+        "네이버 GFA·애드부스트처럼 API가 막힌 매체의 실집행액을 넣는 곳입니다. "
+        "여기 넣은 값은 예산 일할값을 덮어쓰고, 화면에는 '직접 입력(실집행)'으로 표시됩니다."
+    )
+
+    existing = pd.DataFrame(columns=["report_date", "channel", "cost_incl_vat"])
+    if ad_spend is not None and not ad_spend.empty and "source" in ad_spend.columns:
+        m = ad_spend[ad_spend["source"] == "manual"].copy()
+        if not m.empty:
+            m["report_date"] = pd.to_datetime(m["report_date"], errors="coerce").dt.date
+            existing = m[["report_date", "channel", "cost_incl_vat"]].sort_values(
+                ["report_date", "channel"], ascending=[False, True]).reset_index(drop=True)
+
+    tab_edit, tab_file = st.tabs(["표에 직접 입력", "파일로 올리기"])
+
+    with tab_edit:
+        seed = existing.copy()
+        if seed.empty:
+            seed = pd.DataFrame([{"report_date": date.today() - timedelta(days=1),
+                                  "channel": "네이버 GFA", "cost_incl_vat": 0.0}])
+        edited = st.data_editor(
+            seed, num_rows="dynamic", use_container_width=True, key="manual_spend_editor",
+            column_config={
+                "report_date": st.column_config.DateColumn("날짜", format="YYYY-MM-DD", required=True),
+                "channel": st.column_config.SelectboxColumn("매체", options=MANUAL_SPEND_CHANNELS, required=True),
+                "cost_incl_vat": st.column_config.NumberColumn("광고비(VAT 포함)", format="%d", min_value=0, required=True),
+            },
+        )
+        st.caption("행 추가는 표 맨 아래 빈 줄에 입력하면 됩니다. 금액 0으로 저장하면 그 날짜는 예산 일할값으로 되돌아갑니다.")
+        if st.button("저장", key="manual_spend_save", type="primary"):
+            df = edited.copy()
+            df = df.dropna(subset=["report_date", "channel"])
+            if df.empty:
+                st.warning("저장할 행이 없습니다.")
+            else:
+                df["cost_incl_vat"] = pd.to_numeric(df["cost_incl_vat"], errors="coerce").fillna(0)
+                df["source"] = "manual"
+                n = save_table("ad_spend_daily", df[["report_date", "channel", "cost_incl_vat", "source"]],
+                               "report_date,channel,source", "직접 입력")
+                st.success(f"{n}행 저장했습니다. 화면을 새로고침하면 반영됩니다.")
+                st.cache_data.clear()
+
+    with tab_file:
+        st.caption(
+            "네이버 광고주센터 → 결제 → 비즈머니 관리 → **기간별 내역**에서 '일별'로 놓고 "
+            "다운로드한 파일을 그대로 올리시면 됩니다. 날짜와 소진액 열만 있으면 형식이 조금 달라도 읽습니다."
+        )
+        ch = st.selectbox("이 파일의 매체", MANUAL_SPEND_CHANNELS, key="manual_spend_file_ch")
+        up = st.file_uploader("파일 선택 (xlsx / csv)", type=["xlsx", "xls", "csv"], key="manual_spend_file")
+        if up is not None:
+            try:
+                parsed = _parse_manual_spend_file(up)
+            except Exception as e:
+                st.error(str(e))
+            else:
+                parsed["channel"] = ch
+                st.write(f"읽은 행 {len(parsed)}개 · {parsed['report_date'].min()} ~ {parsed['report_date'].max()} · "
+                         f"합계 {parsed['cost_incl_vat'].sum():,.0f}원")
+                st.dataframe(parsed.head(10), use_container_width=True)
+                st.warning(
+                    "비즈머니 소진액은 계정 전체 금액입니다. GFA와 애드부스트가 같은 계정에서 같이 돌고 있으면 "
+                    "둘이 합쳐진 값이니, 매체를 갈라 보시려면 표 입력 쪽을 쓰세요."
+                )
+                if st.button("이대로 저장", key="manual_spend_file_save", type="primary"):
+                    parsed["source"] = "manual"
+                    n = save_table("ad_spend_daily", parsed[["report_date", "channel", "cost_incl_vat", "source"]],
+                                   "report_date,channel,source", f"직접 업로드: {getattr(up, 'name', '')}")
+                    st.success(f"{n}행 저장했습니다.")
+                    st.cache_data.clear()
+
+
 def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
                           channel_mix: pd.DataFrame, start: date, end: date):
     """채널별 광고비를 3단 폴백으로 확정한다. (DataFrame[channel, cost_incl_vat, source], 요약문자열)
@@ -6556,8 +6709,10 @@ def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame
     else:
         budget_df = pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
 
+    # 직접 입력은 광고 관리자 화면에서 눈으로 확인한 '실집행액'이라 대행사 주간·예산 일할보다 정확하다.
+    # 다만 API가 붙은 매체는 사람이 손댈 필요 없이 API가 이기게 둔다.
     prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0, "criteo_api": 0, "naver_gfa_api": 0,
-            "agency_weekly": 1, "budget_prorate": 2}
+            "manual": 1, "agency_weekly": 2, "budget_prorate": 3}
     # 빈 DataFrame을 concat하면 pandas가 향후 동작 변경 경고를 내므로 값이 있는 것만 합친다.
     parts = [d for d in (api_df, weekly_df, budget_df) if d is not None and not d.empty]
     stacked = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
@@ -6830,6 +6985,9 @@ def render_ga_channel_funnel_page(
 
     with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)"):
         render_gfa_token_helper()
+
+    with st.expander("✍️ 광고비 직접 입력 (API가 막힌 매체용)"):
+        render_manual_spend_panel(ad_spend)
 
     if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
         st.info(
