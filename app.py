@@ -5957,6 +5957,11 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
     return out.dropna(subset=["report_date"]).reset_index(drop=True)
 
 
+# 구글애즈 API 버전 탐색 범위. 구글은 대략 분기마다 버전을 올리고 1년 남짓 지나면 폐기한다.
+GOOGLE_ADS_VER_MAX = 30
+GOOGLE_ADS_VER_MIN = 18
+
+
 def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     """Google Ads API(REST)에서 일별 광고비를 받아온다. 무거운 google-ads 라이브러리 대신
     REST + refresh token 방식을 써서 Streamlit Cloud 배포를 가볍게 유지한다."""
@@ -5986,17 +5991,38 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     if cfg.get("login_customer_id"):
         headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
 
-    ver = str(cfg.get("api_version", "v18")).strip()
     query = (
         "SELECT segments.date, metrics.cost_micros FROM customer "
         f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
     )
-    resp = requests.post(
-        f"https://googleads.googleapis.com/{ver}/customers/{cid}/googleAds:searchStream",
-        headers=headers, json={"query": query}, timeout=90,
-    )
+    # 구글애즈 API는 버전을 URL에 박아야 하는데, 오래된 버전은 폐기되면서 404를 낸다.
+    # 버전을 코드에 고정하면 몇 달마다 대시보드가 죽으므로, 최신부터 내려가며 살아있는
+    # 버전을 자동으로 찾는다. Secrets에 api_version이 있으면 그것부터 시도한다.
+    candidates = []
+    if cfg.get("api_version"):
+        candidates.append(str(cfg["api_version"]).strip())
+    candidates += [f"v{n}" for n in range(GOOGLE_ADS_VER_MAX, GOOGLE_ADS_VER_MIN - 1, -1)]
+
+    resp, used_ver, tried = None, None, []
+    for ver in candidates:
+        r = requests.post(
+            f"https://googleads.googleapis.com/{ver}/customers/{cid}/googleAds:searchStream",
+            headers=headers, json={"query": query}, timeout=90,
+        )
+        tried.append(ver)
+        if r.status_code == 404:
+            continue          # 폐기된 버전 → 다음 후보
+        resp, used_ver = r, ver
+        break
+
+    if resp is None:
+        raise RuntimeError(
+            "구글 조회 실패: 살아있는 API 버전을 못 찾았습니다 (전부 404). "
+            f"시도: {', '.join(tried[:6])}… · Secrets [google_ads]에 api_version = \"v26\" 처럼 "
+            "직접 지정하면 그것부터 씁니다."
+        )
     if resp.status_code >= 400:
-        raise RuntimeError(f"구글 조회 실패({resp.status_code}): {resp.text[:300]}")
+        raise RuntimeError(f"구글 조회 실패({resp.status_code}, {used_ver}): {resp.text[:300]}")
 
     rows = []
     for chunk in resp.json():
@@ -6004,8 +6030,11 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
             d = (r.get("segments") or {}).get("date")
             micros = float((r.get("metrics") or {}).get("costMicros") or 0)
             if d:
+                # 구글은 국내에서 VAT를 별도 청구하므로 cost_micros는 VAT 제외 금액이다.
+                # 다른 매체(네이버·크리테오·GFA)와 단위를 맞추려면 1.1을 곱해야 한다.
                 rows.append({"report_date": d, "channel": "구글",
-                             "cost_incl_vat": micros / 1_000_000, "source": "google_ads_api"})
+                             "cost_incl_vat": micros / 1_000_000 * 1.1,
+                             "source": "google_ads_api"})
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
@@ -7106,10 +7135,25 @@ def render_ga_channel_funnel_page(
             with st.spinner("확인 중..."):
                 st.code(diagnose_ad_spend_setup(), language=None)
 
-    with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)"):
+    # OAuth에서 돌아오면(?code=...) 해당 패널이 저절로 펼쳐지게 한다.
+    # 접힌 채로 돌아오면 "눌렀는데 아무 반응이 없다"로 보이기 때문.
+    try:
+        _oauth_state = st.query_params.get("state") or ""
+        _oauth_code = st.query_params.get("code") or ""
+    except Exception:
+        _oauth_state, _oauth_code = "", ""
+    _back_gfa = bool(_oauth_code) and _oauth_state == "stcogfa"
+    _back_gads = bool(_oauth_code) and _oauth_state == "stcogads"
+    if _back_gfa or _back_gads:
+        st.success(
+            ("네이버" if _back_gfa else "구글") +
+            " 로그인에서 돌아왔습니다 — 아래 토큰 발급 패널에서 ② 버튼을 눌러주세요."
+        )
+
+    with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)", expanded=_back_gfa):
         render_gfa_token_helper()
 
-    with st.expander("🔑 구글애즈 토큰 발급 (refresh token 만들기)"):
+    with st.expander("🔑 구글애즈 토큰 발급 (refresh token 만들기)", expanded=_back_gads):
         render_google_token_helper()
 
     with st.expander("✍️ 광고비 직접 입력 (API가 막힌 매체용)"):
