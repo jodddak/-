@@ -5930,7 +5930,7 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
     ver = str(cfg.get("api_version", "v21.0")).strip()
     url = f"https://graph.facebook.com/{ver}/{acct}/insights"
     params = {
-        "fields": "spend",
+        "fields": "spend,impressions,clicks",
         "level": "account",
         "time_increment": 1,
         "time_range": json.dumps({"since": str(start), "until": str(end)}),
@@ -5949,6 +5949,8 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
                 # 메타도 국내는 VAT 별도 청구라 insights의 spend는 VAT 제외 금액이다.
                 # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
                 "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
+                "impressions": float(d.get("impressions") or 0),
+                "clicks": float(d.get("clicks") or 0),
             })
         nxt = (payload.get("paging") or {}).get("next")
         url, params = (nxt, None) if nxt else (None, None)
@@ -5994,7 +5996,8 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
         headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
 
     query = (
-        "SELECT segments.date, metrics.cost_micros FROM customer "
+        "SELECT segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks "
+        "FROM customer "
         f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
     )
     # 구글애즈 API는 버전을 URL에 박아야 하는데, 오래된 버전은 폐기되면서 404를 낸다.
@@ -6030,12 +6033,15 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     for chunk in resp.json():
         for r in chunk.get("results", []):
             d = (r.get("segments") or {}).get("date")
-            micros = float((r.get("metrics") or {}).get("costMicros") or 0)
+            m = r.get("metrics") or {}
+            micros = float(m.get("costMicros") or 0)
             if d:
                 # 구글은 국내에서 VAT를 별도 청구하므로 cost_micros는 VAT 제외 금액이다.
                 # 다른 매체(네이버·크리테오·GFA)와 단위를 맞추려면 1.1을 곱해야 한다.
                 rows.append({"report_date": d, "channel": "구글",
                              "cost_incl_vat": micros / 1_000_000 * 1.1,
+                             "impressions": float(m.get("impressions") or 0),
+                             "clicks": float(m.get("clicks") or 0),
                              "source": "google_ads_api"})
     if not rows:
         return pd.DataFrame()
@@ -6043,7 +6049,8 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
     out = out.dropna(subset=["report_date"])
     return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
-        cost_incl_vat=("cost_incl_vat", "sum")
+        cost_incl_vat=("cost_incl_vat", "sum"),
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"),
     )
 
 
@@ -6127,6 +6134,8 @@ def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
                 continue
             rows.append({"report_date": d, "channel": ch,
                          "cost_incl_vat": float(item.get("salesAmt") or 0) * 1.1,  # 네이버는 VAT 제외 금액
+                         "impressions": float(item.get("impCnt") or 0),
+                         "clicks": float(item.get("clkCnt") or 0),
                          "source": "naver_api"})
         d += timedelta(days=1)
 
@@ -6134,7 +6143,8 @@ def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.DataFrame(rows).groupby(
         ["report_date", "channel", "source"], as_index=False
-    ).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+    ).agg(cost_incl_vat=("cost_incl_vat", "sum"),
+          impressions=("impressions", "sum"), clicks=("clicks", "sum"))
 
 
 # 카카오모먼트 API — 광고계정 보고서(일별 광고비).
@@ -6213,6 +6223,8 @@ def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
                 continue
             rows.append({"report_date": day, "channel": "카카오",
                          "cost_incl_vat": float(cost) * 1.1,  # 카카오 cost는 VAT 제외
+                         "impressions": float(metrics.get("imp") or 0),
+                         "clicks": float(metrics.get("click") or 0),
                          "source": "kakao_api"})
         chunk_start = chunk_end + timedelta(days=1)
 
@@ -6222,7 +6234,8 @@ def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
     out = out.dropna(subset=["report_date"])
     return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
-        cost_incl_vat=("cost_incl_vat", "sum"))
+        cost_incl_vat=("cost_incl_vat", "sum"),
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"))
 
 
 # 크리테오 Marketing Solutions API — 일별 광고비.
@@ -6298,7 +6311,7 @@ def fetch_criteo_spend(start: date, end: date) -> pd.DataFrame:
         body = {
             "advertiserIds": adv_ids,
             "dimensions": ["Day"],
-            "metrics": ["AdvertiserCost"],
+            "metrics": ["AdvertiserCost", "Displays", "Clicks"],
             "currency": str(cfg.get("currency", "KRW")).strip(),
             "startDate": str(start),
             "endDate": str(end),
@@ -6344,8 +6357,19 @@ def fetch_criteo_spend(start: date, end: date) -> pd.DataFrame:
             cost = float(str(cost).replace(",", ""))
         except Exception:
             continue
+        def _num(*keys):
+            for k in keys:
+                v = it.get(k)
+                if v is not None:
+                    try:
+                        return float(str(v).replace(",", ""))
+                    except Exception:
+                        pass
+            return 0.0
         rows.append({"report_date": day, "channel": "크리테오",
                      "cost_incl_vat": cost * 1.1,  # 크리테오 AdvertiserCost는 VAT 제외
+                     "impressions": _num("Displays", "displays"),
+                     "clicks": _num("Clicks", "clicks"),
                      "source": "criteo_api"})
     if not rows:
         return pd.DataFrame()
@@ -6353,7 +6377,8 @@ def fetch_criteo_spend(start: date, end: date) -> pd.DataFrame:
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
     out = out.dropna(subset=["report_date"])
     return out.groupby(["report_date", "channel", "source"], as_index=False).agg(
-        cost_incl_vat=("cost_incl_vat", "sum"))
+        cost_incl_vat=("cost_incl_vat", "sum"),
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"))
 
 
 # 네이버 성과형 디스플레이(GFA) API — 캠페인 단위 일별 광고비.
@@ -6454,6 +6479,8 @@ def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
                         continue
                     rows.append({"report_date": day, "channel": _gfa_channel_of(it),
                                  "cost_incl_vat": float(cost) * 1.1,  # GFA cost는 VAT 제외
+                                 "impressions": float(it.get("imp") or it.get("impression") or 0),
+                                 "clicks": float(it.get("click") or it.get("clk") or 0),
                                  "source": "naver_gfa_api"})
                 next_token = payload.get("next")
                 if not next_token:
