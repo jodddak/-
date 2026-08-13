@@ -6409,11 +6409,13 @@ def render_gfa_token_helper():
 
     cfg = _secrets_section("naver_gfa") or {}
 
+    # 구글 토큰 발급도 같은 주소로 code를 돌려주기 때문에, state로 내 것인지 확인해야
+    # 서로의 코드를 잡아채지 않는다.
     code = None
     qstate = "stcogfa"
     try:
-        code = st.query_params.get("code")
-        qstate = st.query_params.get("state") or "stcogfa"
+        qstate = st.query_params.get("state") or ""
+        code = st.query_params.get("code") if qstate == "stcogfa" else None
     except Exception:
         code = None
 
@@ -6552,6 +6554,127 @@ def sync_ad_spend(existing: pd.DataFrame):
         saved[label] = n
         total += n
     return total, saved, errors
+
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_ADS_SCOPE = "https://www.googleapis.com/auth/adwords"
+
+
+def render_google_token_helper():
+    """구글애즈 refresh token 발급 도우미. 구조는 GFA 쪽과 같다.
+
+    구글은 access_type=offline + prompt=consent를 같이 줘야 refresh_token을 돌려준다.
+    (한 번 동의한 계정에 prompt=consent 없이 다시 요청하면 access_token만 오고
+     refresh_token이 빠져서, '왜 안 나오지' 하고 헤매기 쉬운 지점이다.)
+    """
+    from urllib.parse import urlencode
+
+    cfg = _secrets_section("google_ads") or {}
+    st.caption(
+        "구글 클라우드에서 만든 OAuth 클라이언트 정보로 refresh token을 받습니다. "
+        "개발자 토큰이 '탐색기 액세스'면 이 토큰만 있으면 바로 실계정 조회가 됩니다."
+    )
+
+    code = None
+    try:
+        qstate = st.query_params.get("state") or ""
+        code = st.query_params.get("code") if qstate == "stcogads" else None
+    except Exception:
+        code = None
+
+    has_secrets = bool(cfg.get("client_id") and cfg.get("client_secret") and cfg.get("callback_url"))
+    if not has_secrets:
+        st.warning(
+            "**먼저 Secrets에 아래를 넣어주세요.** 구글 로그인은 외부로 나갔다 돌아오는 방식이라, "
+            "화면에 직접 입력한 값은 그 사이 지워집니다."
+        )
+        st.code(
+            '[google_ads]\n'
+            'developer_token = "API 센터의 개발자 토큰"\n'
+            'client_id = "OAuth 클라이언트 ID"\n'
+            'client_secret = "OAuth 클라이언트 보안 비밀번호"\n'
+            'callback_url = "https://stco-performance-dashboard.streamlit.app"\n'
+            'customer_id = "하이픈 뺀 광고계정 번호"\n'
+            'login_customer_id = "하이픈 뺀 MCC 번호"',
+            language="toml",
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cid = st.text_input("OAuth 클라이언트 ID", value=str(cfg.get("client_id", "")), key="gads_cid")
+    with c2:
+        csec = st.text_input("클라이언트 보안 비밀번호", value=str(cfg.get("client_secret", "")),
+                             type="password", key="gads_csec")
+    cb = st.text_input("승인된 리디렉션 URI (구글 클라우드에 등록한 값과 정확히 같아야 합니다)",
+                       value=str(cfg.get("callback_url", "")), key="gads_cb",
+                       placeholder="https://xxxx.streamlit.app")
+    cid, csec, cb = str(cid).strip(), str(csec).strip(), str(cb).strip()
+
+    if code:
+        st.success("구글 인증 코드가 확인됐습니다.")
+        if not (cid and csec and cb):
+            st.error("클라이언트 ID/Secret/리디렉션 URI가 있어야 교환할 수 있습니다.")
+        elif st.button("② refresh token 발급", key="gads_token_btn", type="primary"):
+            import requests
+            try:
+                r = requests.post(GOOGLE_TOKEN_URL, data={
+                    "grant_type": "authorization_code",
+                    "code": str(code).strip(),
+                    "client_id": cid, "client_secret": csec,
+                    "redirect_uri": cb,
+                }, timeout=60)
+                j = r.json() or {}
+            except Exception as e:
+                st.error(f"요청 실패: {e}")
+                return
+            if not j.get("refresh_token"):
+                st.error(
+                    "발급 실패: " + str(j.get("error_description") or j.get("error") or j)[:300]
+                    + " · refresh_token이 안 왔다면 이미 동의한 계정이라 그렇습니다. "
+                    "'처음부터 다시' 후 ①을 다시 눌러주세요(동의 화면을 강제로 띄웁니다)."
+                )
+            else:
+                st.success("발급 완료 — 아래를 Secrets의 [google_ads]에 반영하세요.")
+                st.code(
+                    "[google_ads]\n"
+                    f'developer_token = "{str(cfg.get("developer_token", "API 센터의 개발자 토큰"))}"\n'
+                    f'client_id = "{cid}"\n'
+                    f'client_secret = "{csec}"\n'
+                    f'callback_url = "{cb}"\n'
+                    f'refresh_token = "{j["refresh_token"]}"\n'
+                    f'customer_id = "{str(cfg.get("customer_id", "하이픈 뺀 광고계정 번호"))}"\n'
+                    f'login_customer_id = "{str(cfg.get("login_customer_id", "하이픈 뺀 MCC 번호"))}"',
+                    language="toml",
+                )
+                st.caption("⚠️ 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요.")
+        if st.button("처음부터 다시", key="gads_reset_btn"):
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.rerun()
+        return
+
+    if not (cid and csec and cb):
+        st.info("클라이언트 ID · 보안 비밀번호 · 리디렉션 URI 3개가 채워지면 로그인 링크가 나타납니다.")
+        return
+
+    auth_url = GOOGLE_AUTH_URL + "?" + urlencode({
+        "response_type": "code",
+        "client_id": cid,
+        "redirect_uri": cb,
+        "scope": GOOGLE_ADS_SCOPE,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": "stcogads",
+    })
+    st.markdown(
+        f"### ① [구글로 로그인하고 코드 받기]({auth_url})\n"
+        "**구글애즈 관리자 권한이 있는 계정**으로 로그인하세요. "
+        "'확인되지 않은 앱' 경고가 나오면 **고급 → (앱 이름)(으)로 이동**을 누르시면 됩니다."
+    )
+    st.caption("돌아온 뒤 이 패널을 다시 펼치면 ② 발급 버튼이 보입니다.")
 
 
 MANUAL_SPEND_CHANNELS = [
@@ -6985,6 +7108,9 @@ def render_ga_channel_funnel_page(
 
     with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)"):
         render_gfa_token_helper()
+
+    with st.expander("🔑 구글애즈 토큰 발급 (refresh token 만들기)"):
+        render_google_token_helper()
 
     with st.expander("✍️ 광고비 직접 입력 (API가 막힌 매체용)"):
         render_manual_spend_panel(ad_spend)
