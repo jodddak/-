@@ -5946,7 +5946,9 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
         for d in payload.get("data", []):
             rows.append({
                 "report_date": d.get("date_start"), "channel": "메타",
-                "cost_incl_vat": float(d.get("spend") or 0), "source": "meta_api",
+                # 메타도 국내는 VAT 별도 청구라 insights의 spend는 VAT 제외 금액이다.
+                # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
+                "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
             })
         nxt = (payload.get("paging") or {}).get("next")
         url, params = (nxt, None) if nxt else (None, None)
@@ -6895,6 +6897,7 @@ def diagnose_ad_spend_setup() -> str:
 
     test_end = date.today() - timedelta(days=1)
     test_start = test_end - timedelta(days=6)
+    L.append(f"   ↳ 진단 조회 기간: {test_start} ~ {test_end} (어제까지 7일)")
 
     meta = _secrets_section("meta_ads")
     if not meta:
