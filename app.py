@@ -6232,7 +6232,50 @@ def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
 # 크리테오는 API 버전이 날짜 형식(2024-07 등)이라 바뀔 수 있어서 Secrets에서 바꿀 수 있게 뒀다.
 # 버전이 안 맞으면 404가 나는데, 진단 패널에 그대로 표시되므로 거기서 바로 확인하면 된다.
 CRITEO_TOKEN_URL = "https://api.criteo.com/oauth2/token"
-CRITEO_DEFAULT_VERSION = "2024-07"
+CRITEO_BASE = "https://api.criteo.com"
+# 크리테오는 API 버전이 날짜(2026-07 등)라서 몇 달마다 올라가고 옛 버전은 404가 된다.
+# 구글과 같은 이유로 버전을 코드에 고정하지 않고, 최근 것부터 살아있는 버전을 찾아 쓴다.
+CRITEO_VERSION_CANDIDATES = [
+    "2026-10", "2026-07", "2026-04", "2026-01",
+    "2025-10", "2025-07", "2025-04", "2025-01", "2024-07",
+]
+
+
+def _criteo_token(cfg: dict) -> str:
+    import requests
+    tok = requests.post(CRITEO_TOKEN_URL, data={
+        "grant_type": "client_credentials",
+        "client_id": str(cfg["client_id"]).strip(),
+        "client_secret": str(cfg["client_secret"]).strip(),
+    }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=60).json()
+    if "access_token" not in tok:
+        raise RuntimeError(f"크리테오 토큰 발급 실패: {tok.get('error_description') or tok}")
+    return tok["access_token"]
+
+
+def _criteo_advertiser_ids(token: str, ver: str) -> str:
+    """Secrets에 advertiser_id를 안 넣어도 되게, 내 계정에 붙은 광고주 ID를 스스로 찾는다.
+    (statistics/report는 advertiserIds가 필수 항목이다.)"""
+    import requests
+    r = requests.get(f"{CRITEO_BASE}/{ver}/advertisers/me",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    if r.status_code >= 400:
+        return ""
+    try:
+        payload = r.json() or {}
+    except Exception:
+        return ""
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if isinstance(data, dict):
+        data = [data]
+    ids = []
+    for it in data or []:
+        v = it.get("id") if isinstance(it, dict) else None
+        if v is None and isinstance(it, dict):
+            v = (it.get("attributes") or {}).get("advertiserId")
+        if v is not None:
+            ids.append(str(v))
+    return ",".join(ids)
 
 
 def fetch_criteo_spend(start: date, end: date) -> pd.DataFrame:
@@ -6241,51 +6284,69 @@ def fetch_criteo_spend(start: date, end: date) -> pd.DataFrame:
         return pd.DataFrame()
     import requests
 
-    tok = requests.post(CRITEO_TOKEN_URL, data={
-        "grant_type": "client_credentials",
-        "client_id": str(cfg["client_id"]).strip(),
-        "client_secret": str(cfg["client_secret"]).strip(),
-    }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=60).json()
-    if "access_token" not in tok:
-        raise RuntimeError(f"크리테오 토큰 발급 실패: {tok.get('error_description') or tok}")
+    token = _criteo_token(cfg)
 
-    ver = str(cfg.get("api_version", CRITEO_DEFAULT_VERSION)).strip()
-    body = {
-        "dimensions": ["Day"],
-        "metrics": ["AdvertiserCost"],
-        "currency": str(cfg.get("currency", "KRW")).strip(),
-        "startDate": str(start),
-        "endDate": str(end),
-        "format": "json",
-    }
-    if cfg.get("advertiser_id"):
-        body["advertiserIds"] = str(cfg["advertiser_id"]).strip()
+    candidates = []
+    if cfg.get("api_version"):
+        candidates.append(str(cfg["api_version"]).strip())
+    candidates += CRITEO_VERSION_CANDIDATES
 
-    r = requests.post(
-        f"https://api.criteo.com/{ver}/statistics/report",
-        headers={"Authorization": f"Bearer {tok['access_token']}", "Content-Type": "application/json"},
-        json=body, timeout=90,
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(f"크리테오 조회 실패({r.status_code}): {r.text[:300]}")
+    adv = str(cfg.get("advertiser_id", "") or "").strip()
+    payload, used_ver, last_err = None, None, None
+    for ver in candidates:
+        adv_ids = adv or _criteo_advertiser_ids(token, ver)
+        body = {
+            "advertiserIds": adv_ids,
+            "dimensions": ["Day"],
+            "metrics": ["AdvertiserCost"],
+            "currency": str(cfg.get("currency", "KRW")).strip(),
+            "startDate": str(start),
+            "endDate": str(end),
+            "format": "json",
+        }
+        r = requests.post(
+            f"{CRITEO_BASE}/{ver}/statistics/report",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=body, timeout=90,
+        )
+        if r.status_code == 404:
+            continue                      # 폐기된 버전 → 다음 후보
+        if r.status_code >= 400:
+            last_err = f"({r.status_code}, {ver}) {r.text[:250]}"
+            continue
+        try:
+            payload = r.json()
+        except Exception:
+            last_err = f"({ver}) 응답 해석 실패: {r.text[:200]}"
+            continue
+        used_ver = ver
+        break
 
-    try:
-        payload = r.json()
-    except Exception:
-        raise RuntimeError(f"크리테오 응답 해석 실패: {r.text[:200]}")
-    # 응답이 {"Rows":[...]} 또는 [...] 형태로 올 수 있어 둘 다 받아준다.
-    rows_raw = payload.get("Rows") if isinstance(payload, dict) else payload
+    if used_ver is None:
+        raise RuntimeError(
+            "크리테오 조회 실패: " + (last_err or "살아있는 API 버전을 못 찾았습니다(전부 404)")
+            + " · Secrets [criteo]에 api_version = \"2026-07\" 처럼 직접 지정할 수 있습니다."
+        )
+
+    rows_raw = payload.get("Rows") or payload.get("rows") if isinstance(payload, dict) else payload
     if not rows_raw:
         return pd.DataFrame()
 
     rows = []
     for it in rows_raw:
-        day = it.get("Day") or it.get("day")
-        cost = it.get("AdvertiserCost", it.get("advertiserCost"))
+        if not isinstance(it, dict):
+            continue
+        day = it.get("Day") or it.get("day") or it.get("date")
+        cost = it.get("AdvertiserCost", it.get("advertiserCost", it.get("advertisercost")))
         if day is None or cost is None:
             continue
+        try:
+            cost = float(str(cost).replace(",", ""))
+        except Exception:
+            continue
         rows.append({"report_date": day, "channel": "크리테오",
-                     "cost_incl_vat": float(cost) * 1.1, "source": "criteo_api"})
+                     "cost_incl_vat": cost * 1.1,  # 크리테오 AdvertiserCost는 VAT 제외
+                     "source": "criteo_api"})
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
@@ -6585,6 +6646,109 @@ def sync_ad_spend(existing: pd.DataFrame):
         saved[label] = n
         total += n
     return total, saved, errors
+
+
+KAKAO_AUTH_URL = "https://kauth.kakao.com/oauth/authorize"
+KAKAO_MOMENT_SCOPE = "moment_management"
+
+
+def render_kakao_token_helper():
+    """카카오모먼트 refresh token 발급 도우미. GFA·구글과 같은 구조.
+
+    카카오는 client_id 자리에 'REST API 키'를 넣고, 비즈니스 동의항목(moment_management)을
+    scope로 요청해야 광고 리포트를 읽을 수 있는 비즈니스 토큰이 나온다.
+    """
+    from urllib.parse import urlencode
+
+    cfg = _secrets_section("kakao_moment") or {}
+    st.caption(
+        "카카오 개발자센터의 REST API 키로 refresh token을 받습니다. "
+        "카카오모먼트 API 권한(moment_management)이 부여된 뒤에 해야 정상 발급됩니다."
+    )
+
+    code = None
+    try:
+        qstate = st.query_params.get("state") or ""
+        code = st.query_params.get("code") if qstate == "stcokakao" else None
+    except Exception:
+        code = None
+
+    if not (cfg.get("rest_api_key") and cfg.get("callback_url")):
+        st.warning("**먼저 Secrets에 아래를 넣어주세요.** 카카오 로그인도 외부로 나갔다 돌아오는 방식입니다.")
+        st.code(
+            '[kakao_moment]\n'
+            'rest_api_key = "카카오 개발자센터 → 앱 키 → REST API 키"\n'
+            'client_secret = "카카오 로그인 → 보안 → Client Secret (안 켰으면 이 줄 생략)"\n'
+            'callback_url = "https://stco-performance-dashboard.streamlit.app"\n'
+            'ad_account_id = "카카오모먼트 광고계정 ID"',
+            language="toml",
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        rk = st.text_input("REST API 키", value=str(cfg.get("rest_api_key", "")), key="kko_rk")
+    with c2:
+        csec = st.text_input("Client Secret (선택)", value=str(cfg.get("client_secret", "")),
+                             type="password", key="kko_cs")
+    cb = st.text_input("Redirect URI (카카오 로그인에 등록한 값과 같아야 합니다)",
+                       value=str(cfg.get("callback_url", "")), key="kko_cb",
+                       placeholder="https://xxxx.streamlit.app")
+    rk, csec, cb = str(rk).strip(), str(csec).strip(), str(cb).strip()
+
+    if code:
+        st.success("카카오 인증 코드가 확인됐습니다.")
+        if not (rk and cb):
+            st.error("REST API 키와 Redirect URI가 있어야 교환할 수 있습니다.")
+        elif st.button("② refresh token 발급", key="kko_token_btn", type="primary"):
+            import requests
+            data = {
+                "grant_type": "authorization_code",
+                "client_id": rk, "redirect_uri": cb, "code": str(code).strip(),
+            }
+            if csec:
+                data["client_secret"] = csec
+            try:
+                j = requests.post(KAKAO_TOKEN_URL, data=data, timeout=60).json() or {}
+            except Exception as e:
+                st.error(f"요청 실패: {e}")
+                return
+            if not j.get("refresh_token"):
+                st.error("발급 실패: " + str(j.get("error_description") or j.get("error") or j)[:300])
+            else:
+                st.success("발급 완료 — 아래를 Secrets의 [kakao_moment]에 반영하세요.")
+                lines = ["[kakao_moment]", f'rest_api_key = "{rk}"']
+                if csec:
+                    lines.append(f'client_secret = "{csec}"')
+                lines += [
+                    f'callback_url = "{cb}"',
+                    f'refresh_token = "{j["refresh_token"]}"',
+                    f'ad_account_id = "{str(cfg.get("ad_account_id", "카카오모먼트 광고계정 ID"))}"',
+                ]
+                st.code("\n".join(lines), language="toml")
+                st.caption("⚠️ 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요.")
+        if st.button("처음부터 다시", key="kko_reset_btn"):
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.rerun()
+        return
+
+    if not (rk and cb):
+        st.info("REST API 키와 Redirect URI가 채워지면 로그인 링크가 나타납니다.")
+        return
+
+    auth_url = KAKAO_AUTH_URL + "?" + urlencode({
+        "response_type": "code", "client_id": rk, "redirect_uri": cb,
+        "scope": KAKAO_MOMENT_SCOPE, "state": "stcokakao",
+    })
+    st.markdown(
+        f"### ① [카카오로 로그인하고 코드 받기]({auth_url})\n"
+        "**카카오모먼트 광고계정에 권한이 있는 카카오 계정**으로 로그인하세요."
+    )
+    st.caption(
+        "`KOE205`(등록되지 않은 scope) 오류가 나면 아직 moment_management 권한이 부여되지 않은 상태입니다."
+    )
 
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -7147,17 +7311,19 @@ def render_ga_channel_funnel_page(
         _oauth_state, _oauth_code = "", ""
     _back_gfa = bool(_oauth_code) and _oauth_state == "stcogfa"
     _back_gads = bool(_oauth_code) and _oauth_state == "stcogads"
-    if _back_gfa or _back_gads:
-        st.success(
-            ("네이버" if _back_gfa else "구글") +
-            " 로그인에서 돌아왔습니다 — 아래 토큰 발급 패널에서 ② 버튼을 눌러주세요."
-        )
+    _back_kko = bool(_oauth_code) and _oauth_state == "stcokakao"
+    if _back_gfa or _back_gads or _back_kko:
+        _who = "네이버" if _back_gfa else ("구글" if _back_gads else "카카오")
+        st.success(f"{_who} 로그인에서 돌아왔습니다 — 아래 토큰 발급 패널에서 ② 버튼을 눌러주세요.")
 
     with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)", expanded=_back_gfa):
         render_gfa_token_helper()
 
     with st.expander("🔑 구글애즈 토큰 발급 (refresh token 만들기)", expanded=_back_gads):
         render_google_token_helper()
+
+    with st.expander("🔑 카카오모먼트 토큰 발급 (refresh token 만들기)", expanded=_back_kko):
+        render_kakao_token_helper()
 
     with st.expander("✍️ 광고비 직접 입력 (API가 막힌 매체용)"):
         render_manual_spend_panel(ad_spend)
