@@ -6899,7 +6899,10 @@ AD_SPEND_FETCHERS = [
     ("네이버 GFA", fetch_naver_gfa_spend),
 ]
 AD_SPEND_LOOKBACK_DAYS = 30
-AD_SPEND_RESYNC_TAIL_DAYS = 3
+# 매체 수치는 나중에 보정된다. 크리테오는 '클릭 후 7일' 어트리뷰션이라 최소 일주일은 값이 계속
+# 움직이고, 다른 매체도 무효 트래픽을 걸러내며 비용이 소폭 바뀐다. 예전엔 3일만 다시 받아서
+# 나흘 전 데이터가 낡은 채로 굳어 있었다.
+AD_SPEND_RESYNC_TAIL_DAYS = 8
 
 
 def sync_ad_spend(existing: pd.DataFrame):
