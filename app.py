@@ -3510,6 +3510,120 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
 # ──────────────────────────────────────────────────────────────
 # 업로드 패널
 # ──────────────────────────────────────────────────────────────
+# 매체 리포트(소재별 일일 성과 등)에서 찾을 컬럼 이름 후보.
+# 매체마다 헤더 문구가 조금씩 달라서 넉넉하게 잡는다.
+MEDIA_REPORT_COLS = {
+    "date": ["기간", "날짜", "일자", "일별", "date", "day"],
+    "cost": ["총비용", "광고비", "비용", "소진액", "지출", "cost", "spend"],
+    "imp": ["노출수", "노출", "impression", "imp"],
+    "click": ["클릭수", "클릭", "click", "clk"],
+    "campaign": ["캠페인 이름", "캠페인명", "캠페인", "campaign"],
+}
+
+
+def _mr_pick(cols, keys):
+    """헤더 목록에서 후보 키워드에 맞는 컬럼을 하나 고른다(정확히 같은 이름 우선)."""
+    low = {c: str(c).strip().lower().replace(" ", "") for c in cols}
+    for k in keys:
+        kk = k.lower().replace(" ", "")
+        for c in cols:
+            if low[c] == kk:
+                return c
+    for k in keys:
+        kk = k.lower().replace(" ", "")
+        for c in cols:
+            if kk in low[c]:
+                return c
+    return None
+
+
+def _mr_read(file) -> pd.DataFrame:
+    """csv/xlsx 어느 쪽이든 읽고, 머리글이 몇 줄 아래 있어도 찾아낸다."""
+    name = (getattr(file, "name", "") or "").lower()
+    file.seek(0)
+    if name.endswith(".csv"):
+        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+            try:
+                file.seek(0)
+                raw = pd.read_csv(file, encoding=enc, header=None, dtype=str)
+                break
+            except Exception:
+                raw = None
+        if raw is None:
+            raise RuntimeError("CSV를 읽지 못했습니다(인코딩 확인 필요).")
+    else:
+        raw = pd.read_excel(file, header=None, dtype=str)
+
+    hdr = None
+    for i in range(min(len(raw), 30)):
+        cells = list(raw.iloc[i])
+        if _mr_pick(cells, MEDIA_REPORT_COLS["date"]) is not None and \
+           _mr_pick(cells, MEDIA_REPORT_COLS["cost"]) is not None:
+            hdr = i
+            break
+    if hdr is None:
+        raise RuntimeError("날짜 열과 비용 열을 못 찾았습니다.")
+    df = raw.iloc[hdr + 1:].copy()
+    df.columns = [str(v).strip() for v in raw.iloc[hdr]]
+    return df.reset_index(drop=True)
+
+
+def _mr_channel_of(campaign: str, filename: str) -> str:
+    """캠페인명·파일명으로 어느 매체인지 가른다.
+
+    GFA 계정 안에 GFA(웹사이트 전환)와 애드부스트(ADVoost 쇼핑)가 같이 있고,
+    맨즈탭은 자사몰/외부몰로 갈라 보기 때문에 이름으로 구분해야 한다.
+    """
+    blob = f"{campaign} {filename}".lower()
+    ext = ("외부몰" in blob) or ("스마트스토어" in blob)
+    if any(k in blob for k in ("advoost", "adboost", "애드부스트", "ad voost")):
+        return "네이버 애드부스트"
+    if any(k in blob for k in ("맨즈탭", "맨즈텝", "manstab", "n.box", "핫아이템")):
+        return "네이버 맨즈탭_외부몰" if ext else "네이버 맨즈탭_자사몰"
+    if "gfa" in blob or "자사몰" in blob or "전환" in blob:
+        return "네이버 GFA"
+    return "네이버 GFA"
+
+
+def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
+    """매체 관리자에서 내려받은 '일별/소재별 성과' 파일을 일별 광고비로 접는다.
+
+    소재·광고그룹 단위로 여러 줄이 와도 날짜×매체로 합산한다.
+    네이버 계열 리포트(GFA·맨즈탭)의 '총비용'은 VAT가 포함된 금액이라 기본값을 True로 둔다.
+    VAT 별도로 내려오는 매체 파일이면 체크를 풀어 ×1.1을 적용한다.
+    """
+    df = _mr_read(file)
+    fname = getattr(file, "name", "") or ""
+    cols = list(df.columns)
+    c_date = _mr_pick(cols, MEDIA_REPORT_COLS["date"])
+    c_cost = _mr_pick(cols, MEDIA_REPORT_COLS["cost"])
+    c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
+    c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
+    c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
+
+    def num(s):
+        return pd.to_numeric(
+            s.astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0)
+
+    out = pd.DataFrame({
+        # '2026.08.11.' 처럼 끝에 점이 붙는 매체가 있어 먼저 떼어낸다
+        "report_date": pd.to_datetime(
+            df[c_date].astype(str).str.strip().str.rstrip("."), errors="coerce").dt.date,
+        "cost_incl_vat": num(df[c_cost]),
+        "impressions": num(df[c_imp]) if c_imp else 0,
+        "clicks": num(df[c_clk]) if c_clk else 0,
+        "channel": (df[c_cmp].astype(str) if c_cmp else pd.Series([""] * len(df))).map(
+            lambda v: _mr_channel_of(v, fname)),
+    })
+    out = out.dropna(subset=["report_date"])
+    if not vat_included:
+        out["cost_incl_vat"] = out["cost_incl_vat"] * 1.1
+    out = out.groupby(["report_date", "channel"], as_index=False).agg(
+        cost_incl_vat=("cost_incl_vat", "sum"),
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"))
+    return out[out[["cost_incl_vat", "impressions", "clicks"]].sum(axis=1) > 0]
+
+
 def detect_upload_kind(file) -> str:
     """올린 엑셀이 네 종류 중 무엇인지 판단한다.
 
@@ -3521,6 +3635,8 @@ def detect_upload_kind(file) -> str:
     flat = name.replace(" ", "").lower()
     if "주간보고서" in flat:
         return "weekly"
+    if any(k in flat for k in ("맨즈탭", "맨즈텝", "소재별", "일일성과", "result.csv")):
+        return "media_report"
     if "채널믹스" in flat:
         return "mix"
     if "예산" in flat and "믹스" not in flat:
@@ -3530,11 +3646,22 @@ def detect_upload_kind(file) -> str:
         file.seek(0)
         xls = pd.ExcelFile(file)
     except Exception:
+        try:
+            if not parse_media_report_file(file).empty:
+                return "media_report"
+        except Exception:
+            pass
         return "weekly"
 
     sheets = " ".join(str(s) for s in xls.sheet_names)
     if "매체통합" in sheets:
         return "weekly"
+
+    try:
+        if not parse_media_report_file(file).empty:
+            return "media_report"
+    except Exception:
+        pass
 
     for kind, fn in (
         ("mix", lambda: parse_channel_mix_sheet(xls, source_name=name)),
@@ -3558,8 +3685,9 @@ def render_upload_panel():
     # 업로더를 4개 두면 사이드바가 너무 길어져서 하나로 합쳤다. 파일을 넣으면 종류를 스스로
     # 알아내고, 잘못 잡히면 아래 셀렉트로 직접 고를 수 있게 한다.
     up_file = st.sidebar.file_uploader(
-        "데이터 파일 업로드", type=["xlsx", "xls"], key="unified_uploader",
-        help="주간 리포트 · GA 유입 데이터 · 연간 예산 · 채널 믹스 — 아무거나 넣으면 종류를 알아서 판단합니다.",
+        "데이터 파일 업로드", type=["xlsx", "xls", "csv"], key="unified_uploader",
+        help="주간 리포트 · GA 유입 데이터 · 연간 예산 · 채널 믹스 · 매체 리포트(GFA·맨즈탭 등) — "
+             "아무거나 넣으면 종류를 알아서 판단합니다.",
     )
 
     KIND_LABELS = {
@@ -3567,6 +3695,7 @@ def render_upload_panel():
         "ga": "② GA 유입 데이터 (유입·매출 / 매체별 유입 / UTM 매핑표)",
         "budget": "③ 연간 예산 (◆26년 월별 예산 정리)",
         "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
+        "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
     }
     kind = None
     if up_file is not None:
@@ -3582,6 +3711,7 @@ def render_upload_panel():
     ga_file = up_file if kind == "ga" else None
     budget_file = up_file if kind == "budget" else None
     mix_file = up_file if kind == "mix" else None
+    mr_file = up_file if kind == "media_report" else None
 
     if file is not None:
         today = date.today()
@@ -3793,6 +3923,50 @@ def render_upload_panel():
                 n_mix = save_table("channel_mix_budget", mix_df, "channel,year,month", mix_file.name)
                 st.cache_data.clear()
                 st.sidebar.success(f"저장 완료! 채널 믹스 {n_mix}행")
+                st.rerun()
+
+    if mr_file is not None:
+        st.sidebar.caption(
+            "매체 관리자에서 받은 일별/소재별 성과 파일입니다. 날짜×매체로 합쳐 광고비·노출·클릭을 "
+            "저장하고, 예산 일할값 대신 이 실집행액을 씁니다."
+        )
+        vat_in = st.sidebar.checkbox(
+            "이 파일 금액이 이미 VAT 포함", value=True, key="mr_vat",
+            help="체크 안 하면 VAT를 더해(×1.1) 다른 매체와 단위를 맞춥니다. "
+                 "매체 관리자 화면 금액과 대조해서 정하세요.",
+        )
+        try:
+            mr_df = parse_media_report_file(mr_file, vat_included=vat_in)
+        except Exception as e:
+            mr_df = pd.DataFrame()
+            st.sidebar.warning(f"읽지 못했습니다: {e}")
+        if not mr_df.empty:
+            chans = sorted(mr_df["channel"].unique())
+            st.sidebar.write(
+                f"📅 {mr_df['report_date'].min()} ~ {mr_df['report_date'].max()} · "
+                f"{len(mr_df)}행"
+            )
+            for ch in chans:
+                sub = mr_df[mr_df["channel"] == ch]
+                st.sidebar.write(
+                    f"• **{ch}** — 광고비 {sub['cost_incl_vat'].sum():,.0f}원 · "
+                    f"노출 {sub['impressions'].sum():,.0f} · 클릭 {sub['clicks'].sum():,.0f}"
+                )
+            # 캠페인명으로 매체를 잘못 짚었을 때 손으로 바꿀 수 있게 한다
+            fix = st.sidebar.selectbox(
+                "매체 지정 (자동 인식이 틀렸을 때만)",
+                ["자동 인식 그대로"] + MANUAL_SPEND_CHANNELS, key="mr_fix")
+            if fix != "자동 인식 그대로":
+                mr_df = mr_df.assign(channel=fix).groupby(
+                    ["report_date", "channel"], as_index=False).sum(numeric_only=True)
+
+            if st.sidebar.button("💾 매체 리포트 저장하기", type="primary", key="mr_save_btn"):
+                save_df = mr_df.copy()
+                save_df["source"] = "manual"
+                n = save_table("ad_spend_daily", save_df,
+                               "report_date,channel,source", mr_file.name)
+                st.cache_data.clear()
+                st.sidebar.success(f"저장 완료! {n}행")
                 st.rerun()
 
     st.sidebar.markdown("---")
@@ -6558,10 +6732,9 @@ def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
                     if day is None or cost is None:
                         continue
                     rows.append({"report_date": day, "channel": _gfa_channel_of(it),
-                                 # ⚠️ 확인 필요: 같은 네이버인 검색광고 salesAmt는 VAT 포함이었다.
-                                 # GFA도 포함일 가능성이 있으니, 실데이터가 들어오면 GFA 관리자
-                                 # 화면 금액과 대조해서 이 1.1을 뺄지 결정해야 한다.
-                                 "cost_incl_vat": float(cost) * 1.1,
+                                 # GFA 리포트의 '총비용'이 VAT 포함 금액인 것을 실데이터로 확인했다
+                                 # (검색광고 salesAmt와 동일). 1.1을 곱하면 10% 부풀려진다.
+                                 "cost_incl_vat": float(cost),
                                  "impressions": float(it.get("imp") or it.get("impression") or 0),
                                  "clicks": float(it.get("click") or it.get("clk") or 0),
                                  "source": "naver_gfa_api"})
