@@ -6062,8 +6062,8 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
 #   WEB_SITE(파워링크) · SHOPPING(쇼핑검색) → '네이버 검색광고'  (예산 파일에 쇼핑검색이 따로 없어 합침)
 #   BRAND_SEARCH                          → '네이버 브랜드검색광고'
 NAVER_CAMPAIGN_TYPE_CHANNEL = {
-    "WEB_SITE": "네이버 검색광고",
-    "SHOPPING": "네이버 검색광고",
+    "WEB_SITE": "네이버 검색광고",          # 파워링크
+    "SHOPPING": "네이버 쇼핑검색광고",        # 쇼핑검색 — 검색광고와 합치면 안 된다(별도 매체로 관리)
     "BRAND_SEARCH": "네이버 브랜드검색광고",
     "POWER_CONTENTS": "네이버 검색광고",
     "PLACE": "네이버 검색광고",
@@ -7042,7 +7042,8 @@ MEDIA_MASTER_DEFAULT = [
     # 슬래시 양옆 공백은 비교 전에 제거되므로 'Naver / cpc'와 'naver/cpc'는 같게 취급된다.
     ("네이버 검색광고",      "자사몰",  10, "네이버 검색광고",    "네이버 검색광고",      1.0,
      "naver/cpc"),
-    ("네이버 브랜드검색광고", "자사몰",  20, "",                 "네이버 브랜드검색광고",  1.0,
+    # 브랜드검색은 정액 상품이라 API가 집행액을 안 준다. 노출·클릭만 API에서 오고 광고비는 손입력.
+    ("네이버 브랜드검색광고", "자사몰",  20, "네이버 브랜드검색광고", "네이버 브랜드검색광고",  1.0,
      "naver/brand_pc,naver/cpm"),
     ("메타",               "자사몰",  30, "메타",              "메타",               1.0,
      "facebook/facebook_feed,meta/cpc,sns/cpc"),
@@ -7058,7 +7059,7 @@ MEDIA_MASTER_DEFAULT = [
      "naver/n.box,naversb/cpp,naver_sb/cpp"),
     ("카카오톡 플친",       "자사몰",  90, "카카오",             "카카오톡 플친",        1.0,
      "kakao_msg/email,kakaotalk/display"),
-    ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "",                  0.0,
+    ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "네이버 쇼핑검색광고",  1.0,
      ""),
     ("네이버 맨즈탭_외부몰",  "외부몰", 120, "",                 "네이버 맨즈탭",        0.5,
      ""),
@@ -7150,24 +7151,46 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
 
 
 def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
-    """기간 내 매체별 노출·클릭·광고비 합계. 같은 채널에 여러 출처가 있으면 우선순위 하나만 쓴다."""
-    empty = pd.DataFrame(columns=["channel", "impressions", "clicks", "cost_incl_vat", "source"])
+    """기간 내 매체별 노출·클릭·광고비.
+
+    지표마다 출처를 따로 고른다. 네이버 브랜드검색이 대표적인 이유인데, 정액(보장형) 상품이라
+    API가 노출·클릭은 주지만 집행액은 안 준다(관리자 화면에도 '-'로 뜬다). 출처를 행 단위로
+    하나만 고르면 API 행이 선택되면서 손으로 넣은 광고비가 통째로 날아간다.
+    그래서 '값이 있는 것 중 우선순위가 높은 출처'를 지표별로 뽑는다.
+    """
+    cols = ["channel", "impressions", "clicks", "cost_incl_vat", "source"]
     if ad_spend is None or ad_spend.empty:
-        return empty
+        return pd.DataFrame(columns=cols)
     a = ad_spend.copy()
     a["report_date"] = pd.to_datetime(a["report_date"], errors="coerce").dt.date
     a = a[(a["report_date"] >= start) & (a["report_date"] <= end)]
     if a.empty:
-        return empty
+        return pd.DataFrame(columns=cols)
     for c in ("impressions", "clicks", "cost_incl_vat"):
         a[c] = pd.to_numeric(a.get(c), errors="coerce").fillna(0)
     g = a.groupby(["channel", "source"], as_index=False).agg(
         impressions=("impressions", "sum"), clicks=("clicks", "sum"),
         cost_incl_vat=("cost_incl_vat", "sum"))
     prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0,
-            "criteo_api": 0, "naver_gfa_api": 0, "manual": 1, "agency_weekly": 2, "budget_prorate": 3}
+            "criteo_api": 0, "naver_gfa_api": 0, "manual": 1, "agency_weekly": 2,
+            "budget_prorate": 3}
     g["_p"] = g["source"].map(prio).fillna(9)
-    return g.sort_values("_p").drop_duplicates("channel", keep="first").drop(columns="_p")
+    g = g.sort_values("_p")
+
+    out = []
+    for ch, sub in g.groupby("channel"):
+        def pick(col):
+            hit = sub[sub[col] > 0]
+            if hit.empty:
+                return 0.0, ""
+            r = hit.iloc[0]
+            return float(r[col]), str(r["source"])
+        imp, _ = pick("impressions")
+        clk, _ = pick("clicks")
+        cost, csrc = pick("cost_incl_vat")
+        out.append({"channel": ch, "impressions": imp, "clicks": clk,
+                    "cost_incl_vat": cost, "source": csrc})
+    return pd.DataFrame(out, columns=cols)
 
 
 def _cp_month_budget(channel_mix: pd.DataFrame, ref: date) -> dict:
@@ -7196,6 +7219,8 @@ CP_CSS = """
 .cp-tbl{width:100%;border-collapse:collapse;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;font-size:12.5px}
 .cp-tbl th{background:#F4F2ED;color:#6E747C;font-size:11px;font-weight:700;text-align:right;padding:10px 12px;border-bottom:1px solid #E3E1DC;white-space:nowrap}
 .cp-tbl th.l,.cp-tbl td.l{text-align:left}
+.cp-ar{margin-left:5px;color:#B9BEC5;font-size:10px}
+.cp-tbl th:hover{background:#EDEAE3}
 .cp-tbl td{padding:11px 12px;text-align:right;border-bottom:1px solid #F0EEE9;white-space:nowrap}
 .cp-tbl tr:last-child td{border-bottom:none}
 .cp-tbl tr:hover td{background:#FAFAF8}
@@ -7333,31 +7358,23 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         f'<div class="s">구매 {_cp_int(tot_conv)}건</div></div>'
         '</div></div>', unsafe_allow_html=True)
 
-    # ── 정렬·필터 ────────────────────────────────────────
-    f1, f2, f3 = st.columns([1, 1.4, 1])
-    with f1:
-        scope_f = st.selectbox("구분", ["전체", "자사몰", "외부몰"], key="cp_scope")
-    with f2:
-        sort_col = st.selectbox("정렬 기준",
-                                ["기본 순서", "노출", "클릭", "비용", "GA구매", "GA매출", "GA ROAS", "월예산", "집행률"],
-                                key="cp_sort")
-    with f3:
-        desc = st.radio("정렬", ["내림차순", "오름차순"], horizontal=True, key="cp_dir") == "내림차순"
-
-    view = df if scope_f == "전체" else df[df["구분"] == scope_f]
-    view = view.sort_values("_order") if sort_col == "기본 순서" else \
-        view.sort_values(sort_col, ascending=not desc, na_position="last")
+    # ── 필터 (정렬은 표 헤더 클릭으로) ─────────────────────
+    scope_f = st.radio("구분", ["전체", "자사몰", "외부몰"], horizontal=True, key="cp_scope")
+    view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
 
     # ── 표 ───────────────────────────────────────────────
     heads = ["구분", "매체", "노출", "클릭", "총비용(VAT 포함)", "GA 구매", "GA 매출", "GA ROAS", "월 예산", "집행률"]
-    th = "".join(f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}</th>' for h in heads)
+    th = "".join(
+        f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}<span class="cp-ar">&#8645;</span></th>'
+        for h in heads)
     body = []
     for _, r in view.iterrows():
         badge = "cp-ext" if r["구분"] == "외부몰" else "cp-own"
-        roas_v = ('<span class="cp-mute">—</span>' if r["GA ROAS"] is None
+        roas_v = ('<span class="cp-mute">—</span>'
+                  if r["GA ROAS"] is None or pd.isna(r["GA ROAS"])
                   else f'{r["GA ROAS"]:,.1f}%')
         bud = _cp_won(r["월예산"]) if r["월예산"] > 0 else '<span class="cp-mute">미배정</span>'
-        if r["집행률"] is None:
+        if r["집행률"] is None or pd.isna(r["집행률"]):
             pace_v = '<span class="cp-mute">—</span>'
         else:
             cls = "cp-pill" if r["집행률"] <= 110 else "cp-pill warn"
@@ -7366,13 +7383,18 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             pace_v = f'<span class="{cls}">{r["집행률"]:.1f}%</span>'
         src = AD_SPEND_SOURCE_LABEL.get(r["_src"], "")
         sub = f'<div class="sub">{src}</div>' if src else ""
+        nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
         body.append(
             f'<tr><td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
             f'<td class="l m">{r["매체"]}{sub}</td>'
-            f'<td>{_cp_int(r["노출"])}</td><td>{_cp_int(r["클릭"])}</td>'
-            f'<td>{_cp_won(r["비용"])}</td><td>{_cp_int(r["GA구매"])}</td>'
-            f'<td>{_cp_won(r["GA매출"])}</td><td>{roas_v}</td>'
-            f'<td>{bud}</td><td>{pace_v}</td></tr>')
+            f'<td data-v="{r["노출"]:.0f}">{_cp_int(r["노출"])}</td>'
+            f'<td data-v="{r["클릭"]:.0f}">{_cp_int(r["클릭"])}</td>'
+            f'<td data-v="{r["비용"]:.0f}">{_cp_won(r["비용"])}</td>'
+            f'<td data-v="{r["GA구매"]:.0f}">{_cp_int(r["GA구매"])}</td>'
+            f'<td data-v="{r["GA매출"]:.0f}">{_cp_won(r["GA매출"])}</td>'
+            f'<td data-v="{nn(r["GA ROAS"]):.2f}">{roas_v}</td>'
+            f'<td data-v="{r["월예산"]:.0f}">{bud}</td>'
+            f'<td data-v="{nn(r["집행률"]):.2f}">{pace_v}</td></tr>')
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{view["GA매출"].sum() / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
@@ -7383,15 +7405,62 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         f'<td>{_cp_won(view["GA매출"].sum())}</td><td>{s_roas}</td>'
         f'<td>{_cp_won(s_bud)}</td><td>{s_pace}</td></tr>')
 
-    st.markdown(
-        f'<div class="cp-wrap"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
-        f'<tbody>{"".join(body)}</tbody></table>'
+    note = (
         '<div class="cp-note">'
+        '· 표 머리글을 누르면 그 열로 정렬됩니다(한 번 더 누르면 반대 방향). 합계행은 항상 맨 아래입니다.<br>'
         '· 노출·클릭·광고비는 <b>매체 API 실집행</b>, 구매·매출은 <b>GA4</b> 기준입니다. '
         '매체 자체 전환수는 매체마다 집계 기준이 달라 서로 더할 수 없어 쓰지 않습니다.<br>'
-        '· 네이버 브랜드검색은 정액(보장형) 상품이라 검색광고 API에 집행액이 안 잡혀 위에서 직접 입력합니다.<br>'
+        '· 네이버 브랜드검색은 정액(보장형) 상품이라 API가 집행액을 안 줍니다 — 노출·클릭만 API에서 오고 '
+        '광고비는 위 칸에서 직접 넣습니다.<br>'
         '· 외부몰(쇼핑검색·맨즈탭 외부몰) 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 0으로 표시됩니다.'
-        '</div></div>', unsafe_allow_html=True)
+        '</div>'
+    )
+    html = (
+        CP_CSS
+        + '<div class="cp-wrap"><table class="cp-tbl" id="cptbl"><thead><tr>' + th + '</tr></thead>'
+        + '<tbody>' + "".join(body) + '</tbody></table>' + note + '</div>'
+        + """
+<script>
+(function(){
+  var tbl = document.getElementById('cptbl');
+  var ths = tbl.tHead.rows[0].cells;
+  var state = {i:-1, asc:false};
+  function val(row, i){
+    var c = row.cells[i];
+    var raw = (c.getAttribute('data-v'));
+    if(raw !== null) return parseFloat(raw);
+    return c.innerText.trim();
+  }
+  for(var i=0;i<ths.length;i++){
+    (function(i){
+      ths[i].style.cursor='pointer';
+      ths[i].addEventListener('click', function(){
+        var asc = (state.i===i) ? !state.asc : false;
+        state = {i:i, asc:asc};
+        var tb = tbl.tBodies[0];
+        var rows = Array.prototype.slice.call(tb.rows);
+        var total = rows.filter(function(r){return r.classList.contains('cp-tot');});
+        rows = rows.filter(function(r){return !r.classList.contains('cp-tot');});
+        rows.sort(function(a,b){
+          var x=val(a,i), y=val(b,i);
+          if(typeof x==='number' && typeof y==='number'){
+            if(isNaN(x)) x=-Infinity; if(isNaN(y)) y=-Infinity;
+            return asc ? x-y : y-x;
+          }
+          return asc ? String(x).localeCompare(String(y),'ko')
+                     : String(y).localeCompare(String(x),'ko');
+        });
+        rows.concat(total).forEach(function(r){tb.appendChild(r);});
+        for(var k=0;k<ths.length;k++){
+          ths[k].querySelector('.cp-ar').textContent = (k===i) ? (asc?'\u2191':'\u2193') : '\u21C5';
+        }
+      });
+    })(i);
+  }
+})();
+</script>"""
+    )
+    st.components.v1.html(html, height=260 + 46 * len(view), scrolling=True)
 
     # 어느 매체에도 안 잡힌 GA 유입을 드러낸다. 조용히 사라지면 합계가 안 맞는 걸 눈치채기 어렵다.
     un = ga_map.get("_미매칭", {})
@@ -7408,6 +7477,30 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 pd.DataFrame(keys, columns=["소스 / 매체", "GA 매출"]),
                 use_container_width=True, hide_index=True,
             )
+
+    with st.expander("🔄 광고비 다시 받기 (수치가 안 맞을 때)"):
+        st.caption(
+            "평소 동기화는 최근 3일만 다시 받습니다. 컬럼을 새로 추가했거나(노출·클릭), "
+            "매체 분류를 바꿨거나, 데이터를 지운 뒤에는 과거 날짜가 낡은 채로 남으니 여기서 기간을 "
+            "지정해 통째로 다시 받으세요."
+        )
+        r1, r2, r3 = st.columns([1, 1, 1])
+        with r1:
+            rs = st.date_input("시작", start, key="cp_rs")
+        with r2:
+            re_ = st.date_input("종료", end, key="cp_re")
+        with r3:
+            st.write("")
+            go = st.button("다시 받기", key="cp_resync", type="primary", use_container_width=True)
+        if go:
+            with st.spinner("매체별로 받아오는 중..."):
+                saved, errors = force_resync_ad_spend(min(rs, re_), max(rs, re_))
+            for k, v in saved.items():
+                (st.success if v else st.info)(f"{k}: {v}행")
+            for k, v in errors.items():
+                st.warning(f"{k} 실패: {v}")
+            st.cache_data.clear()
+            st.info("위 표를 갱신하려면 화면을 새로고침하세요.")
 
     # 표를 좁게 만들지 않으려고 매체 정의는 화면 맨 아래 접힌 패널로 뺀다.
     with st.expander("⚙️ 매체 정의 (구분 · 광고비 출처 · 예산 배분 · UTM 매칭)"):
@@ -7449,6 +7542,28 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                     st.cache_data.clear()
         with mc2:
             st.caption("저장하면 위 표가 바로 이 정의대로 다시 그려집니다.")
+
+def force_resync_ad_spend(start: date, end: date):
+    """기간을 지정해 광고비를 처음부터 다시 받아온다.
+
+    평소 동기화는 '마지막 저장일 - 2일'부터만 다시 받는다(매체 수치 보정 반영용).
+    그래서 컬럼을 새로 추가했거나(노출·클릭), 잘못된 데이터를 지웠거나, 매체 분류 규칙을
+    바꿨을 때는 과거 날짜가 낡은 채로 남는다. 그럴 때 쓰는 버튼이다.
+    """
+    saved, errors = {}, {}
+    for label, fn in AD_SPEND_FETCHERS:
+        try:
+            df = fn(start, end)
+        except Exception as e:
+            errors[label] = str(e)[:250]
+            continue
+        if df is None or df.empty:
+            saved[label] = 0
+            continue
+        saved[label] = save_table("ad_spend_daily", df,
+                                  "report_date,channel,source", f"{label} API(재수집)")
+    return saved, errors
+
 
 def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
                           channel_mix: pd.DataFrame, start: date, end: date):
