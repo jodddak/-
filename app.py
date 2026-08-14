@@ -7311,6 +7311,19 @@ CP_CSS = """
 .cp-mute{color:#C2C6CC}
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
 .cp-note{font-size:11px;color:#9AA0A8;margin-top:10px;line-height:1.7}
+.cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
+.cp-btnpad{height:26px}
+</style>
+<style>
+/* 기간 바: 컨트롤들을 한 덩어리 카드처럼 보이게 한다 */
+.st-key-cpbar{background:#FFF;border:1px solid #E3E1DC;border-radius:12px;
+  padding:10px 14px 4px;margin-bottom:14px}
+.st-key-cpbar label{font-size:10.5px !important;color:#8A9099 !important;font-weight:600 !important}
+.st-key-cpbar [data-baseweb="select"]>div,
+.st-key-cpbar [data-testid="stDateInput"] input{border-radius:8px !important;font-size:13px !important}
+.st-key-cpbar .stButton>button{border-radius:8px;background:#14181F;color:#F3F1EC;
+  border:none;font-weight:700;font-size:13px;padding:7px 0}
+.st-key-cpbar .stButton>button:hover{background:#2A3038;color:#FFF}
 </style>
 """
 
@@ -7336,26 +7349,47 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 
     mst = media_master_frame(master)
 
-    # ── 기간 ─────────────────────────────────────────────
+    # ── 기간 바 ──────────────────────────────────────────
+    # 프리셋을 고르면 날짜가 그에 맞게 채워지고, 채워진 날짜를 손으로 고쳐도 된다.
+    # (date_input의 key에 preset을 넣어야 프리셋을 바꿨을 때 값이 새로 잡힌다)
     today = date.today()
-    c1, c2, c3 = st.columns([1.2, 1, 1])
-    with c1:
-        preset = st.selectbox("조회 기간", ["이번 달 누적", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
-                              key="cp_preset")
-    if preset == "이번 달 누적":
-        start, end = today.replace(day=1), today - timedelta(days=1)
-    elif preset == "최근 7일":
-        end = today - timedelta(days=1); start = end - timedelta(days=6)
-    elif preset == "최근 30일":
-        end = today - timedelta(days=1); start = end - timedelta(days=29)
-    elif preset == "지난 달":
-        first = today.replace(day=1)
-        end = first - timedelta(days=1); start = end.replace(day=1)
-    else:
-        with c2:
-            start = st.date_input("시작", today.replace(day=1), key="cp_s")
-        with c3:
-            end = st.date_input("종료", today - timedelta(days=1), key="cp_e")
+
+    def _range_for(name):
+        if name == "이번 달":
+            return today.replace(day=1), today - timedelta(days=1)
+        if name == "최근 7일":
+            e = today - timedelta(days=1); return e - timedelta(days=6), e
+        if name == "최근 30일":
+            e = today - timedelta(days=1); return e - timedelta(days=29), e
+        if name == "지난 달":
+            f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
+        return today.replace(day=1), today - timedelta(days=1)
+
+    try:
+        bar = st.container(key="cpbar")
+    except TypeError:
+        bar = st.container()
+    with bar:
+        b1, b2, b3, b4, b5, b6 = st.columns([1.05, 1.05, 0.12, 1.05, 0.5, 1.15])
+        with b1:
+            preset = st.selectbox("조회 기간",
+                                  ["이번 달", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
+                                  key="cp_preset")
+        d0, d1 = _range_for(preset)
+        with b2:
+            start = st.date_input("시작일", d0, key=f"cp_s_{preset}", format="YYYY-MM-DD")
+        with b3:
+            st.markdown('<div class="cp-arrow">→</div>', unsafe_allow_html=True)
+        with b4:
+            end = st.date_input("종료일", d1, key=f"cp_e_{preset}", format="YYYY-MM-DD")
+        with b5:
+            st.markdown('<div class="cp-btnpad"></div>', unsafe_allow_html=True)
+            if st.button("조회", key="cp_apply", use_container_width=True):
+                st.cache_data.clear()
+        with b6:
+            src_label = "GA4 · 실제 데이터" if (ga_daily is not None and not ga_daily.empty) \
+                else "엑셀 업로드 데이터"
+            st.selectbox("데이터 소스", [src_label], key="cp_src", disabled=True)
     if start > end:
         start, end = end, start
 
