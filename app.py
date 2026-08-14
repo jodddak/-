@@ -3510,12 +3510,78 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
 # ──────────────────────────────────────────────────────────────
 # 업로드 패널
 # ──────────────────────────────────────────────────────────────
+def detect_upload_kind(file) -> str:
+    """올린 엑셀이 네 종류 중 무엇인지 판단한다.
+
+    파일명으로 먼저 보고(가장 확실), 안 되면 각 파서를 실제로 돌려서 데이터가 나오는 쪽을 고른다.
+    각 파서에는 이미 시트명·필수컬럼 가드가 있어서 엉뚱한 파일에는 빈 결과를 낸다.
+    마지막까지 못 고르면 '주간 리포트'로 본다(가장 자주 올리는 파일).
+    """
+    name = (getattr(file, "name", "") or "")
+    flat = name.replace(" ", "").lower()
+    if "주간보고서" in flat:
+        return "weekly"
+    if "채널믹스" in flat:
+        return "mix"
+    if "예산" in flat and "믹스" not in flat:
+        return "budget"
+
+    try:
+        file.seek(0)
+        xls = pd.ExcelFile(file)
+    except Exception:
+        return "weekly"
+
+    sheets = " ".join(str(s) for s in xls.sheet_names)
+    if "매체통합" in sheets:
+        return "weekly"
+
+    for kind, fn in (
+        ("mix", lambda: parse_channel_mix_sheet(xls, source_name=name)),
+        ("budget", lambda: parse_channel_budget_sheet(xls)),
+        ("ga", lambda: parse_inflow_revenue_sheet(xls)),
+        ("ga", lambda: parse_utm_channel_map(xls)),
+    ):
+        try:
+            if not fn().empty:
+                return kind
+        except Exception:
+            continue
+    return "weekly"
+
+
 def render_upload_panel():
     st.sidebar.header("⚙️ 데이터 관리")
     client = get_supabase_client()
     st.sidebar.caption(f"저장소: {'Supabase (Postgres)' if client else '로컬 세션 (테스트용, 새로고침 시 초기화)'}")
 
-    file = st.sidebar.file_uploader("① 주간 리포트 업로드 (STCO_주간보고서_...xlsx)", type=["xlsx", "xls"])
+    # 업로더를 4개 두면 사이드바가 너무 길어져서 하나로 합쳤다. 파일을 넣으면 종류를 스스로
+    # 알아내고, 잘못 잡히면 아래 셀렉트로 직접 고를 수 있게 한다.
+    up_file = st.sidebar.file_uploader(
+        "데이터 파일 업로드", type=["xlsx", "xls"], key="unified_uploader",
+        help="주간 리포트 · GA 유입 데이터 · 연간 예산 · 채널 믹스 — 아무거나 넣으면 종류를 알아서 판단합니다.",
+    )
+
+    KIND_LABELS = {
+        "weekly": "① 주간 리포트 (STCO_주간보고서)",
+        "ga": "② GA 유입 데이터 (유입·매출 / 매체별 유입 / UTM 매핑표)",
+        "budget": "③ 연간 예산 (◆26년 월별 예산 정리)",
+        "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
+    }
+    kind = None
+    if up_file is not None:
+        auto = detect_upload_kind(up_file)
+        opts = ["자동 인식: " + KIND_LABELS[auto]] + [v for k, v in KIND_LABELS.items()]
+        pick = st.sidebar.selectbox("파일 종류", opts, index=0, key="unified_kind")
+        if pick.startswith("자동 인식"):
+            kind = auto
+        else:
+            kind = next(k for k, v in KIND_LABELS.items() if v == pick)
+
+    file = up_file if kind == "weekly" else None
+    ga_file = up_file if kind == "ga" else None
+    budget_file = up_file if kind == "budget" else None
+    mix_file = up_file if kind == "mix" else None
 
     if file is not None:
         today = date.today()
@@ -3605,11 +3671,6 @@ def render_upload_panel():
             )
             st.rerun()
 
-    st.sidebar.markdown("---")
-    ga_file = st.sidebar.file_uploader(
-        "② GA 유입 데이터 업로드 (유입·매출 비교 / GA 매체별 유입 경로 / UTM 매핑표 xlsx)",
-        type=["xlsx", "xls"], key="ga_combined_uploader",
-    )
     if ga_file is not None:
         with st.sidebar.status("파일 분석 중...", expanded=True) as status2:
             # 세 파일은 시트 구조가 서로 달라서, 하나의 업로더에서 세 파서를 다 시도해보고
@@ -3674,11 +3735,6 @@ def render_upload_panel():
             st.sidebar.success("저장 완료! " + (" · ".join(saved_msgs) if saved_msgs else "저장할 데이터가 없습니다."))
             st.rerun()
 
-    st.sidebar.markdown("---")
-    budget_file = st.sidebar.file_uploader(
-        "③ 연간 예산 파일 업로드 (◆26년 월별 예산 정리 xlsx)",
-        type=["xlsx", "xls"], key="budget_uploader",
-    )
     if budget_file is not None:
         with st.sidebar.status("파일 분석 중...", expanded=True) as status3:
             budget_xls = pd.ExcelFile(budget_file)
@@ -3716,11 +3772,6 @@ def render_upload_panel():
                 st.sidebar.success(f"저장 완료! 예산 {n_budget}행")
                 st.rerun()
 
-    st.sidebar.markdown("---")
-    mix_file = st.sidebar.file_uploader(
-        "④ 채널 믹스(연간 예산) 업로드 (26년 매체별 채널 믹스 xlsx)",
-        type=["xlsx", "xls"], key="channel_mix_uploader",
-    )
     if mix_file is not None:
         with st.sidebar.status("파일 분석 중...", expanded=True) as status4:
             mix_xls = pd.ExcelFile(mix_file)
@@ -7094,14 +7145,8 @@ MEDIA_MASTER_DEFAULT = [
      ""),
     ("네이버 맨즈탭_외부몰",  "외부몰", 120, "",                 "네이버 맨즈탭",        0.5,
      ""),
-    # 아래는 현재 미집행이거나 과거 잔여 데이터. 행을 남겨둬야 GA 매출이 어디로도 안 잡히고
-    # 사라지는 일이 없다. 안 쓸 거면 '매체 정의' 패널에서 행을 지우면 된다.
-    ("네이버 트렌드픽",      "자사몰", 130, "네이버 트렌드픽",     "신규 매체",           1.0,
-     "naver/mo.trend"),
-    ("모비온",              "자사몰", 140, "모비온",            "모비온",              1.0,
-     "mobon/cpc,mobion/cpc"),
-    ("ADN",                "자사몰", 150, "",                 "",                   0.0,
-     "adn/cpc"),
+    # 모비온·ADN·트렌드픽은 현재 미집행이라 뺐다. 다시 집행하면 '매체 정의' 패널에서
+    # 행을 추가하면 된다 (UTM: mobon/cpc · adn/cpc · naver/mo.trend).
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
                      "budget_line", "budget_share", "utm_match", "note"]
