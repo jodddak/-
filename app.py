@@ -645,6 +645,7 @@ TABLES = {
     "ga_channel_daily": "ga_channel_daily",
     "decision_log": "decision_log",
     "ad_spend_daily": "ad_spend_daily",
+    "media_master": "media_master",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -4194,8 +4195,8 @@ def render_creative_performance(creatives: pd.DataFrame):
 NAV_GROUPS = {
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
-    "GA 유입 리포트": ["채널 퍼널 리포트", "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
-    "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분", "마일스톤"],
+    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
+    "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
     "가이드": ["가이드"],
 }
 
@@ -4212,7 +4213,7 @@ NAV_GROUP_KEYS = {
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
 # main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
-NAV_PAGES_COMING_SOON = {"마일스톤", "UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
+NAV_PAGES_COMING_SOON = {"UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
 
 
 def render_coming_soon(page_name: str):
@@ -7024,6 +7025,431 @@ def render_manual_spend_panel(ad_spend: pd.DataFrame):
                     st.cache_data.clear()
 
 
+# ══════════════════════════════════════════════════════════════
+# 채널 성과 (CHANNEL PERFORMANCE) — 광고비·ROAS 한 장
+#
+# 표에 들어갈 값의 출처가 서로 다르다는 게 이 화면의 핵심이다.
+#   · 노출/클릭/광고비 → 매체 API (ad_spend_daily)
+#   · 구매/매출        → GA4 (ga_channel_daily)  ← 매체 자체 전환수는 일부러 안 쓴다
+#   · 월예산           → 채널믹스 파일 (channel_mix_budget)
+# 매체 자체 전환은 매체마다 기준(어트리뷰션 윈도우)이 달라 서로 못 더한다. GA 기준으로 통일해야
+# 매체끼리 비교가 성립한다 — 사용자의 기존 KPI 체계(GA-ROAS)와도 같은 이유다.
+# ══════════════════════════════════════════════════════════════
+
+MEDIA_MASTER_DEFAULT = [
+    # (매체명, 구분, 순서, 광고비 출처 채널, 예산 라인, 예산 배분, UTM 매칭)
+    # UTM 매칭 값은 'STCO UTM 리스트(260813)'의 소스/매체를 그대로 옮긴 것.
+    # 슬래시 양옆 공백은 비교 전에 제거되므로 'Naver / cpc'와 'naver/cpc'는 같게 취급된다.
+    ("네이버 검색광고",      "자사몰",  10, "네이버 검색광고",    "네이버 검색광고",      1.0,
+     "naver/cpc"),
+    ("네이버 브랜드검색광고", "자사몰",  20, "",                 "네이버 브랜드검색광고",  1.0,
+     "naver/brand_pc,naver/cpm"),
+    ("메타",               "자사몰",  30, "메타",              "메타",               1.0,
+     "facebook/facebook_feed,meta/cpc,sns/cpc"),
+    ("GFA_애드부스트",      "자사몰",  40, "네이버 애드부스트",    "네이버 GFA",          0.5,
+     "naver/gfa_애드부스트"),
+    ("GFA_자사몰",         "자사몰",  50, "네이버 GFA",         "네이버 GFA",          0.5,
+     "naver/gfa,naver/da,naver/display"),
+    ("크리테오",            "자사몰",  60, "크리테오",           "크리테오",            1.0,
+     "criteo/display,criteo/cpc"),
+    ("구글_실적최대화",      "자사몰",  70, "구글",              "구글",               1.0,
+     "google/cpc"),
+    ("네이버 맨즈탭_자사몰",  "자사몰",  80, "",                 "네이버 맨즈탭",        0.5,
+     "naver/n.box,naversb/cpp,naver_sb/cpp"),
+    ("카카오톡 플친",       "자사몰",  90, "카카오",             "카카오톡 플친",        1.0,
+     "kakao_msg/email,kakaotalk/display"),
+    ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "",                  0.0,
+     ""),
+    ("네이버 맨즈탭_외부몰",  "외부몰", 120, "",                 "네이버 맨즈탭",        0.5,
+     ""),
+    # 아래는 현재 미집행이거나 과거 잔여 데이터. 행을 남겨둬야 GA 매출이 어디로도 안 잡히고
+    # 사라지는 일이 없다. 안 쓸 거면 '매체 정의' 패널에서 행을 지우면 된다.
+    ("네이버 트렌드픽",      "자사몰", 130, "네이버 트렌드픽",     "신규 매체",           1.0,
+     "naver/mo.trend"),
+    ("모비온",              "자사몰", 140, "모비온",            "모비온",              1.0,
+     "mobon/cpc,mobion/cpc"),
+    ("ADN",                "자사몰", 150, "",                 "",                   0.0,
+     "adn/cpc"),
+]
+MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
+                     "budget_line", "budget_share", "utm_match", "note"]
+
+
+def media_master_frame(saved: pd.DataFrame = None) -> pd.DataFrame:
+    """저장된 매체 정의가 있으면 그걸 쓰고, 없으면 기본값으로 시작한다."""
+    if saved is not None and not saved.empty and "media" in saved.columns:
+        df = saved.copy()
+        for c in MEDIA_MASTER_COLS:
+            if c not in df.columns:
+                df[c] = "" if c not in ("sort_order", "budget_share") else (100 if c == "sort_order" else 1.0)
+        return df[MEDIA_MASTER_COLS].sort_values("sort_order").reset_index(drop=True)
+    rows = [dict(zip(MEDIA_MASTER_COLS[:-1], r)) for r in MEDIA_MASTER_DEFAULT]
+    df = pd.DataFrame(rows)
+    df["note"] = ""
+    return df[MEDIA_MASTER_COLS]
+
+
+def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
+                    start: date, end: date) -> dict:
+    """GA4 원본(source/medium 단위)을 매체 정의의 utm_match로 묶는다.
+
+    매칭은 두 단계다.
+
+    1) **완전일치** — UTM 리스트가 'Naver / GFA_애드부스트'처럼 소스/매체 쌍을 그대로 주므로,
+       공백만 지우고 통째로 비교하면 대부분 여기서 끝난다. 가장 안전하다.
+    2) **부분일치** — 리스트에 없는 새 UTM이 생겼을 때의 안전망. 패턴이 긴 것부터 본다.
+
+    이 순서가 중요한 이유: 'naver/gfa_애드부스트'는 'naver/gfa'를 문자열로 포함한다.
+    부분일치만 쓰면 애드부스트 매출이 통째로 GFA_자사몰로 넘어간다. 완전일치를 먼저 보면
+    이 사고가 원천적으로 안 난다.
+
+    어디에도 안 걸린 유입은 '_미매칭'으로 따로 모아, 화면에서 누락을 확인할 수 있게 한다.
+    """
+    out = {m: {"conv": 0.0, "rev": 0.0} for m in master["media"]}
+    out["_미매칭"] = {"conv": 0.0, "rev": 0.0, "keys": {}}
+    if ga_daily is None or ga_daily.empty or "source_medium" not in ga_daily.columns:
+        return out
+    g = ga_daily.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"], errors="coerce").dt.date
+    g = g[(g["report_date"] >= start) & (g["report_date"] <= end)]
+    if g.empty:
+        return out
+
+    def norm(s):
+        return "".join(str(s or "").lower().split())
+
+    exact, partial = {}, []
+    for _, m in master.sort_values("sort_order").iterrows():
+        for kw in str(m.get("utm_match") or "").split(","):
+            kw = norm(kw)
+            if not kw:
+                continue
+            exact.setdefault(kw, m["media"])
+            partial.append((len(kw), kw, m["media"]))
+    partial.sort(key=lambda x: -x[0])
+
+    for _, row in g.iterrows():
+        sm = norm(row.get("source_medium"))
+        conv = float(row.get("conversions") or 0)
+        rev = float(row.get("revenue") or 0)
+        media = exact.get(sm)
+        if media is None:
+            for _, kw, mm in partial:
+                if kw in sm:
+                    media = mm
+                    break
+        if media is None:
+            out["_미매칭"]["conv"] += conv
+            out["_미매칭"]["rev"] += rev
+            k = str(row.get("source_medium") or "(없음)")
+            out["_미매칭"]["keys"][k] = out["_미매칭"]["keys"].get(k, 0) + rev
+            continue
+        out[media]["conv"] += conv
+        out[media]["rev"] += rev
+    return out
+
+
+def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """기간 내 매체별 노출·클릭·광고비 합계. 같은 채널에 여러 출처가 있으면 우선순위 하나만 쓴다."""
+    empty = pd.DataFrame(columns=["channel", "impressions", "clicks", "cost_incl_vat", "source"])
+    if ad_spend is None or ad_spend.empty:
+        return empty
+    a = ad_spend.copy()
+    a["report_date"] = pd.to_datetime(a["report_date"], errors="coerce").dt.date
+    a = a[(a["report_date"] >= start) & (a["report_date"] <= end)]
+    if a.empty:
+        return empty
+    for c in ("impressions", "clicks", "cost_incl_vat"):
+        a[c] = pd.to_numeric(a.get(c), errors="coerce").fillna(0)
+    g = a.groupby(["channel", "source"], as_index=False).agg(
+        impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+        cost_incl_vat=("cost_incl_vat", "sum"))
+    prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0,
+            "criteo_api": 0, "naver_gfa_api": 0, "manual": 1, "agency_weekly": 2, "budget_prorate": 3}
+    g["_p"] = g["source"].map(prio).fillna(9)
+    return g.sort_values("_p").drop_duplicates("channel", keep="first").drop(columns="_p")
+
+
+def _cp_month_budget(channel_mix: pd.DataFrame, ref: date) -> dict:
+    """채널믹스 파일에서 해당 월의 매체별 예산을 꺼낸다."""
+    out = {}
+    if channel_mix is None or channel_mix.empty:
+        return out
+    m = channel_mix.copy()
+    for c in ("year", "month"):
+        m[c] = pd.to_numeric(m.get(c), errors="coerce")
+    m = m[(m["year"] == ref.year) & (m["month"] == ref.month)]
+    for _, r in m.iterrows():
+        out[str(r.get("channel"))] = float(r.get("budget") or 0)
+    return out
+
+CP_CSS = """
+<style>
+.cp-wrap{font-family:-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif;color:#14181F}
+.cp-eyebrow{font-size:10px;letter-spacing:.14em;font-weight:700;color:#8A9099;text-transform:uppercase;margin-bottom:4px}
+.cp-title{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 14px}
+.cp-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#E3E1DC;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;margin-bottom:14px}
+.cp-kpi{background:#FFF;padding:14px 16px}
+.cp-kpi .k{font-size:11px;color:#8A9099;font-weight:600;margin-bottom:6px}
+.cp-kpi .v{font-size:22px;font-weight:800;letter-spacing:-.02em}
+.cp-kpi .s{font-size:11px;color:#9AA0A8;margin-top:4px}
+.cp-tbl{width:100%;border-collapse:collapse;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;font-size:12.5px}
+.cp-tbl th{background:#F4F2ED;color:#6E747C;font-size:11px;font-weight:700;text-align:right;padding:10px 12px;border-bottom:1px solid #E3E1DC;white-space:nowrap}
+.cp-tbl th.l,.cp-tbl td.l{text-align:left}
+.cp-tbl td{padding:11px 12px;text-align:right;border-bottom:1px solid #F0EEE9;white-space:nowrap}
+.cp-tbl tr:last-child td{border-bottom:none}
+.cp-tbl tr:hover td{background:#FAFAF8}
+.cp-tbl td.m{font-weight:700;color:#14181F}
+.cp-tbl td.sub{font-size:10.5px;color:#9AA0A8;font-weight:400}
+.cp-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10.5px;font-weight:700}
+.cp-own{background:#14181F;color:#EFEDE7}
+.cp-ext{background:#E7E4F7;color:#4B3FA8}
+.cp-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10.5px;font-weight:700;background:#EAF7D9;color:#3F6B12}
+.cp-pill.warn{background:#FDEDE3;color:#9A4B14}
+.cp-pill.zero{background:#F1F1EF;color:#9AA0A8}
+.cp-mute{color:#C2C6CC}
+.cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
+.cp-note{font-size:11px;color:#9AA0A8;margin-top:10px;line-height:1.7}
+</style>
+"""
+
+
+def _cp_won(v):
+    try:
+        v = float(v)
+    except Exception:
+        return '<span class="cp-mute">—</span>'
+    return f"₩{v:,.0f}"
+
+
+def _cp_int(v):
+    try:
+        return f"{float(v):,.0f}"
+    except Exception:
+        return "0"
+
+
+def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None):
+    """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
+    st.markdown(CP_CSS, unsafe_allow_html=True)
+
+    mst = media_master_frame(master)
+
+    # ── 기간 ─────────────────────────────────────────────
+    today = date.today()
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    with c1:
+        preset = st.selectbox("조회 기간", ["이번 달 누적", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
+                              key="cp_preset")
+    if preset == "이번 달 누적":
+        start, end = today.replace(day=1), today - timedelta(days=1)
+    elif preset == "최근 7일":
+        end = today - timedelta(days=1); start = end - timedelta(days=6)
+    elif preset == "최근 30일":
+        end = today - timedelta(days=1); start = end - timedelta(days=29)
+    elif preset == "지난 달":
+        first = today.replace(day=1)
+        end = first - timedelta(days=1); start = end.replace(day=1)
+    else:
+        with c2:
+            start = st.date_input("시작", today.replace(day=1), key="cp_s")
+        with c3:
+            end = st.date_input("종료", today - timedelta(days=1), key="cp_e")
+    if start > end:
+        start, end = end, start
+
+    # ── 네이버 브랜드검색 광고비 직접 입력 ──────────────────
+    # 브랜드검색은 정액(보장형) 상품이라 검색광고 API 통계에 집행액이 안 잡힌다.
+    # 그래서 이 매체만 손으로 넣고, 넣은 값은 manual 출처로 저장해 예산 일할값을 덮어쓴다.
+    with st.container():
+        st.markdown('<div class="cp-eyebrow">MANUAL BRAND COST</div>', unsafe_allow_html=True)
+        bc1, bc2 = st.columns([3, 1])
+        with bc1:
+            brand_cost = st.number_input(
+                f"네이버 브랜드검색 광고비 — {start} ~ {end} (VAT 포함, 기간 전체 금액)",
+                min_value=0, step=10000, value=0, key="cp_brand_cost")
+        with bc2:
+            st.write("")
+            save_brand = st.button("저장하고 반영", key="cp_brand_save", type="primary",
+                                   use_container_width=True)
+        if save_brand and brand_cost > 0:
+            days = (end - start).days + 1
+            per = brand_cost / days
+            rows = [{"report_date": start + timedelta(days=i), "channel": "네이버 브랜드검색광고",
+                     "cost_incl_vat": per, "impressions": 0, "clicks": 0, "source": "manual"}
+                    for i in range(days)]
+            n = save_table("ad_spend_daily", pd.DataFrame(rows),
+                           "report_date,channel,source", "브랜드검색 직접 입력")
+            st.success(f"{n}일로 나눠 저장했습니다. 새로고침하면 반영됩니다.")
+            st.cache_data.clear()
+
+    # ── 집계 ─────────────────────────────────────────────
+    spend = _cp_spend_by_channel(ad_spend, start, end)
+    spend_map = {r["channel"]: r for _, r in spend.iterrows()} if not spend.empty else {}
+    ga_map = _cp_ga_by_media(ga_daily, mst, start, end)
+    budget_map = _cp_month_budget(channel_mix, start)
+
+    recs = []
+    for _, r in mst.iterrows():
+        sc = str(r.get("spend_channel") or "").strip()
+        sp = spend_map.get(sc, {})
+        bl = str(r.get("budget_line") or "").strip()
+        share = float(r.get("budget_share") or 0)
+        budget = budget_map.get(bl, 0) * share if bl else 0
+        g = ga_map.get(r["media"], {"conv": 0.0, "rev": 0.0})
+        cost = float(sp.get("cost_incl_vat", 0) or 0)
+        recs.append({
+            "구분": r.get("scope", "자사몰"), "매체": r["media"],
+            "노출": float(sp.get("impressions", 0) or 0),
+            "클릭": float(sp.get("clicks", 0) or 0),
+            "비용": cost,
+            "GA구매": g["conv"], "GA매출": g["rev"],
+            "GA ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
+            "월예산": budget,
+            "집행률": (cost / budget * 100) if budget > 0 else None,
+            "_src": sp.get("source", ""), "_order": int(r.get("sort_order") or 100),
+        })
+    df = pd.DataFrame(recs)
+
+    # ── 상단 KPI ─────────────────────────────────────────
+    tot_cost = df["비용"].sum()
+    tot_budget = df["월예산"].sum()
+    tot_rev = df["GA매출"].sum()
+    tot_conv = df["GA구매"].sum()
+    roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0
+    pace = (tot_cost / tot_budget * 100) if tot_budget > 0 else 0
+    st.markdown(
+        '<div class="cp-wrap">'
+        '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
+        '<div class="cp-title">광고비 · ROAS</div>'
+        '<div class="cp-kpis">'
+        f'<div class="cp-kpi"><div class="k">실제 집행 광고비</div><div class="v">{_cp_won(tot_cost)}</div>'
+        f'<div class="s">VAT 포함 · 공급가 {_cp_won(tot_cost / 1.1)}</div></div>'
+        f'<div class="cp-kpi"><div class="k">연간 매체 월 예산</div><div class="v">{_cp_won(tot_budget)}</div>'
+        f'<div class="s">집행률 {pace:.1f}%</div></div>'
+        f'<div class="cp-kpi"><div class="k">GA 매출 ROAS</div><div class="v">{roas:,.1f}%</div>'
+        f'<div class="s">목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%</div></div>'
+        f'<div class="cp-kpi"><div class="k">GA 구매매출</div><div class="v">{_cp_won(tot_rev)}</div>'
+        f'<div class="s">구매 {_cp_int(tot_conv)}건</div></div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    # ── 정렬·필터 ────────────────────────────────────────
+    f1, f2, f3 = st.columns([1, 1.4, 1])
+    with f1:
+        scope_f = st.selectbox("구분", ["전체", "자사몰", "외부몰"], key="cp_scope")
+    with f2:
+        sort_col = st.selectbox("정렬 기준",
+                                ["기본 순서", "노출", "클릭", "비용", "GA구매", "GA매출", "GA ROAS", "월예산", "집행률"],
+                                key="cp_sort")
+    with f3:
+        desc = st.radio("정렬", ["내림차순", "오름차순"], horizontal=True, key="cp_dir") == "내림차순"
+
+    view = df if scope_f == "전체" else df[df["구분"] == scope_f]
+    view = view.sort_values("_order") if sort_col == "기본 순서" else \
+        view.sort_values(sort_col, ascending=not desc, na_position="last")
+
+    # ── 표 ───────────────────────────────────────────────
+    heads = ["구분", "매체", "노출", "클릭", "총비용(VAT 포함)", "GA 구매", "GA 매출", "GA ROAS", "월 예산", "집행률"]
+    th = "".join(f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}</th>' for h in heads)
+    body = []
+    for _, r in view.iterrows():
+        badge = "cp-ext" if r["구분"] == "외부몰" else "cp-own"
+        roas_v = ('<span class="cp-mute">—</span>' if r["GA ROAS"] is None
+                  else f'{r["GA ROAS"]:,.1f}%')
+        bud = _cp_won(r["월예산"]) if r["월예산"] > 0 else '<span class="cp-mute">미배정</span>'
+        if r["집행률"] is None:
+            pace_v = '<span class="cp-mute">—</span>'
+        else:
+            cls = "cp-pill" if r["집행률"] <= 110 else "cp-pill warn"
+            if r["집행률"] == 0:
+                cls = "cp-pill zero"
+            pace_v = f'<span class="{cls}">{r["집행률"]:.1f}%</span>'
+        src = AD_SPEND_SOURCE_LABEL.get(r["_src"], "")
+        sub = f'<div class="sub">{src}</div>' if src else ""
+        body.append(
+            f'<tr><td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
+            f'<td class="l m">{r["매체"]}{sub}</td>'
+            f'<td>{_cp_int(r["노출"])}</td><td>{_cp_int(r["클릭"])}</td>'
+            f'<td>{_cp_won(r["비용"])}</td><td>{_cp_int(r["GA구매"])}</td>'
+            f'<td>{_cp_won(r["GA매출"])}</td><td>{roas_v}</td>'
+            f'<td>{bud}</td><td>{pace_v}</td></tr>')
+    s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
+    s_roas = f'{view["GA매출"].sum() / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
+    s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
+    body.append(
+        f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
+        f'<td>{_cp_int(view["노출"].sum())}</td><td>{_cp_int(view["클릭"].sum())}</td>'
+        f'<td>{_cp_won(s_cost)}</td><td>{_cp_int(view["GA구매"].sum())}</td>'
+        f'<td>{_cp_won(view["GA매출"].sum())}</td><td>{s_roas}</td>'
+        f'<td>{_cp_won(s_bud)}</td><td>{s_pace}</td></tr>')
+
+    st.markdown(
+        f'<div class="cp-wrap"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table>'
+        '<div class="cp-note">'
+        '· 노출·클릭·광고비는 <b>매체 API 실집행</b>, 구매·매출은 <b>GA4</b> 기준입니다. '
+        '매체 자체 전환수는 매체마다 집계 기준이 달라 서로 더할 수 없어 쓰지 않습니다.<br>'
+        '· 네이버 브랜드검색은 정액(보장형) 상품이라 검색광고 API에 집행액이 안 잡혀 위에서 직접 입력합니다.<br>'
+        '· 외부몰(쇼핑검색·맨즈탭 외부몰) 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 0으로 표시됩니다.'
+        '</div></div>', unsafe_allow_html=True)
+
+    # 어느 매체에도 안 잡힌 GA 유입을 드러낸다. 조용히 사라지면 합계가 안 맞는 걸 눈치채기 어렵다.
+    un = ga_map.get("_미매칭", {})
+    if un.get("rev", 0) > 0 or un.get("conv", 0) > 0:
+        with st.expander(
+            f"⚠️ 매체 미매칭 GA 유입 — 구매 {un.get('conv', 0):,.0f}건 · 매출 {un.get('rev', 0):,.0f}원"
+        ):
+            st.caption(
+                "UTM 매칭 규칙에 안 걸린 소스/매체입니다. 광고가 아니라 자연유입·직접유입이면 정상이고, "
+                "광고인데 여기 있으면 '매체 정의' 패널의 UTM 매칭에 추가해주세요."
+            )
+            keys = sorted(un.get("keys", {}).items(), key=lambda x: -x[1])[:30]
+            st.dataframe(
+                pd.DataFrame(keys, columns=["소스 / 매체", "GA 매출"]),
+                use_container_width=True, hide_index=True,
+            )
+
+    # 표를 좁게 만들지 않으려고 매체 정의는 화면 맨 아래 접힌 패널로 뺀다.
+    with st.expander("⚙️ 매체 정의 (구분 · 광고비 출처 · 예산 배분 · UTM 매칭)"):
+        st.caption(
+            "이 표가 위 성과표의 행을 결정합니다. 매체를 추가하거나 이름을 바꾸려면 여기서 고치세요. "
+            "코드 수정 없이 반영됩니다."
+        )
+        st.markdown(
+            "- **광고비 출처**: `ad_spend_daily`의 채널명. 비워두면 광고비 0으로 잡히고, "
+            "'광고비 직접 입력' 패널에서 넣은 값이 있으면 그게 쓰입니다.\n"
+            "- **예산 라인 / 배분**: 채널믹스 파일의 매체명과 그 예산을 몇 %로 나눠 쓸지. "
+            "예) `네이버 GFA` 예산을 자사몰 0.5 / 애드부스트 0.5로 쪼갬\n"
+            "- **UTM 매칭**: GA 구매·매출을 이 매체로 묶을 기준. `source/medium`에 이 문자열이 들어 있으면 "
+            "해당 매체로 집계합니다. 쉼표로 여러 개, **긴 패턴이 우선**입니다."
+        )
+        edited = st.data_editor(
+            mst, num_rows="dynamic", use_container_width=True, key="cp_master_editor",
+            column_config={
+                "media": st.column_config.TextColumn("매체명", required=True),
+                "scope": st.column_config.SelectboxColumn("구분", options=["자사몰", "외부몰"], required=True),
+                "sort_order": st.column_config.NumberColumn("순서", format="%d", width="small"),
+                "spend_channel": st.column_config.TextColumn("광고비 출처(채널명)"),
+                "budget_line": st.column_config.TextColumn("예산 라인(채널믹스)"),
+                "budget_share": st.column_config.NumberColumn("예산 배분", format="%.2f", min_value=0.0, max_value=1.0),
+                "utm_match": st.column_config.TextColumn("UTM 매칭 (쉼표 구분)", width="large"),
+                "note": st.column_config.TextColumn("메모"),
+            },
+        )
+        mc1, mc2 = st.columns([1, 4])
+        with mc1:
+            if st.button("저장", key="cp_master_save", type="primary", use_container_width=True):
+                e = edited.dropna(subset=["media"])
+                e = e[e["media"].astype(str).str.strip() != ""]
+                if e.empty:
+                    st.warning("저장할 행이 없습니다.")
+                else:
+                    n = save_table("media_master", e[MEDIA_MASTER_COLS], "media", "매체 정의")
+                    st.success(f"{n}개 매체 저장했습니다.")
+                    st.cache_data.clear()
+        with mc2:
+            st.caption("저장하면 위 표가 바로 이 정의대로 다시 그려집니다.")
+
 def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
                           channel_mix: pd.DataFrame, start: date, end: date):
     """채널별 광고비를 3단 폴백으로 확정한다. (DataFrame[channel, cost_incl_vat, source], 요약문자열)
@@ -8526,6 +8952,10 @@ def main():
         render_ga_channel_funnel_page(
             audience, ga_channel_inflow, inflow_revenue, channels_weekly, channel_mix,
             ga_daily=ga_daily, utm_map=utm_map, decisions=decisions, ad_spend=ad_spend,
+        )
+    elif page == "채널 성과":
+        render_channel_performance_page(
+            ad_spend, ga_daily, channel_mix, master=load_table("media_master"),
         )
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
