@@ -7312,6 +7312,19 @@ CP_CSS = """
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
 .cp-note{font-size:11px;color:#9AA0A8;margin-top:10px;line-height:1.7}
 .cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
+.cp-rec{background:#D9F27E;border-radius:12px;padding:18px 20px;margin-top:14px}
+.cp-rec-eyebrow{font-size:10px;letter-spacing:.14em;font-weight:800;color:#4A5A16;margin-bottom:6px}
+.cp-rec-head{font-size:19px;font-weight:800;letter-spacing:-.02em;color:#14181F;margin-bottom:4px}
+.cp-rec-sub{font-size:12px;color:#4A5A16;margin-bottom:12px}
+.cp-rec-list{margin:0;padding-left:0;list-style:none}
+.cp-rec-list li{font-size:12.5px;color:#1E2530;padding:7px 0;border-top:1px solid rgba(0,0,0,.09);line-height:1.6}
+.cp-tag{display:inline-block;padding:2px 7px;border-radius:5px;font-size:10.5px;font-weight:800;margin-right:6px}
+.cp-tag.up{background:#14181F;color:#D9F27E}
+.cp-tag.down{background:#FDEDE3;color:#9A4B14}
+.cp-tag.keep{background:#FFF;color:#4A5A16}
+.cp-tag.hold{background:#EFEFEA;color:#6E747C}
+.cp-tag.skip{background:#E7E4F7;color:#4B3FA8}
+.cp-rec-foot{font-size:10.5px;color:#5E6B2A;margin-top:12px;line-height:1.6}
 .cp-btnpad{height:26px}
 </style>
 <style>
@@ -7341,6 +7354,107 @@ def _cp_int(v):
         return f"{float(v):,.0f}"
     except Exception:
         return "0"
+
+
+CP_MIN_SPEND_FOR_JUDGE = 100_000   # 이보다 적게 쓴 매체는 성과를 단정하지 않는다
+CP_STEP = 0.10                     # 증액·감액 제안은 한 번에 10%씩 (급격한 이동 금지)
+
+
+def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
+    """표 아래에 붙는 '그래서 뭘 하라는 건지' 코멘트를 만든다.
+
+    판단에서 빼는 경우를 먼저 정리하는 게 핵심이다. 안 그러면 틀린 지시가 나간다.
+      · 외부몰(쇼핑검색·맨즈탭 외부몰) — 매출이 GA4에 안 잡혀 ROAS가 0으로 보인다.
+        이걸 그대로 읽으면 "줄여라"가 되는데 실제로는 판단 근거 자체가 없는 것이다.
+      · 광고비가 API로 안 들어온 매체 — 분모가 없으니 ROAS를 만들 수 없다.
+      · 광고비가 너무 적은 매체 — 표본이 작아 우연이 성과처럼 보인다.
+    남은 매체만 ROAS로 줄 세우고, 이동은 한 번에 10%씩만 제안한다.
+    """
+    up, keep, down, hold, skip = [], [], [], [], []
+    for _, r in df.iterrows():
+        m, cost, roas = r["매체"], float(r["비용"] or 0), r["GA ROAS"]
+        rev = float(r["GA매출"] or 0)
+        if r["구분"] == "외부몰":
+            skip.append((m, "외부몰 — 매출이 GA에 안 잡혀 판단 불가 (스마트스토어 연동 필요)"))
+        elif cost <= 0 and rev > 0:
+            skip.append((m, f"광고비 미연동 — 매출 {rev:,.0f}원은 잡히는데 비용이 없어 ROAS 계산 불가"))
+        elif cost <= 0:
+            continue
+        elif cost < CP_MIN_SPEND_FOR_JUDGE:
+            hold.append((m, cost, roas))
+        elif roas is None or pd.isna(roas):
+            skip.append((m, "매출 데이터 없음"))
+        elif roas >= OPS_KPI_ROAS_HIGH:
+            up.append((m, cost, roas))
+        elif roas >= OPS_KPI_ROAS_LOW:
+            keep.append((m, cost, roas))
+        else:
+            down.append((m, cost, roas))
+
+    up.sort(key=lambda x: -x[2])
+    down.sort(key=lambda x: x[2])
+    days = (end - start).days + 1
+
+    # 헤드라인
+    if up and down:
+        head = (f"<b>{up[0][0]}</b>를 늘리고 <b>{down[0][0]}</b>를 줄이세요.")
+        sub = (f"{up[0][0]} ROAS {up[0][2]:,.0f}% (목표 상단 {OPS_KPI_ROAS_HIGH:.0f}% 초과) · "
+               f"{down[0][0]} ROAS {down[0][2]:,.0f}% (목표 하단 {OPS_KPI_ROAS_LOW:.0f}% 미달)")
+    elif up:
+        head = f"<b>{up[0][0]}</b>에 예산을 더 태울 여지가 있습니다."
+        sub = f"ROAS {up[0][2]:,.0f}%로 목표 상단({OPS_KPI_ROAS_HIGH:.0f}%)을 넘었습니다."
+    elif down:
+        head = f"<b>{down[0][0]}</b>를 손봐야 합니다."
+        sub = f"ROAS {down[0][2]:,.0f}%로 목표 하단({OPS_KPI_ROAS_LOW:.0f}%)에 못 미칩니다."
+    elif keep:
+        head = "지금은 손댈 매체가 없습니다."
+        sub = f"판단 가능한 매체가 모두 목표 구간({OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%) 안에 있습니다."
+    else:
+        head = "아직 판단할 만한 데이터가 없습니다."
+        sub = "광고비가 연동된 매체가 없거나 집행액이 너무 적습니다."
+
+    def line(m, cost, roas, kind):
+        move = cost * CP_STEP
+        daily = move / days if days else move
+        if kind == "up":
+            act = (f"예산 <b>+{CP_STEP*100:.0f}%</b> (기간 기준 +{move:,.0f}원 · 일 +{daily:,.0f}원) 테스트 후 "
+                   f"48시간 관찰")
+            tag, cls = "증액 검토", "up"
+        elif kind == "down":
+            act = (f"예산 <b>-{CP_STEP*100:.0f}%</b> (기간 기준 -{move:,.0f}원) 또는 소재·타겟 점검 먼저")
+            tag, cls = "감액·점검", "down"
+        else:
+            act = "현 수준 유지"
+            tag, cls = "유지", "keep"
+        return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{m}</b> — '
+                f'ROAS {roas:,.0f}% · 집행 {cost:,.0f}원 → {act}</li>')
+
+    items = []
+    for m, c, r in up:
+        items.append(line(m, c, r, "up"))
+    for m, c, r in down:
+        items.append(line(m, c, r, "down"))
+    for m, c, r in keep:
+        items.append(line(m, c, r, "keep"))
+    for m, c, r in hold:
+        rr = "—" if (r is None or pd.isna(r)) else f"{r:,.0f}%"
+        items.append(f'<li><span class="cp-tag hold">판단 보류</span> <b>{m}</b> — '
+                     f'집행 {c:,.0f}원으로 표본이 작습니다 (ROAS {rr}). '
+                     f'{CP_MIN_SPEND_FOR_JUDGE:,.0f}원 넘을 때까지 판단 유보</li>')
+    for m, why in skip:
+        items.append(f'<li><span class="cp-tag skip">판단 제외</span> <b>{m}</b> — {why}</li>')
+
+    return (
+        '<div class="cp-wrap"><div class="cp-rec">'
+        '<div class="cp-rec-eyebrow">NEXT BEST ACTION</div>'
+        f'<div class="cp-rec-head">{head}</div>'
+        f'<div class="cp-rec-sub">{sub}</div>'
+        f'<ul class="cp-rec-list">{"".join(items)}</ul>'
+        f'<div class="cp-rec-foot">기준: GA-ROAS 목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}% · '
+        f'집행 {CP_MIN_SPEND_FOR_JUDGE:,.0f}원 미만은 판단 보류 · '
+        f'예산 이동은 한 번에 {CP_STEP*100:.0f}%씩만 제안합니다 (조회 기간 {start} ~ {end}, {days}일)</div>'
+        '</div></div>'
+    )
 
 
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None):
@@ -7587,6 +7701,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 pd.DataFrame(keys, columns=["소스 / 매체", "GA 매출"]),
                 use_container_width=True, hide_index=True,
             )
+
+    st.markdown(CP_CSS + _cp_recommendations(view, start, end), unsafe_allow_html=True)
 
     with st.expander("🔄 광고비 다시 받기 (수치가 안 맞을 때)"):
         st.caption(
