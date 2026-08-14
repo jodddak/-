@@ -5919,6 +5919,22 @@ def _secrets_section(name: str):
         return None
 
 
+def _meta_link_clicks(row: dict) -> float:
+    """광고관리자의 '링크 클릭'과 같은 값을 꺼낸다.
+
+    insights의 clicks는 전체 클릭(좋아요·프로필 방문 등 포함)이라 화면 숫자와 안 맞는다.
+    actions 배열 안의 action_type='link_click'이 화면의 링크 클릭이다.
+    (계정에 따라 actions가 안 올 수도 있어 그때는 clicks로 물러난다.)
+    """
+    for a in row.get("actions") or []:
+        if str(a.get("action_type")) == "link_click":
+            try:
+                return float(a.get("value") or 0)
+            except Exception:
+                return 0.0
+    return float(row.get("clicks") or 0)
+
+
 def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
     """Meta Marketing API에서 일별 광고비를 받아온다(계정 단위). 인증이 없으면 빈 결과."""
     cfg = _secrets_section("meta_ads")
@@ -5932,7 +5948,9 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
     ver = str(cfg.get("api_version", "v21.0")).strip()
     url = f"https://graph.facebook.com/{ver}/{acct}/insights"
     params = {
-        "fields": "spend,impressions,clicks",
+        # clicks는 좋아요·프로필 클릭까지 포함한 '전체 클릭'이라 광고관리자 화면(링크 클릭)과
+        # 숫자가 다르다. actions에서 link_click을 꺼내 쓴다.
+        "fields": "spend,impressions,clicks,actions",
         "level": "account",
         "time_increment": 1,
         "time_range": json.dumps({"since": str(start), "until": str(end)}),
@@ -5952,7 +5970,7 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
                 # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
                 "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
                 "impressions": float(d.get("impressions") or 0),
-                "clicks": float(d.get("clicks") or 0),
+                "clicks": _meta_link_clicks(d),
             })
         nxt = (payload.get("paging") or {}).get("next")
         url, params = (nxt, None) if nxt else (None, None)
@@ -6104,7 +6122,14 @@ def _naver_campaigns(cfg: dict) -> list:
 
 
 def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
-    """네이버 검색광고 일별 광고비. salesAmt가 '광고비'(집행 비용)다 — 이름이 헷갈리지만 매출 아님."""
+    """네이버 검색광고 일별 광고비.
+
+    · salesAmt = 집행 광고비다. 이름 때문에 매출로 오해하기 쉽다.
+    · salesAmt는 **VAT 포함** 금액이다 — 다른 매체처럼 1.1을 곱하면 안 된다.
+    · 캠페인 유형별로 매체를 갈라 담는다(파워링크=검색광고 / SHOPPING=쇼핑검색광고 /
+      BRAND_SEARCH=브랜드검색광고). 합치면 매체별 판단이 불가능해진다.
+    · 브랜드검색은 정액 상품이라 salesAmt가 항상 0이고 노출·클릭만 온다.
+    """
     cfg = _secrets_section("naver_searchad")
     need = ["api_key", "secret_key", "customer_id"]
     if not cfg or any(not cfg.get(k) for k in need):
@@ -6135,7 +6160,9 @@ def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
             if not ch:
                 continue
             rows.append({"report_date": d, "channel": ch,
-                         "cost_incl_vat": float(item.get("salesAmt") or 0) * 1.1,  # 네이버는 VAT 제외 금액
+                         # salesAmt는 이미 VAT가 포함된 금액이다(비즈머니에서 VAT 포함으로 차감됨).
+                         # 예전엔 여기에 1.1을 또 곱해서 실제보다 10% 부풀려 있었다.
+                         "cost_incl_vat": float(item.get("salesAmt") or 0),
                          "impressions": float(item.get("impCnt") or 0),
                          "clicks": float(item.get("clkCnt") or 0),
                          "source": "naver_api"})
@@ -6480,7 +6507,10 @@ def fetch_naver_gfa_spend(start: date, end: date) -> pd.DataFrame:
                     if day is None or cost is None:
                         continue
                     rows.append({"report_date": day, "channel": _gfa_channel_of(it),
-                                 "cost_incl_vat": float(cost) * 1.1,  # GFA cost는 VAT 제외
+                                 # ⚠️ 확인 필요: 같은 네이버인 검색광고 salesAmt는 VAT 포함이었다.
+                                 # GFA도 포함일 가능성이 있으니, 실데이터가 들어오면 GFA 관리자
+                                 # 화면 금액과 대조해서 이 1.1을 뺄지 결정해야 한다.
+                                 "cost_incl_vat": float(cost) * 1.1,
                                  "impressions": float(it.get("imp") or it.get("impression") or 0),
                                  "clicks": float(it.get("click") or it.get("clk") or 0),
                                  "source": "naver_gfa_api"})
