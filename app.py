@@ -4193,9 +4193,9 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
+    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
-    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
     "가이드": ["가이드"],
 }
@@ -4223,7 +4223,8 @@ def render_coming_soon(page_name: str):
 
 def render_nav() -> str:
     st.sidebar.markdown("---")
-    default_page = NAV_GROUPS["성과 리포트"][0]
+    # 매일 처음 보는 화면이 '채널 퍼널 리포트'라서 기본 페이지를 여기로 둔다.
+    default_page = NAV_GROUPS["GA 유입 리포트"][0]
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = default_page
     # key="stco_nav"로 감싸면 Streamlit이 이 블록에 "st-key-stco_nav" 클래스를 붙여주는데,
