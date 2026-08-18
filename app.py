@@ -646,6 +646,7 @@ TABLES = {
     "decision_log": "decision_log",
     "ad_spend_daily": "ad_spend_daily",
     "media_master": "media_master",
+    "ad_contract": "ad_contract",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -7633,6 +7634,50 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
     )
 
 
+CONTRACT_CHANNELS = ["네이버 브랜드검색광고", "네이버 맨즈탭_자사몰", "네이버 맨즈탭_외부몰",
+                     "카카오톡 플친", "네이버 트렌드픽"]
+CONTRACT_COLS = ["channel", "start_date", "end_date", "amount_incl_vat", "note"]
+
+
+def contract_seed() -> pd.DataFrame:
+    """저장된 계약이 없을 때 보여줄 기본 행 (실제 브랜드검색 계약 기준)."""
+    return pd.DataFrame([
+        {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 7, 8),
+         "end_date": date(2026, 8, 6), "amount_incl_vat": 1_540_000, "note": "직전 30일 계약"},
+        {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 8, 7),
+         "end_date": date(2026, 9, 5), "amount_incl_vat": 1_540_000, "note": "현재 계약"},
+    ], columns=CONTRACT_COLS)
+
+
+def contracts_to_daily(contracts: pd.DataFrame) -> pd.DataFrame:
+    """계약 총액을 계약 일수로 나눠 일별 광고비 행으로 펼친다.
+
+    정액 상품은 '오늘 얼마 썼나'가 존재하지 않으므로, 계약 기간으로 균등 배분하는 게
+    가장 사실에 가깝다. 월이 걸쳐 있어도(8/7~9/5) 날짜 단위로 나누므로 월 경계가 알아서 맞는다.
+    """
+    if contracts is None or contracts.empty:
+        return pd.DataFrame(columns=["report_date", "channel", "cost_incl_vat",
+                                     "impressions", "clicks", "source"])
+    rows = []
+    for _, c in contracts.iterrows():
+        try:
+            s = pd.to_datetime(c["start_date"]).date()
+            e = pd.to_datetime(c["end_date"]).date()
+            amt = float(c["amount_incl_vat"] or 0)
+        except Exception:
+            continue
+        ch = str(c.get("channel") or "").strip()
+        if not ch or e < s or amt <= 0:
+            continue
+        days = (e - s).days + 1
+        per = amt / days
+        for i in range(days):
+            rows.append({"report_date": s + timedelta(days=i), "channel": ch,
+                         "cost_incl_vat": per, "impressions": 0, "clicks": 0,
+                         "source": "manual"})
+    return pd.DataFrame(rows)
+
+
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
@@ -7683,30 +7728,49 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     if start > end:
         start, end = end, start
 
-    # ── 네이버 브랜드검색 광고비 직접 입력 ──────────────────
-    # 브랜드검색은 정액(보장형) 상품이라 검색광고 API 통계에 집행액이 안 잡힌다.
-    # 그래서 이 매체만 손으로 넣고, 넣은 값은 manual 출처로 저장해 예산 일할값을 덮어쓴다.
-    with st.container():
-        st.markdown('<div class="cp-eyebrow">MANUAL BRAND COST</div>', unsafe_allow_html=True)
-        bc1, bc2 = st.columns([3, 1])
-        with bc1:
-            brand_cost = st.number_input(
-                f"네이버 브랜드검색 광고비 — {start} ~ {end} (VAT 포함, 기간 전체 금액)",
-                min_value=0, step=10000, value=0, key="cp_brand_cost")
-        with bc2:
-            st.write("")
-            save_brand = st.button("저장하고 반영", key="cp_brand_save", type="primary",
-                                   use_container_width=True)
-        if save_brand and brand_cost > 0:
-            days = (end - start).days + 1
-            per = brand_cost / days
-            rows = [{"report_date": start + timedelta(days=i), "channel": "네이버 브랜드검색광고",
-                     "cost_incl_vat": per, "impressions": 0, "clicks": 0, "source": "manual"}
-                    for i in range(days)]
-            n = save_table("ad_spend_daily", pd.DataFrame(rows),
-                           "report_date,channel,source", "브랜드검색 직접 입력")
-            st.success(f"{n}일로 나눠 저장했습니다. 새로고침하면 반영됩니다.")
-            st.cache_data.clear()
+    # ── 정액(보장형) 계약 광고비 ─────────────────────────
+    # 브랜드검색은 30일 단위로 선지불하고 연장하는 상품이라 '일별 집행액'이 없다.
+    # 계약 기간과 총액을 넣어두면 일할로 나눠 매일의 광고비를 만든다.
+    with st.expander("📄 정액 계약 광고비 (브랜드검색 등) — 갱신할 때마다 한 줄 추가"):
+        st.caption(
+            "계약 기간과 총액(VAT 포함)을 넣으면 기간으로 나눠 일별 광고비로 저장합니다. "
+            "월이 걸쳐 있어도(예: 8/7~9/5) 날짜 단위로 나누므로 월별 집계가 알아서 맞습니다."
+        )
+        saved_ct = load_table("ad_contract")
+        ct = saved_ct[CONTRACT_COLS].copy() if (saved_ct is not None and not saved_ct.empty
+                                                and "channel" in saved_ct.columns) else contract_seed()
+        for c in ("start_date", "end_date"):
+            ct[c] = pd.to_datetime(ct[c], errors="coerce").dt.date
+        ct = ct.sort_values(["channel", "start_date"]).reset_index(drop=True)
+
+        ct_edit = st.data_editor(
+            ct, num_rows="dynamic", use_container_width=True, key="cp_contract_editor",
+            column_config={
+                "channel": st.column_config.SelectboxColumn("매체", options=CONTRACT_CHANNELS, required=True),
+                "start_date": st.column_config.DateColumn("계약 시작", format="YYYY-MM-DD", required=True),
+                "end_date": st.column_config.DateColumn("계약 종료", format="YYYY-MM-DD", required=True),
+                "amount_incl_vat": st.column_config.NumberColumn("계약 총액(VAT 포함)", format="%d", min_value=0),
+                "note": st.column_config.TextColumn("메모"),
+            },
+        )
+        prev = contracts_to_daily(ct_edit)
+        if not prev.empty:
+            g = prev.groupby("channel", as_index=False).agg(
+                일수=("report_date", "count"), 합계=("cost_incl_vat", "sum"))
+            g["일 광고비"] = (g["합계"] / g["일수"]).round(0)
+            st.caption("저장하면 이렇게 펼쳐집니다 (일할)")
+            st.dataframe(g, use_container_width=True, hide_index=True)
+        if st.button("저장하고 반영", key="cp_contract_save", type="primary"):
+            e = ct_edit.dropna(subset=["channel", "start_date", "end_date"])
+            if e.empty:
+                st.warning("저장할 계약이 없습니다.")
+            else:
+                save_table("ad_contract", e[CONTRACT_COLS], "channel,start_date", "정액 계약")
+                daily = contracts_to_daily(e)
+                n = save_table("ad_spend_daily", daily,
+                               "report_date,channel,source", "정액 계약 일할")
+                st.success(f"계약 {len(e)}건 → 일별 {n}행 저장했습니다.")
+                st.cache_data.clear()
 
     # ── 집계 ─────────────────────────────────────────────
     spend = _cp_spend_by_channel(ad_spend, start, end)
