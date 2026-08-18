@@ -5530,11 +5530,47 @@ def fetch_ga4_channel_daily(start: date, end: date, channel_map: dict = None) ->
     if not rows_out:
         return pd.DataFrame()
 
+    # 회원가입은 GA4 이벤트로 따로 받는다. 같은 요청에 못 넣는 이유는 eventCount가
+    # '모든 이벤트'를 세기 때문 — eventName으로 걸러야 가입만 나온다.
+    # 이벤트 이름이 회사마다 달라서 Secrets(GA4_SIGNUP_EVENT)로 바꿀 수 있게 뒀다.
+    signup_rows = []
+    try:
+        from google.analytics.data_v1beta.types import Filter, FilterExpression
+        ev = str(_secrets_get("GA4_SIGNUP_EVENT", "sign_up")).strip()
+        offset = 0
+        while True:
+            req = RunReportRequest(
+                property=f"properties/{prop}",
+                date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+                dimensions=[Dimension(name=d) for d in GA4_DIMENSIONS],
+                metrics=[Metric(name="eventCount")],
+                dimension_filter=FilterExpression(
+                    filter=Filter(field_name="eventName",
+                                  string_filter=Filter.StringFilter(value=ev))),
+                limit=page_size, offset=offset,
+            )
+            resp = client.run_report(req)
+            for r in resp.rows:
+                dv = [d.value for d in r.dimension_values]
+                signup_rows.append({"report_date": dv[0], "source_medium": dv[1],
+                                    "user_type": dv[2], "signups": r.metric_values[0].value})
+            offset += page_size
+            if offset >= getattr(resp, "row_count", 0) or not resp.rows:
+                break
+    except Exception:
+        # 이벤트 이름이 없거나 권한이 모자라도 나머지 지표는 살려야 한다
+        signup_rows = []
+
     out = pd.DataFrame(rows_out)
+    if signup_rows:
+        s = pd.DataFrame(signup_rows)
+        out = out.merge(s, on=["report_date", "source_medium", "user_type"], how="left")
+    if "signups" not in out.columns:
+        out["signups"] = 0
     out["report_date"] = pd.to_datetime(out["report_date"], format="%Y%m%d", errors="coerce")
     out = out.dropna(subset=["report_date"])
     out["report_date"] = out["report_date"].dt.date
-    for c in ["users", "sessions", "conversions", "revenue"]:
+    for c in ["users", "sessions", "conversions", "revenue", "signups"]:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
     # GA4의 newVsReturning은 'new'/'returning', 값이 없으면 빈 문자열로 온다.
     out["user_type"] = out["user_type"].map(
@@ -5732,18 +5768,19 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     모양(날짜×소스매체 1행, new_users/returning_users 컬럼)으로 바꾼다. 이렇게 해두면 기존
     집계 함수들(_ga_visits_by_channel, classify_ga_bucket 등)을 그대로 재사용할 수 있다."""
     cols = ["report_date", "source_medium", "channel", "users", "new_users",
-            "returning_users", "sessions", "conversions", "revenue"]
+            "returning_users", "sessions", "signups", "conversions", "revenue"]
     if ga_daily is None or ga_daily.empty:
         return pd.DataFrame(columns=cols)
     g = ga_daily.copy()
     g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
-    for c in ["users", "sessions", "conversions", "revenue"]:
+    for c in ["users", "sessions", "conversions", "revenue", "signups"]:
         g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0)
     g["new_users"] = np.where(g["user_type"] == "신규", g["users"], 0)
     g["returning_users"] = np.where(g["user_type"] == "재방문", g["users"], 0)
     out = g.groupby(["report_date", "source_medium"], as_index=False).agg(
         channel=("channel", "first"), users=("users", "sum"), new_users=("new_users", "sum"),
         returning_users=("returning_users", "sum"), sessions=("sessions", "sum"),
+        signups=("signups", "sum"),
         conversions=("conversions", "sum"), revenue=("revenue", "sum"),
     )
     return out[cols]
@@ -5803,6 +5840,10 @@ FUNNEL_V4_CSS = """
 .fv4-bk-share{display:inline-block;padding:2px 7px;border-radius:5px;
   background:#EAF7D9;color:#3F6B12;font-size:11px;font-weight:700}
 .fv4-bk-split{font-size:11px;font-weight:700;color:#6E747C;margin:18px 0 6px;letter-spacing:.02em}
+.fv4-bk-split-row td{background:#FFF !important;color:#8A9099;font-size:10.5px;font-weight:700;
+  letter-spacing:.06em;padding-top:16px !important;border-bottom:1px solid #E3E1DC}
+.fv4-ind{padding-left:14px;display:inline-block}
+.fv4-na{color:#C2C6CC}
 .fv4-chip {
   display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
 }
@@ -5951,6 +5992,58 @@ def _v4_verdict(roas: float, spend: float) -> tuple:
     if roas < OPS_KPI_ROAS_LOW:
         return "효율 미달", "bad"
     return "관찰", "warn"
+
+
+def _v4_ga_rows(ga_inflow, start: date, end: date, is_new: bool):
+    """GA4 유입을 (대분류 소계, 광고 매체별) 두 벌로 만든다.
+
+    예전엔 위 소계표는 GA4, 아래 매체표는 대행사 리포트를 봤다. 출처가 다르니
+    '광고' 줄 합계와 매체별 합계가 안 맞아서 세로로 읽을 수가 없었다.
+    같은 원본에서 같은 방식으로 접어야 위아래가 맞는다.
+    """
+    cols = ["key", "sessions", "users", "focus", "signup", "conv", "rev"]
+    if ga_inflow is None or ga_inflow.empty:
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=cols)
+    g = ga_inflow.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"], errors="coerce").dt.date
+    g = g[(g["report_date"] >= start) & (g["report_date"] <= end)]
+    if g.empty:
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=cols)
+
+    ucol = "new_users" if is_new else "returning_users"
+    for c in ("users", "sessions", ucol, "signups", "conversions", "revenue"):
+        if c not in g.columns:
+            g[c] = 0
+        g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0)
+    g["_bucket"] = g.apply(classify_ga_bucket, axis=1)
+
+    def fold(df, key):
+        out = df.groupby(key, as_index=False).agg(
+            sessions=("sessions", "sum"), users=("users", "sum"),
+            focus=(ucol, "sum"), signup=("signups", "sum"),
+            conv=("conversions", "sum"), rev=("revenue", "sum"))
+        return out.rename(columns={key: "key"})
+
+    buckets = fold(g, "_bucket")
+    ads = g[g["_bucket"] == "광고"].copy()
+    ads["channel"] = ads["channel"].map(_v4_canon_channel)
+    media = fold(ads, "channel").sort_values("focus", ascending=False)
+    return buckets, media
+
+
+def _v4_ga_row_html(name, r, tot_focus, is_new, extra_cells="", cls=""):
+    """대분류 줄과 매체 줄을 같은 컬럼 구성으로 그린다."""
+    share = (r["focus"] / tot_focus * 100) if tot_focus else 0
+    cvr = (r["conv"] / r["sessions"] * 100) if r["sessions"] else 0
+    sign = _v4_num(r.get("signup", 0)) if is_new else '<span class="fv4-na">—</span>'
+    return (
+        f'<tr class="{cls}"><td class="l">{name}</td>'
+        f'<td>{_v4_num(r["sessions"])}</td><td>{_v4_num(r["users"])}</td>'
+        f'<td>{_v4_num(r["focus"])}</td>'
+        f'<td><span class="fv4-bk-share">{share:.1f}%</span></td>'
+        f'<td>{sign}</td>'
+        f'<td>{_v4_num(r["conv"])}</td><td>\u20a9{r["rev"]:,.0f}</td>'
+        f'<td>{cvr:.2f}%</td>{extra_cells}</tr>')
 
 
 def _v4_bucket_table(ga_inflow, start: date, end: date,
@@ -6257,6 +6350,14 @@ def _budget_daily_spend(channel_mix: pd.DataFrame, start: date, end: date) -> pd
     if not rows:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows).groupby("channel", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
+
+
+def _secrets_get(key: str, default=None):
+    """st.secrets에서 최상위 값 하나를 안전하게 꺼낸다(없으면 기본값)."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        return default
 
 
 def _secrets_section(name: str):
@@ -9036,80 +9137,126 @@ def render_ga_channel_funnel_page(
     is_new = mode == "신규 고객 발굴"
     cur = new_df if is_new else re_df
 
-    if cur.empty:
-        st.info(f"선택한 기간에 '{mode}' 퍼널 데이터가 없습니다.")
+    # 이 화면은 대행사 리포트를 쓰지 않는다 — 매체 API(노출·클릭·광고비)와 GA4(방문·가입·구매·매출)만
+    # 본다. 두 소스 다 매일 자동으로 들어오므로 사람이 파일을 올리지 않아도 최신 상태가 유지된다.
+    buckets, media = _v4_ga_rows(ga_channel_inflow, start, end, is_new)
+    spend_now = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None \
+        else pd.DataFrame(columns=["channel", "impressions", "clicks", "cost_incl_vat", "source"])
+    spend_map = {r["channel"]: r for _, r in spend_now.iterrows()}
+
+    if media.empty and buckets.empty:
+        st.info(
+            f"선택한 기간에 GA4 유입 데이터가 없습니다. "
+            f"상단 '🔄 지금 동기화'를 눌러 GA4에서 받아오세요."
+        )
     else:
+        tot_focus = float(buckets["focus"].sum()) if not buckets.empty else 0.0
+        ad_row = buckets[buckets["key"] == "광고"]
+        ad_row = ad_row.iloc[0] if not ad_row.empty else None
+        ad_media = list(media["key"])
+        ad_imp = sum(float(spend_map.get(c, {}).get("impressions", 0) or 0) for c in ad_media)
+        ad_clk = sum(float(spend_map.get(c, {}).get("clicks", 0) or 0) for c in ad_media)
+        ad_cost = sum(float(spend_map.get(c, {}).get("cost_incl_vat", 0) or 0) for c in ad_media)
+
         if is_new:
             stages = [
-                ("노출", cur["impressions"].sum()), ("클릭", cur["clicks"].sum()),
-                ("방문", cur["new_users"].fillna(0).sum()), ("가입", cur["signups"].sum()),
-                ("첫구매", cur["conversions"].sum()),
+                ("노출", ad_imp), ("클릭", ad_clk),
+                ("신규 방문", float(ad_row["focus"]) if ad_row is not None else 0),
+                ("회원가입", float(ad_row["signup"]) if ad_row is not None else 0),
+                ("첫구매", float(ad_row["conv"]) if ad_row is not None else 0),
             ]
             bench = FUNNEL_BENCHMARK_NEW
-            badge, title, sub = "ACQUISITION", "노출에서 첫구매까지", "계획한 채널 믹스와 실제 성과를 한 줄에서 비교합니다."
-            head = ["채널", "연간 계획 / 실제 집행", "방문", "회원가입", "첫구매", "가입 CAC", "신규 ROAS", "판정"]
+            badge, title = "ACQUISITION", "노출에서 첫구매까지"
+            sub = "매체 API(노출·클릭·광고비)와 GA4(방문·가입·구매)만 씁니다 — 대행사 리포트와 무관합니다."
+            focus_lbl = "신규 사용자"
         else:
             stages = [
-                ("재노출", cur["impressions"].sum()), ("재클릭", cur["clicks"].sum()),
-                ("재방문", cur["returning_users"].fillna(0).sum()), ("재구매", cur["conversions"].sum()),
+                ("재노출", ad_imp), ("재클릭", ad_clk),
+                ("재방문", float(ad_row["focus"]) if ad_row is not None else 0),
+                ("재구매", float(ad_row["conv"]) if ad_row is not None else 0),
             ]
             bench = FUNNEL_BENCHMARK_RETURN
-            badge, title, sub = "RETENTION", "재노출에서 재구매까지", "이미 방문한 고객이 다시 사는 구간을 봅니다."
-            head = ["채널", "연간 계획 / 실제 집행", "재방문", "재구매", "재구매 매출", "재구매 ROAS", "판정"]
+            badge, title = "RETENTION", "재노출에서 재구매까지"
+            sub = "이미 방문한 고객이 다시 사는 구간입니다. 매체 API + GA4 기준."
+            focus_lbl = "재방문 사용자"
 
-        rows = []
-        for _, r in cur.iterrows():
-            label, cls = _v4_verdict(r["roas"], r["cost_incl_vat"])
-            plan = 0.0 if pd.isna(r.get("budget_ratio")) else float(r["budget_ratio"])
-            bar = _v4_mixbar_html(plan, float(r["act_ratio"]))
-            if is_new:
-                cells = [
-                    _v4_num(r["new_users"]), _v4_num(r["signups"]), _v4_num(r["conversions"]),
-                    f"₩{r['signup_cac']:,.0f}" if r["signup_cac"] else "-", f"{r['roas']:.0f}%",
-                ]
+        head = ["채널", "세션", "사용자", focus_lbl, f"{focus_lbl} 비중", "회원가입",
+                "GA 구매", "GA 매출", "세션→구매", "광고비", "GA ROAS", "판정"]
+        ncol = len(head)
+
+        brows = []
+        for b in ["광고", "자연유입", "기타"]:
+            s_ = buckets[buckets["key"] == b]
+            if s_.empty:
+                continue
+            s_ = s_.iloc[0]
+            if b == "광고":
+                roas = (s_["rev"] / ad_cost * 100) if ad_cost > 0 else None
+                extra = (f'<td>\u20a9{ad_cost:,.0f}</td>'
+                         f'<td>{f"{roas:,.0f}%" if roas else "-"}</td><td></td>')
+                nm = f'<b>{b}</b><span class="fv4-bk-sub">{len(media)}개 매체</span>'
             else:
-                cells = [
-                    _v4_num(r["returning_users"]), _v4_num(r["conversions"]),
-                    f"₩{r['revenue']:,.0f}", f"{r['roas']:.0f}%",
-                ]
-            rows.append(
-                f"<tr><td>{r['channel']}</td><td>{bar}</td>"
-                + "".join(f"<td>{c}</td>" for c in cells)
-                + f'<td><span class="fv4-chip {cls}">{label}</span></td></tr>'
-            )
+                extra = '<td class="fv4-na">—</td><td class="fv4-na">—</td><td></td>'
+                nm = f'<b>{b}</b>'
+            brows.append(_v4_ga_row_html(nm, s_, tot_focus, is_new, extra, "fv4-bk-row"))
+
+        mrows = []
+        for _, m in media.iterrows():
+            ch = m["key"]
+            cost = float(spend_map.get(ch, {}).get("cost_incl_vat", 0) or 0)
+            roas = (m["rev"] / cost * 100) if cost > 0 else 0.0
+            label, cls = _v4_verdict(roas, cost)
+            extra = (f'<td>\u20a9{cost:,.0f}</td>'
+                     f'<td>{f"{roas:,.0f}%" if cost > 0 else "-"}</td>'
+                     f'<td><span class="fv4-chip {cls}">{label}</span></td>')
+            mrows.append(_v4_ga_row_html(f'<span class="fv4-ind">{ch}</span>',
+                                         m, tot_focus, is_new, extra))
+
+        th = "".join(f'<th class="{"l" if h == "채널" else ""}">{h}</th>' for h in head)
         st.markdown(
             '<div class="fv4-wrap"><div class="fv4-card">'
             f'<span class="fv4-badge-dark">{badge}</span>'
             f'<div class="fv4-card-title">{title}</div><div class="fv4-card-sub">{sub}</div>'
             + _v4_funnel_html(stages, bench)
-            + _v4_bucket_table(ga_channel_inflow, start, end, is_new,
-                               list(cur["channel"].unique()))
-            + '<div class="fv4-bk-split">광고 매체별 상세</div>'
-            + '<table class="fv4-tbl"><thead><tr>'
-            + "".join(f"<th>{h}</th>" for h in head)
-            + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div></div>",
+            + '<div class="fv4-bk-cap">전체 유입을 <b>광고 / 자연유입 / 기타</b>로 나눈 소계와, '
+              '그중 <b>광고</b> 한 줄을 매체로 쪼갠 표입니다. 같은 GA4 원본이라 '
+              '광고 줄의 값과 매체별 합계가 정확히 일치합니다.</div>'
+            + f'<table class="fv4-tbl"><thead><tr>{th}</tr></thead><tbody>'
+            + "".join(brows)
+            + f'<tr class="fv4-bk-split-row"><td class="l" colspan="{ncol}">광고 매체별 상세</td></tr>'
+            + "".join(mrows)
+            + '</tbody></table></div></div>',
             unsafe_allow_html=True,
         )
         st.caption(
             f"⚠ 표시는 해당 단계 전환율이 벤치마크 미만이라는 뜻입니다 · "
-            f"노출·클릭·가입·구매·매출 출처: 대행사 리포트(캠페인 {'신규' if is_new else '리타겟'} 태그) · "
-            f"방문 출처: {ga_source_label} · 광고비 {FUNNEL_MIN_SPEND:,}원 미만은 '판단 보류'"
+            f"위 퍼널의 노출·클릭·가입 출처: 대행사 리포트(캠페인 {'신규' if is_new else '리타겟'} 태그) · "
+            f"표의 세션·사용자·구매·매출 출처: {ga_source_label} · "
+            f"광고비 출처: 매체 API·계약·업로드 · {FUNNEL_MIN_SPEND:,}원 미만은 '판단 보류'"
         )
         with st.expander("🔍 판정 근거 보기 (왜 이 판정인지)"):
-            for _, r in cur.iterrows():
-                label, _cls = _v4_verdict(r["roas"], r["cost_incl_vat"])
-                plan = 0.0 if pd.isna(r.get("budget_ratio")) else float(r["budget_ratio"])
+            for _, m in media.iterrows():
+                ch = m["key"]
+                sp = spend_map.get(ch, {})
+                cost = float(sp.get("cost_incl_vat", 0) or 0)
+                roas = (m["rev"] / cost * 100) if cost > 0 else 0.0
+                label, _cls = _v4_verdict(roas, cost)
+                cpc = (cost / m["conv"]) if m["conv"] else 0
                 reason = (
-                    f"ROAS {r['roas']:.0f}% (목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%), "
-                    f"광고비 {r['cost_incl_vat']:,.0f}원, 매출 {r['revenue']:,.0f}원, "
-                    f"계획 비중 {plan:.1f}% 대비 집행 {r['act_ratio']:.1f}% ({r['drift']:+.1f}%p)"
+                    f"ROAS {roas:.0f}% (목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%), "
+                    f"광고비 {cost:,.0f}원, GA 매출 {m['rev']:,.0f}원, "
+                    f"세션 {m['sessions']:,.0f} → 구매 {m['conv']:,.0f}건"
                 )
-                _src = spend_by_channel_src.get(r["channel"])
+                if is_new and m.get("signup", 0):
+                    reason += f" · 가입 {m['signup']:,.0f}명 (가입 CAC {cost / m['signup']:,.0f}원)"
+                if m["conv"]:
+                    reason += f" · 구매 CAC {cpc:,.0f}원"
+                _src = str(sp.get("source", "") or "")
                 if _src:
                     reason += f" · 광고비 출처: {AD_SPEND_SOURCE_LABEL.get(_src, _src)}"
-                if r["cost_incl_vat"] < FUNNEL_MIN_SPEND:
+                if cost < FUNNEL_MIN_SPEND:
                     reason += f" · 광고비가 {FUNNEL_MIN_SPEND:,}원 미만이라 판단 보류"
-                st.markdown(f"**{r['channel']} → {label}**  \n{reason}")
+                st.markdown(f"**{ch} → {label}**  \n{reason}")
 
     # ── 하단: 채널 믹스 + Next Best Action ──
     mix_rows = ""
