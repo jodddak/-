@@ -5834,7 +5834,7 @@ FUNNEL_V4_CSS = """
 .fv4-signal { min-width:180px; flex:1 1 180px; }
 .fv4-bk-cap{font-size:11px;color:#8A9099;margin:16px 0 8px;line-height:1.6}
 .fv4-bk{margin-bottom:4px}
-.fv4-bk-row td{background:#F7F6F2;font-size:12.5px;font-weight:600}
+.fv4-bk-row td{background:#FBFAF7;font-size:12.5px;font-weight:600}
 .fv4-bk-row td.l{text-align:left}
 .fv4-bk-sub{font-size:10px;color:#9AA0A8;font-weight:400;margin-left:7px}
 .fv4-bk-share{display:inline-block;padding:2px 7px;border-radius:5px;
@@ -5842,7 +5842,11 @@ FUNNEL_V4_CSS = """
 .fv4-bk-split{font-size:11px;font-weight:700;color:#6E747C;margin:18px 0 6px;letter-spacing:.02em}
 .fv4-bk-split-row td{background:#FFF !important;color:#8A9099;font-size:10.5px;font-weight:700;
   letter-spacing:.06em;padding-top:16px !important;border-bottom:1px solid #E3E1DC}
-.fv4-sum-row td{background:#EFEDE8 !important;font-weight:800;border-top:2px solid #D9D5CD}
+.fv4-sum-row td{background:#14181F !important;color:#F3F1EC !important;font-weight:800;
+  border-bottom:none}
+.fv4-sum-row td.l{color:#D9F27E !important;letter-spacing:.06em}
+.fv4-sum-row .fv4-bk-share{background:rgba(217,242,126,.18);color:#D9F27E}
+.fv4-sec{font-size:12px;font-weight:800;color:#14181F;margin:22px 0 6px;letter-spacing:-.01em}
 .fv4-ar{margin-left:5px;color:#C2C6CC;font-size:10px;font-weight:400}
 .fv4-tbl th:hover{background:#EDEAE3}
 .fv4-ind{padding-left:14px;display:inline-block}
@@ -9151,11 +9155,12 @@ def render_ga_channel_funnel_page(
                 extra = '<td class="fv4-na">—</td><td class="fv4-na">—</td><td></td>'
                 nm = f'<b>{b}</b>'
             brows.append(_v4_ga_row_html(nm, s_, is_new, extra, "fv4-bk-row"))
+        brows_sum = ""
         if not buckets.empty:
             tot = buckets[["users", "new", "ret", "signup", "conv", "rev"]].sum()
-            brows.append(_v4_ga_row_html(
-                "<b>전체 합계</b>", tot, is_new,
-                money_cells(ad_cost, float(tot["rev"])), "fv4-sum-row nosort"))
+            brows_sum = _v4_ga_row_html(
+                "TOTAL", tot, is_new,
+                money_cells(ad_cost, float(tot["rev"])), "fv4-sum-row nosort")
 
         # ── ② 광고 매체별 (+ 광고 합계 — ①의 광고 줄과 같아야 한다) ──
         mrows = []
@@ -9167,20 +9172,24 @@ def render_ga_channel_funnel_page(
             chip = f'<span class="fv4-chip {cls}">{label}</span>'
             mrows.append(_v4_ga_row_html(f'<span class="fv4-ind">{ch}</span>', m, is_new,
                                          money_cells(cost, float(m["rev"]), chip)))
+        mrows_sum = ""
         if not media.empty:
             mt = media[["users", "new", "ret", "signup", "conv", "rev"]].sum()
-            mrows.append(_v4_ga_row_html(
-                "<b>광고 합계</b>", mt, is_new,
-                money_cells(ad_cost, float(mt["rev"])), "fv4-sum-row nosort"))
+            mrows_sum = _v4_ga_row_html(
+                "TOTAL", mt, is_new,
+                money_cells(ad_cost, float(mt["rev"])), "fv4-sum-row nosort")
 
-        th = "".join(
-            f'<th class="{"l" if h == "채널" else ""}">{h}<span class="fv4-ar">&#8645;</span></th>'
-            for h in head)
-        table = (
-            f'<table class="fv4-tbl" id="fvtbl"><thead><tr>{th}</tr></thead><tbody>'
-            + "".join(brows)
-            + f'<tr class="fv4-bk-split-row nosort"><td class="l" colspan="{ncol}">광고 매체별 상세</td></tr>'
-            + "".join(mrows) + '</tbody></table>')
+        # 표를 둘로 완전히 나눈다. 한 표 안에 구분선만 두면 정렬이 통으로 걸려서
+        # 대분류와 매체가 뒤섞인다. 각자 머리글·정렬·합계(TOTAL)를 갖게 한다.
+        def build_table(tid, head_labels, sum_row, data_rows, first_col):
+            th = "".join(
+                f'<th class="{"l" if h == first_col else ""}">{h}'
+                f'<span class="fv4-ar">&#8645;</span></th>' for h in head_labels)
+            return (f'<table class="fv4-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
+                    f'<tbody>{sum_row}{"".join(data_rows)}</tbody></table>')
+
+        tbl_a = build_table("fvtblA", head, brows_sum, brows, "채널")
+        tbl_b = build_table("fvtblB", head, mrows_sum, mrows, "채널")
 
         card = (
             FUNNEL_V4_CSS
@@ -9188,43 +9197,44 @@ def render_ga_channel_funnel_page(
             f'<span class="fv4-badge-dark">{badge}</span>'
             f'<div class="fv4-card-title">{title}</div><div class="fv4-card-sub">{sub}</div>'
             + _v4_funnel_html(stages, bench)
-            + '<div class="fv4-bk-cap">머리글을 누르면 그 열로 정렬됩니다(합계행은 고정). '
-              '<b>광고</b> 줄의 값과 <b>광고 합계</b>가 같아야 정상입니다 — 같은 GA4 원본을 '
-              '두 방식으로 접은 것이라 어긋나면 매핑이 빠진 겁니다.</div>'
-            + table + '</div></div>'
+            + '<div class="fv4-sec">채널 대분류</div>'
+            + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위에 고정입니다.</div>'
+            + tbl_a
+            + '<div class="fv4-sec">광고 매체별 상세</div>'
+            + '<div class="fv4-bk-cap">위 표의 <b>광고</b> 줄을 매체로 쪼갠 것입니다 — '
+              '아래 TOTAL이 위 <b>광고</b> 줄과 같아야 정상입니다.</div>'
+            + tbl_b + '</div></div>'
             + """
 <script>
 (function(){
-  var t=document.getElementById('fvtbl'); if(!t) return;
-  var ths=t.tHead.rows[0].cells, st={i:-1,asc:false};
-  function v(row,i){var c=row.cells[i],d=c.getAttribute('data-v');
-    return d!==null?parseFloat(d):c.innerText.trim();}
-  for(var i=0;i<ths.length;i++){(function(i){
-    ths[i].style.cursor='pointer';
-    ths[i].onclick=function(){
-      var asc=(st.i===i)?!st.asc:false; st={i:i,asc:asc};
-      var tb=t.tBodies[0], all=Array.prototype.slice.call(tb.rows);
-      var splitIdx=all.findIndex(function(r){return r.classList.contains('fv4-bk-split-row');});
-      function sortSeg(seg){
-        var fixed=seg.filter(function(r){return r.classList.contains('nosort');});
-        var mov=seg.filter(function(r){return !r.classList.contains('nosort');});
+  function mk(id){
+    var t=document.getElementById(id); if(!t) return;
+    var ths=t.tHead.rows[0].cells, st={i:-1,asc:false};
+    function v(row,i){var c=row.cells[i],d=c.getAttribute('data-v');
+      return d!==null?parseFloat(d):c.innerText.trim();}
+    for(var i=0;i<ths.length;i++){(function(i){
+      ths[i].style.cursor='pointer';
+      ths[i].onclick=function(){
+        var asc=(st.i===i)?!st.asc:false; st={i:i,asc:asc};
+        var tb=t.tBodies[0], all=Array.prototype.slice.call(tb.rows);
+        var fixed=all.filter(function(r){return r.classList.contains('nosort');});
+        var mov=all.filter(function(r){return !r.classList.contains('nosort');});
         mov.sort(function(a,b){var x=v(a,i),y=v(b,i);
           if(typeof x==='number'&&typeof y==='number'){return asc?x-y:y-x;}
-          return asc?String(x).localeCompare(String(y),'ko'):String(y).localeCompare(String(x),'ko');});
-        return mov.concat(fixed);
-      }
-      var head=sortSeg(all.slice(0,splitIdx));
-      var tail=sortSeg(all.slice(splitIdx+1));
-      var out=head.concat([all[splitIdx]]).concat(tail);
-      out.forEach(function(r){tb.appendChild(r);});
-      for(var k=0;k<ths.length;k++){
-        ths[k].querySelector('.fv4-ar').textContent=(k===i)?(asc?'\u2191':'\u2193'):'\u21C5';}
-    };})(i);}
+          return asc?String(x).localeCompare(String(y),'ko')
+                    :String(y).localeCompare(String(x),'ko');});
+        fixed.concat(mov).forEach(function(r){tb.appendChild(r);});
+        for(var k=0;k<ths.length;k++){
+          ths[k].querySelector('.fv4-ar').textContent=(k===i)?(asc?'\u2191':'\u2193'):'\u21C5';}
+      };})(i);}
+  }
+  mk('fvtblA'); mk('fvtblB');
 })();
 </script>"""
         )
-        st.components.v1.html(card, height=330 + 44 * (len(brows) + len(mrows) + 1),
-                              scrolling=True)
+        st.components.v1.html(
+            card, height=430 + 44 * (len(brows) + len(mrows) + 2), scrolling=True)
+
         st.caption(
             f"⚠ 표시는 해당 단계 전환율이 벤치마크 미만이라는 뜻입니다 · "
             f"위 퍼널의 노출·클릭·가입 출처: 대행사 리포트(캠페인 {'신규' if is_new else '리타겟'} 태그) · "
