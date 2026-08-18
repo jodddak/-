@@ -3516,6 +3516,7 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
 MEDIA_REPORT_COLS = {
     "date": ["기간", "날짜", "일자", "일별", "date", "day"],
     "cost": ["총비용", "광고비", "비용", "소진액", "지출", "cost", "spend"],
+    # 완전일치를 먼저 보므로 '노출'이 '노출 기간'(시간대별 표)에 잘못 붙지 않는다.
     "imp": ["노출수", "노출", "impression", "imp"],
     "click": ["클릭수", "클릭", "click", "clk"],
     "campaign": ["캠페인 이름", "캠페인명", "캠페인", "campaign"],
@@ -3538,6 +3539,20 @@ def _mr_pick(cols, keys):
     return None
 
 
+def _mr_is_header(cells) -> bool:
+    """이 행이 표의 머리글인지 판단한다.
+
+    '노출'이라는 글자가 본문에 우연히 들어간 경우와 구분해야 해서, 지표 이름과
+    **완전히 같은** 셀이 2개 이상일 때만 머리글로 본다.
+    """
+    vals = {str(v).strip().lower().replace(" ", "") for v in cells}
+    hit = 0
+    for key in ("date", "imp", "click", "cost"):
+        if any(k.lower().replace(" ", "") in vals for k in MEDIA_REPORT_COLS[key]):
+            hit += 1
+    return hit >= 2
+
+
 def _mr_read(file) -> pd.DataFrame:
     """csv/xlsx 어느 쪽이든 읽고, 머리글이 몇 줄 아래 있어도 찾아낸다."""
     name = (getattr(file, "name", "") or "").lower()
@@ -3555,18 +3570,51 @@ def _mr_read(file) -> pd.DataFrame:
     else:
         raw = pd.read_excel(file, header=None, dtype=str)
 
+    # 보장형 매체(맨즈탭 등) 리포트에는 비용 열이 아예 없고 노출·클릭만 있는 경우가 있다.
+    # 그래서 '날짜 + (비용 또는 노출 또는 클릭)'이면 머리글로 인정한다.
     hdr = None
     for i in range(min(len(raw), 30)):
         cells = list(raw.iloc[i])
-        if _mr_pick(cells, MEDIA_REPORT_COLS["date"]) is not None and \
-           _mr_pick(cells, MEDIA_REPORT_COLS["cost"]) is not None:
+        if _mr_pick(cells, MEDIA_REPORT_COLS["date"]) is None:
+            continue
+        if any(_mr_pick(cells, MEDIA_REPORT_COLS[k]) is not None
+               for k in ("cost", "imp", "click")):
             hdr = i
             break
     if hdr is None:
-        raise RuntimeError("날짜 열과 비용 열을 못 찾았습니다.")
-    df = raw.iloc[hdr + 1:].copy()
+        raise RuntimeError(
+            "날짜 열을 못 찾았습니다. 파일에 '기간/날짜/일자' 같은 머리글과 "
+            "'총비용/노출수/클릭수' 중 하나 이상이 있어야 합니다.")
+
+    # 한 시트에 표가 여러 개 쌓여 있는 파일이 있다(맨즈탭 TOTAL 시트: 전체 / 대표소재 / 추가소재).
+    # 아래 표들은 위 표를 쪼갠 것이라 같이 더하면 값이 배로 부푼다. 다음 머리글 직전에서 끊는다.
+    end = len(raw)
+    for i in range(hdr + 1, len(raw)):
+        if _mr_is_header(list(raw.iloc[i])):
+            end = i
+            break
+
+    df = raw.iloc[hdr + 1:end].copy()
     df.columns = [str(v).strip() for v in raw.iloc[hdr]]
     return df.reset_index(drop=True)
+
+
+def _mr_dates(s: pd.Series) -> pd.Series:
+    """매체마다 제각각인 날짜 표기를 하나로 맞춘다.
+
+    실제로 만난 것들:
+      · '2026.08.11.'      — GFA, 끝에 점
+      · '2026-07-06 (월)'  — 맨즈탭, 요일 괄호
+      · '20260706'         — GA raw, 구분자 없음
+    """
+    t = s.astype(str).str.strip()
+    t = t.str.replace(r"\s*\([^)]*\)\s*$", "", regex=True)   # 끝의 (월) 제거
+    t = t.str.rstrip(".")
+    out = pd.to_datetime(t, errors="coerce")
+    miss = out.isna() & t.str.fullmatch(r"\d{8}")
+    if miss.any():
+        out.loc[miss] = pd.to_datetime(t[miss], format="%Y%m%d", errors="coerce")
+    return out.dt.date
 
 
 def _mr_channel_of(campaign: str, filename: str) -> str:
@@ -3597,7 +3645,7 @@ def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
     fname = getattr(file, "name", "") or ""
     cols = list(df.columns)
     c_date = _mr_pick(cols, MEDIA_REPORT_COLS["date"])
-    c_cost = _mr_pick(cols, MEDIA_REPORT_COLS["cost"])
+    c_cost = _mr_pick(cols, MEDIA_REPORT_COLS["cost"])   # 없을 수 있다(보장형)
     c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
     c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
     c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
@@ -3607,10 +3655,8 @@ def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
             s.astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0)
 
     out = pd.DataFrame({
-        # '2026.08.11.' 처럼 끝에 점이 붙는 매체가 있어 먼저 떼어낸다
-        "report_date": pd.to_datetime(
-            df[c_date].astype(str).str.strip().str.rstrip("."), errors="coerce").dt.date,
-        "cost_incl_vat": num(df[c_cost]),
+        "report_date": _mr_dates(df[c_date]),
+        "cost_incl_vat": num(df[c_cost]) if c_cost else 0.0,
         "impressions": num(df[c_imp]) if c_imp else 0,
         "clicks": num(df[c_clk]) if c_clk else 0,
         "channel": (df[c_cmp].astype(str) if c_cmp else pd.Series([""] * len(df))).map(
@@ -3931,6 +3977,11 @@ def render_upload_panel():
             "매체 관리자에서 받은 일별/소재별 성과 파일입니다. 날짜×매체로 합쳐 광고비·노출·클릭을 "
             "저장하고, 예산 일할값 대신 이 실집행액을 씁니다."
         )
+        drop_cost = st.sidebar.checkbox(
+            "광고비는 무시하고 노출·클릭만 가져오기", value=False, key="mr_nocost",
+            help="맨즈탭처럼 정액 계약 매체는 리포트의 광고비가 '계약금액 ÷ 리포트 일수'로 계산돼 "
+                 "부분 기간 파일에서는 부풀 수 있습니다. 광고비는 '정액 계약' 패널로 넣으세요.",
+        )
         vat_in = st.sidebar.checkbox(
             "이 파일 금액이 이미 VAT 포함", value=True, key="mr_vat",
             help="체크 안 하면 VAT를 더해(×1.1) 다른 매체와 단위를 맞춥니다. "
@@ -3941,6 +3992,8 @@ def render_upload_panel():
         except Exception as e:
             mr_df = pd.DataFrame()
             st.sidebar.warning(f"읽지 못했습니다: {e}")
+        if not mr_df.empty and drop_cost:
+            mr_df = mr_df.assign(cost_incl_vat=0.0)
         if not mr_df.empty:
             chans = sorted(mr_df["channel"].unique())
             st.sidebar.write(
@@ -6085,6 +6138,7 @@ AD_SPEND_SOURCE_LABEL = {
     "kakao_api": "카카오 API",
     "criteo_api": "크리테오 API",
     "naver_gfa_api": "GFA API",
+    "contract": "정액 계약(일할)",
     "manual": "직접 입력(실집행)",
     "agency_weekly": "대행사 주간(일할)",
     "budget_prorate": "예산 일할",
@@ -7425,8 +7479,8 @@ def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.D
         impressions=("impressions", "sum"), clicks=("clicks", "sum"),
         cost_incl_vat=("cost_incl_vat", "sum"))
     prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0,
-            "criteo_api": 0, "naver_gfa_api": 0, "manual": 1, "agency_weekly": 2,
-            "budget_prorate": 3}
+            "criteo_api": 0, "naver_gfa_api": 0,
+            "contract": 1, "manual": 2, "agency_weekly": 3, "budget_prorate": 4}
     g["_p"] = g["source"].map(prio).fillna(9)
     g = g.sort_values("_p")
 
@@ -7674,7 +7728,9 @@ def contracts_to_daily(contracts: pd.DataFrame) -> pd.DataFrame:
         for i in range(days):
             rows.append({"report_date": s + timedelta(days=i), "channel": ch,
                          "cost_incl_vat": per, "impressions": 0, "clicks": 0,
-                         "source": "manual"})
+                         # 리포트 업로드(manual)와 같은 키를 쓰면 서로 덮어쓰므로 출처를 나눈다.
+                         # 보장형 매체는 계약 금액이 사실이므로 우선순위도 리포트보다 위에 둔다.
+                         "source": "contract"})
     return pd.DataFrame(rows)
 
 
@@ -8064,7 +8120,7 @@ def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame
     # 직접 입력은 광고 관리자 화면에서 눈으로 확인한 '실집행액'이라 대행사 주간·예산 일할보다 정확하다.
     # 다만 API가 붙은 매체는 사람이 손댈 필요 없이 API가 이기게 둔다.
     prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0, "criteo_api": 0, "naver_gfa_api": 0,
-            "manual": 1, "agency_weekly": 2, "budget_prorate": 3}
+            "contract": 1, "manual": 2, "agency_weekly": 3, "budget_prorate": 4}
     # 빈 DataFrame을 concat하면 pandas가 향후 동작 변경 경고를 내므로 값이 있는 것만 합친다.
     parts = [d for d in (api_df, weekly_df, budget_df) if d is not None and not d.empty]
     stacked = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
