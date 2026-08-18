@@ -4492,7 +4492,7 @@ NAV_GROUP_KEYS = {
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
 # main()에 elif 분기를 추가하고 여기서 이름을 지워주면 된다.
-NAV_PAGES_COMING_SOON = {"UTM 빌더", "소재 로그", "예산 재배분", "가이드"}
+NAV_PAGES_COMING_SOON = {"UTM 빌더", "소재 로그", "가이드"}
 
 
 def render_coming_soon(page_name: str):
@@ -7360,9 +7360,10 @@ MEDIA_MASTER_DEFAULT = [
      "naver/brand_pc,naver/cpm"),
     ("메타",               "자사몰",  30, "메타",              "메타",               1.0,
      "facebook/facebook_feed,meta/cpc,sns/cpc"),
-    ("GFA_애드부스트",      "자사몰",  40, "네이버 애드부스트",    "네이버 GFA",          0.5,
+    # 예산 파일의 '신규 매체' 줄이 곧 애드부스트다(5~8월). GFA와 예산 라인이 다르다.
+    ("GFA_애드부스트",      "자사몰",  40, "네이버 애드부스트",    "신규 매체",           1.0,
      "naver/gfa_애드부스트"),
-    ("GFA_자사몰",         "자사몰",  50, "네이버 GFA",         "네이버 GFA",          0.5,
+    ("GFA_자사몰",         "자사몰",  50, "네이버 GFA",         "네이버 GFA",          1.0,
      "naver/gfa,naver/da,naver/display"),
     ("크리테오",            "자사몰",  60, "크리테오",           "크리테오",            1.0,
      "criteo/display,criteo/cpc"),
@@ -7500,8 +7501,24 @@ def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.D
     return pd.DataFrame(out, columns=cols)
 
 
-def _cp_month_budget(channel_mix: pd.DataFrame, ref: date) -> dict:
-    """채널믹스 파일에서 해당 월의 매체별 예산을 꺼낸다."""
+def _cp_month_budget(channel_mix: pd.DataFrame, ref: date,
+                     budget: pd.DataFrame = None, scope: str = "자사몰") -> dict:
+    """해당 월의 매체별 예산을 꺼낸다.
+
+    '◆26년 월별 예산 정리'(channel_budget)가 회사 공식 계획이라 이걸 먼저 본다.
+    없을 때만 '채널 믹스' 파일로 물러난다. 두 파일의 8월 합계가 다른데
+    (25,020,000 vs 23,250,000), 차이는 신규 매체·법인카드정산이라 공식 파일이 맞다.
+    """
+    if budget is not None and not budget.empty and "budget_cost" in budget.columns:
+        b = budget.copy()
+        for c in ("year", "month"):
+            b[c] = pd.to_numeric(b.get(c), errors="coerce")
+        b = b[(b.get("scope") == scope) & (b["year"] == ref.year) & (b["month"] == ref.month)]
+        b = b[~b["channel"].astype(str).str.startswith("__")]
+        b = b[b["channel"].astype(str) != "TOTAL"]
+        if not b.empty:
+            return {str(r["channel"]): float(r["budget_cost"] or 0) for _, r in b.iterrows()}
+
     out = {}
     if channel_mix is None or channel_mix.empty:
         return out
@@ -7734,7 +7751,7 @@ def contracts_to_daily(contracts: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None):
+def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
 
@@ -7832,7 +7849,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     spend = _cp_spend_by_channel(ad_spend, start, end)
     spend_map = {r["channel"]: r for _, r in spend.iterrows()} if not spend.empty else {}
     ga_map = _cp_ga_by_media(ga_daily, mst, start, end)
-    budget_map = _cp_month_budget(channel_mix, start)
+    budget_map = _cp_month_budget(channel_mix, start, budget)
 
     recs = []
     for _, r in mst.iterrows():
@@ -8085,6 +8102,222 @@ def force_resync_ad_spend(start: date, end: date):
         saved[label] = save_table("ad_spend_daily", df,
                                   "report_date,channel,source", f"{label} API(재수집)")
     return saved, errors
+
+
+# ══════════════════════════════════════════════════════════════
+# 예산 재배분 — "다음 주 예산을 어디로 옮길까"
+#
+# 채널 성과 탭이 '무엇이 잘 되고 있나'라면, 여기는 '그래서 돈을 어떻게 옮길까'다.
+# 두 가지를 강제한다.
+#   ① 증액분과 감액분의 합이 0 — 총예산을 넘기지 않는다.
+#   ② 정액 계약 매체는 조정 대상에서 제외 — 계약 금액은 못 줄인다.
+# 판단 기준은 GA-ROAS와 '집행 페이스'(기간 경과 대비 예산 소진).
+# ══════════════════════════════════════════════════════════════
+
+BR_AD_RATIO_TARGET = 0.14   # 자사몰 광고비 비율 목표(예산 파일의 '광고비 비율' 기준)
+
+
+def _br_ratio_actual(budget: pd.DataFrame, year: int, scope: str = "자사몰"):
+    """연간 예산 파일에서 누적 실매출과 누적 광고선전비를 꺼내 광고비 비율을 만든다."""
+    if budget is None or budget.empty or "budget_cost" not in budget.columns:
+        return None, None, None
+    b = budget.copy()
+    for c in ("year", "month"):
+        b[c] = pd.to_numeric(b.get(c), errors="coerce")
+    b = b[(b.get("scope") == scope) & (b["year"] == year) & (b["month"].between(1, 12))]
+    if b.empty:
+        return None, None, None
+    rev = b[b["channel"] == BUDGET_SENTINEL_ACTUAL_REVENUE]["budget_cost"].sum()
+    spend = b[(~b["channel"].astype(str).str.startswith("__"))
+              & (b["channel"].astype(str) != "TOTAL")]["budget_cost"].sum()
+    # 실매출이 입력된 달까지만 비교해야 비율이 안 왜곡된다
+    months = sorted(b[(b["channel"] == BUDGET_SENTINEL_ACTUAL_REVENUE)
+                      & (b["budget_cost"] > 0)]["month"].unique())
+    if months:
+        spend = b[(b["month"].isin(months))
+                  & (~b["channel"].astype(str).str.startswith("__"))
+                  & (b["channel"].astype(str) != "TOTAL")]["budget_cost"].sum()
+    return (spend / rev if rev else None), spend, rev
+
+
+def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
+                               master=None, decisions=None):
+    st.markdown(CP_CSS + BR_CSS, unsafe_allow_html=True)
+    mst = media_master_frame(master)
+    today = date.today()
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        ym = st.date_input("기준 월", today.replace(day=1), key="br_month", format="YYYY-MM-DD")
+    ref = pd.to_datetime(ym).date().replace(day=1)
+    last_day = (ref.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    end = min(today - timedelta(days=1), last_day)
+    days_total = last_day.day
+    days_done = max((end - ref).days + 1, 0)
+    days_left = days_total - days_done
+
+    spend = _cp_spend_by_channel(ad_spend, ref, end)
+    spend_map = {r["channel"]: r for _, r in spend.iterrows()} if not spend.empty else {}
+    ga_map = _cp_ga_by_media(ga_daily, mst, ref, end)
+    bmap = _cp_month_budget(channel_mix, ref, budget)
+
+    rows = []
+    for _, r in mst.iterrows():
+        sc = str(r.get("spend_channel") or "").strip()
+        sp = spend_map.get(sc, {})
+        bl = str(r.get("budget_line") or "").strip()
+        bud = bmap.get(bl, 0) * float(r.get("budget_share") or 0) if bl else 0
+        g = ga_map.get(r["media"], {"conv": 0.0, "rev": 0.0})
+        cost = float(sp.get("cost_incl_vat", 0) or 0)
+        src = str(sp.get("source", "") or "")
+        rows.append({
+            "매체": r["media"], "구분": r.get("scope", "자사몰"),
+            "집행": cost, "예산": bud,
+            "집행률": (cost / bud * 100) if bud > 0 else None,
+            "ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
+            "출처": src, "고정": src == "contract",
+        })
+    df = pd.DataFrame(rows)
+    df = df[(df["예산"] > 0) | (df["집행"] > 0)].reset_index(drop=True)
+
+    tot_b, tot_c = df["예산"].sum(), df["집행"].sum()
+    pace = (tot_c / tot_b * 100) if tot_b > 0 else 0
+    elapsed = (days_done / days_total * 100) if days_total else 0
+    ratio, r_spend, r_rev = _br_ratio_actual(budget, ref.year)
+
+    st.markdown(
+        '<div class="cp-wrap"><div class="cp-eyebrow">BUDGET REALLOCATION · '
+        f'{ref.year}년 {ref.month}월</div>'
+        '<div class="cp-title">다음 주 예산을 어디로 옮길까요?</div>'
+        '<div class="cp-kpis">'
+        f'<div class="cp-kpi"><div class="k">월 예산</div><div class="v">{_cp_won(tot_b)}</div>'
+        f'<div class="s">연간 예산 파일 기준</div></div>'
+        f'<div class="cp-kpi"><div class="k">현재 집행</div><div class="v">{_cp_won(tot_c)}</div>'
+        f'<div class="s">{ref} ~ {end} · {pace:.1f}%</div></div>'
+        f'<div class="cp-kpi"><div class="k">남은 예산</div><div class="v">{_cp_won(tot_b - tot_c)}</div>'
+        f'<div class="s">남은 {days_left}일 · 일 {_cp_won((tot_b - tot_c) / days_left) if days_left else "-"}</div></div>'
+        f'<div class="cp-kpi"><div class="k">집행 페이스</div><div class="v">{pace:.0f}%</div>'
+        f'<div class="br-pace"><i style="width:{min(pace,100):.0f}%"></i>'
+        f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
+        f'<div class="s">기간 경과 {elapsed:.0f}% 대비 '
+        f'<b>{"과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")}</b></div></div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    if ratio is not None:
+        gap = (ratio - BR_AD_RATIO_TARGET) * 100
+        st.markdown(
+            f'<div class="cp-wrap"><div class="br-ratio {"over" if gap > 0 else "ok"}">'
+            f'<b>누적 광고비 비율 {ratio*100:.1f}%</b> · 목표 {BR_AD_RATIO_TARGET*100:.0f}% '
+            f'({"초과" if gap > 0 else "여유"} {abs(gap):.1f}%p) — '
+            f'광고비 {_cp_won(r_spend)} / 실매출 {_cp_won(r_rev)}'
+            '</div></div>', unsafe_allow_html=True)
+
+    # ── 조정 입력 ────────────────────────────────────────
+    st.markdown("#### 매체별 조정")
+    st.caption(
+        "조정률을 바꾸면 조정액이 즉시 다시 계산됩니다. 정액 계약 매체는 금액이 고정이라 제외됩니다. "
+        f"증액분과 감액분의 합이 0이 될 때까지 확정할 수 없습니다."
+    )
+
+    edit = df[["매체", "구분", "집행", "예산", "집행률", "ROAS", "고정"]].copy()
+    edit["판정"] = edit.apply(
+        lambda r: "계약 고정" if r["고정"] else
+        ("판단 보류" if (r["집행"] < CP_MIN_SPEND_FOR_JUDGE) else
+         ("증액" if (r["ROAS"] or 0) >= OPS_KPI_ROAS_HIGH else
+          ("감액" if (r["ROAS"] is not None and not pd.isna(r["ROAS"])
+                     and r["ROAS"] < OPS_KPI_ROAS_LOW) else "유지"))), axis=1)
+    edit["조정률(%)"] = edit["판정"].map({"증액": 10.0, "감액": -10.0}).fillna(0.0)
+    edit.loc[edit["고정"], "조정률(%)"] = 0.0
+
+    shown = st.data_editor(
+        edit[["매체", "판정", "집행", "예산", "집행률", "ROAS", "조정률(%)"]],
+        use_container_width=True, hide_index=True, key="br_editor",
+        disabled=["매체", "판정", "집행", "예산", "집행률", "ROAS"],
+        column_config={
+            "집행": st.column_config.NumberColumn("현재 집행", format="₩%d"),
+            "예산": st.column_config.NumberColumn("월 예산", format="₩%d"),
+            "집행률": st.column_config.NumberColumn("집행률", format="%.1f%%"),
+            "ROAS": st.column_config.NumberColumn("GA ROAS", format="%.0f%%"),
+            "조정률(%)": st.column_config.NumberColumn(
+                "조정률", format="%.0f%%", min_value=-50, max_value=50, step=5),
+        },
+    )
+
+    adj = shown.copy()
+    fixed = dict(zip(edit["매체"], edit["고정"]))
+    adj["고정"] = adj["매체"].map(fixed).fillna(False)
+    adj.loc[adj["고정"], "조정률(%)"] = 0.0
+    adj["조정액"] = (adj["예산"] * adj["조정률(%)"] / 100).round(0)
+    adj["조정 후"] = adj["예산"] + adj["조정액"]
+    balance = adj["조정액"].sum()
+
+    up_sum = adj[adj["조정액"] > 0]["조정액"].sum()
+    dn_sum = -adj[adj["조정액"] < 0]["조정액"].sum()
+    ok = abs(balance) < 1
+    st.markdown(
+        f'<div class="cp-wrap"><div class="br-bal {"ok" if ok else "bad"}">'
+        f'<div><div class="l1">BALANCE</div><div class="l2">'
+        f'증액 +{up_sum:,.0f}원 · 감액 −{dn_sum:,.0f}원 → '
+        f'{"총예산 변동 없음" if ok else f"차액 {balance:+,.0f}원"}</div></div>'
+        f'<div class="l3">{"확정 가능" if ok else "합이 0이어야 확정됩니다"}</div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    st.dataframe(
+        adj[["매체", "예산", "조정률(%)", "조정액", "조정 후"]],
+        use_container_width=True, hide_index=True,
+        column_config={
+            "예산": st.column_config.NumberColumn("월 예산", format="₩%d"),
+            "조정률(%)": st.column_config.NumberColumn("조정률", format="%.0f%%"),
+            "조정액": st.column_config.NumberColumn("조정액", format="₩%d"),
+            "조정 후": st.column_config.NumberColumn("조정 후 예산", format="₩%d"),
+        },
+    )
+
+    note = st.text_input("결정 근거 (선택)", key="br_note",
+                         placeholder="예: 구글 ROAS 213%로 목표 하단 근접, 검색광고로 이동")
+    if st.button("이 배분으로 확정", key="br_confirm", type="primary", disabled=not ok):
+        moved = adj[adj["조정액"] != 0]
+        if moved.empty:
+            st.warning("조정할 매체가 없습니다.")
+        else:
+            recs = [{
+                "decided_on": today, "channel": r["매체"],
+                "action": f'예산 {r["조정률(%)"]:+.0f}% ({r["조정액"]:+,.0f}원)',
+                "note": note or f'{ref.year}년 {ref.month}월 예산 재배분',
+            } for _, r in moved.iterrows()]
+            n = save_table("decision_log", pd.DataFrame(recs),
+                           "decided_on,channel,action", "예산 재배분")
+            st.success(f"{n}건 기록했습니다. 7일 뒤 채널 퍼널 리포트에서 자동 회고됩니다.")
+            st.cache_data.clear()
+
+    st.markdown(
+        '<div class="cp-wrap"><div class="cp-note">'
+        '· 월 예산은 <b>◆26년 월별 예산 정리</b> 파일 기준입니다 (없으면 채널 믹스로 대체).<br>'
+        '· <b>집행 페이스</b>는 기간 경과율과 비교합니다 — 기간 42%인데 예산 58%를 썼다면 남은 날을 못 버팁니다.<br>'
+        f'· <b>광고비 비율</b>은 예산 파일의 목표({BR_AD_RATIO_TARGET*100:.0f}%)와 누적 실적을 비교합니다. '
+        '실매출이 입력된 달까지만 계산해 비율이 왜곡되지 않게 했습니다.<br>'
+        '· 확정 내역은 <b>의사결정 기록</b>에 저장되고, 결정일 전후 7일 성과가 자동 비교됩니다.'
+        '</div></div>', unsafe_allow_html=True)
+
+
+BR_CSS = """
+<style>
+.br-pace{height:6px;background:#EFEDE8;border-radius:3px;margin-top:8px;overflow:hidden;position:relative}
+.br-pace i{display:block;height:100%;background:#14181F;border-radius:3px}
+.br-pace u{position:absolute;top:-3px;width:2px;height:12px;background:#E0654A;text-decoration:none}
+.br-ratio{border-radius:10px;padding:11px 15px;font-size:12.5px;margin-bottom:14px}
+.br-ratio.ok{background:#EAF7D9;color:#3F6B12}
+.br-ratio.over{background:#FDEDE3;color:#9A4B14}
+.br-bal{border-radius:10px;padding:14px 18px;margin:12px 0;display:flex;
+  justify-content:space-between;align-items:center}
+.br-bal.ok{background:#D9F27E}
+.br-bal.bad{background:#F1EFEA}
+.br-bal .l1{font-size:10px;font-weight:800;letter-spacing:.12em;color:#4A5A16}
+.br-bal .l2{font-size:15px;font-weight:800;color:#14181F;margin-top:2px}
+.br-bal .l3{font-size:12px;font-weight:700;color:#4A5A16}
+.br-bal.bad .l1,.br-bal.bad .l3{color:#8A9099}
+</style>
+"""
 
 
 def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
@@ -9593,6 +9826,12 @@ def main():
     elif page == "채널 성과":
         render_channel_performance_page(
             ad_spend, ga_daily, channel_mix, master=load_table("media_master"),
+            budget=budget,
+        )
+    elif page == "예산 재배분":
+        render_budget_realloc_page(
+            ad_spend, ga_daily, channel_mix, budget=budget,
+            master=load_table("media_master"), decisions=decisions,
         )
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(ga_channel_inflow)
