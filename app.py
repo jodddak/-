@@ -4494,7 +4494,7 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
-    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "예산 관리",
+    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "GA 소재별 성과", "예산 관리",
                     "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
@@ -6127,6 +6127,7 @@ FUNNEL_V4_CSS = """
                background:#EFEEE6; color:#7A7A6E; font-size:13px; font-weight:700; }
 .fv4-chg-tag.warn { background:#FBE9E7; color:#B03A2E; }
 .fv4-chg-dot.flat { background:#C9C7BA; }
+.gc-sub { display:block; margin-top:3px; color:#8a8a7c; font-size:13px; font-weight:500; }
 .fv4-kpi-delta { font-size:13.5px; font-weight:700; }
 .fv4-up   { color:#c0392b; }
 .fv4-down { color:#2563c9; }
@@ -9420,6 +9421,258 @@ def diagnose_ad_spend_setup() -> str:
     return "\n".join(L)
 
 
+
+# ──────────────────────────────────────────────────────────────
+# GA 소재별 성과 — utm_campaign / utm_content 단위
+# ──────────────────────────────────────────────────────────────
+GC_HEAD = ["구분", "방문", "신규 방문", "회원가입", "가입률",
+           "구매", "구매율", "매출", "객단가", "추정 광고비", "추정 ROAS", "판정"]
+
+# utm_content 작명 규칙: 그룹명(타겟팅명)_날짜_소재이름
+#   예) 패션관심타겟_260807_수피마티셔츠
+# 소재 이름에도 '_'가 들어갈 수 있어서 앞에서부터 자르면 안 된다. 가운데의 날짜 토큰
+# (6자리 YYMMDD 또는 8자리 YYYYMMDD)을 기준으로 앞=타겟팅, 뒤=소재로 가른다.
+GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
+
+
+def _gc_parse_content(v):
+    """utm_content → (타겟팅, 등록일, 소재명). 규칙에 안 맞으면 통째로 소재명으로 둔다."""
+    raw = str(v or "").strip()
+    if not raw or raw == "(미설정)":
+        return "(미설정)", "", "(미설정)"
+    # GA4가 퍼센트 인코딩된 채로 주는 경우가 있다(%ED%8C%A8...). 사람이 읽게 풀어준다.
+    if "%" in raw:
+        try:
+            from urllib.parse import unquote
+            raw = unquote(raw)
+        except Exception:
+            pass
+    parts = raw.split("_")
+    idx = next((i for i, t in enumerate(parts) if GC_DATE_TOKEN.match(t)), None)
+    if idx is None or idx == 0 or idx == len(parts) - 1:
+        # 날짜가 없거나 맨 앞/맨 뒤면 규칙 밖이다 — 억지로 쪼개면 엉뚱한 타겟팅이 생긴다
+        return "(규칙 외)", "", raw
+    target = "_".join(parts[:idx])
+    ymd = parts[idx]
+    name = "_".join(parts[idx + 1:])
+    if len(ymd) == 6:
+        ymd = f"20{ymd[:2]}-{ymd[2:4]}-{ymd[4:]}"
+    else:
+        ymd = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
+    return target or "(미설정)", ymd, name or "(미설정)"
+
+
+def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str) -> pd.DataFrame:
+    """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
+    cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev"]
+    if cre is None or cre.empty:
+        return pd.DataFrame(columns=cols)
+    g = cre.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"], errors="coerce").dt.date
+    g = g[(g["report_date"] >= start) & (g["report_date"] <= end)]
+    if g.empty:
+        return pd.DataFrame(columns=cols)
+    for c in ("sessions", "conversions", "revenue", "signups"):
+        g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0).astype(float)
+    g["channel"] = g.apply(
+        lambda r: _v4_canon_channel(r["channel"]) if pd.notna(r.get("channel"))
+        else _v4_canon_channel(r["source_medium"]), axis=1)
+    is_new = g["user_type"] == "신규"
+    g["new"] = np.where(is_new, g["sessions"], 0.0)
+    # 회원가입은 신규 유입의 성과로 본다 (재방문자의 가입은 사실상 없다)
+    g["signup"] = np.where(is_new, g["signups"], 0.0)
+
+    parsed = g["creative"].map(_gc_parse_content)
+    g["target"] = parsed.map(lambda t: t[0])
+    g["cre_date"] = parsed.map(lambda t: t[1])
+    g["cre_name"] = parsed.map(lambda t: t[2])
+
+    if level == "매체":
+        g["key"] = g["channel"]
+    elif level == "캠페인":
+        g["key"] = g["channel"] + " · " + g["campaign"]
+    elif level == "타겟팅":
+        g["key"] = g["channel"] + " · " + g["target"]
+    else:
+        # 소재명은 같은데 타겟팅이 다르면 성과가 다르다 — 둘을 붙여야 한 줄이 한 소재가 된다
+        g["key"] = (g["cre_name"] + '<span class="gc-sub">'
+                    + g["channel"] + " · " + g["target"]
+                    + np.where(g["cre_date"] != "", " · " + g["cre_date"], "")
+                    + "</span>")
+
+    out = g.groupby(["key", "channel"], as_index=False).agg(
+        sessions=("sessions", "sum"), new=("new", "sum"), signup=("signup", "sum"),
+        conv=("conversions", "sum"), rev=("revenue", "sum"))
+    return out.sort_values("rev", ascending=False)[cols]
+
+
+def _gc_row_html(r, cost, extra_cls="") -> str:
+    """소재 표의 한 줄. 광고비가 소재 단위로 없어서 방문 비중으로 나눈 '추정'이다."""
+    ses = float(r["sessions"] or 0)
+    new = float(r["new"] or 0)
+    sign = float(r["signup"] or 0)
+    conv = float(r["conv"] or 0)
+    rev = float(r["rev"] or 0)
+    s_rate = (sign / new * 100) if new else 0.0
+    b_rate = (conv / ses * 100) if ses else 0.0
+    aov = (rev / conv) if conv else 0.0
+    roas = (rev / cost * 100) if cost > 0 else 0.0
+    roas_txt = f"{roas:,.0f}%" if cost > 0 else "-"
+    label, cls = _v4_verdict(roas, cost)
+    name = r["key"] if isinstance(r, dict) or "key" in r else ""
+    return (
+        f'<tr class="{extra_cls}">'
+        f'<td class="l">{name}</td>'
+        f'<td data-v="{ses:.0f}">{_v4_num(ses)}</td>'
+        f'<td data-v="{new:.0f}">{_v4_num(new)}</td>'
+        f'<td data-v="{sign:.0f}">{_v4_num(sign)}</td>'
+        f'<td data-v="{s_rate:.3f}">{s_rate:.2f}%</td>'
+        f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
+        f'<td data-v="{b_rate:.3f}">{b_rate:.2f}%</td>'
+        f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
+        f'<td data-v="{aov:.0f}">{_v4_num(aov, "원")}</td>'
+        f'<td data-v="{cost:.0f}">{_v4_num(cost, "원")}</td>'
+        f'<td data-v="{roas:.2f}">{roas_txt}</td>'
+        f'<td><span class="fv4-chip {cls}">{label}</span></td>'
+        f'</tr>'
+    )
+
+
+def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
+                            utm_map: pd.DataFrame = None):
+    """GA 소재별 성과 — 대행사 리포트가 아니라 GA4의 utm_campaign/utm_content로 본다.
+
+    매체 리포트(소재별 성과 탭)와 나눠둔 이유: 매체가 신고하는 전환은 매체마다 기준이 달라
+    서로 못 더한다. GA는 한 기준이라 소재끼리 비교가 된다. 대신 GA에는 광고비가 없어서
+    ROAS는 방문 비중으로 나눈 '추정치'다 — 순위 판단용이지 정산용이 아니다.
+    """
+    st.markdown(FUNNEL_V4_CSS, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="fv4-wrap"><div class="fv4-eyebrow">CREATIVE · GA4</div>'
+        '<div class="fv4-h2">GA 소재별 성과</div></div>', unsafe_allow_html=True)
+
+    c1, c2 = st.columns([3, 1])
+    with c2:
+        if st.button("🔄 소재 데이터 동기화", use_container_width=True, key="gc_sync"):
+            cmap = (build_utm_channel_lookup(utm_map)
+                    if utm_map is not None and not utm_map.empty else {})
+            with st.spinner("GA4에서 소재별 데이터를 받는 중..."):
+                n, s_, e_, err = sync_ga4_creative_daily(cre, cmap, force_full=cre is None or cre.empty)
+            if err:
+                st.error(err)
+            else:
+                st.success(f"{s_} ~ {e_} · {n}행 저장했습니다")
+                st.cache_data.clear()
+                st.rerun()
+
+    if cre is None or cre.empty:
+        st.info(
+            "아직 소재별 데이터가 없습니다. 오른쪽 **🔄 소재 데이터 동기화**를 눌러주세요.\n\n"
+            "먼저 Supabase에 `ga_creative_daily` 테이블이 있어야 합니다 (배포 SQL 참고)."
+        )
+        return
+
+    d = cre.copy()
+    d["report_date"] = pd.to_datetime(d["report_date"], errors="coerce").dt.date
+    d = d.dropna(subset=["report_date"])
+    if d.empty:
+        st.info("날짜를 읽을 수 있는 행이 없습니다.")
+        return
+    with c1:
+        start, end = period_filter(d["report_date"].min(), d["report_date"].max(),
+                                   key="ga_creative", default_preset="이번달")
+
+    level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
+                     horizontal=True, key="gc_level")
+    rows = _gc_rows(d, start, end, level)
+    if rows.empty:
+        st.info("선택한 기간에 데이터가 없습니다.")
+        return
+
+    # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다. 비율을 먼저 보여준다.
+    per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
+    per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
+    tot_ses = float(per["sessions"].sum())
+    unset = float(per[per["creative"] == "(미설정)"]["sessions"].sum())
+    if tot_ses > 0 and unset / tot_ses > 0.2:
+        st.warning(
+            f"소재(utm_content)가 안 붙은 방문이 {unset:,.0f} / {tot_ses:,.0f}건 "
+            f"({unset / tot_ses * 100:.0f}%)입니다. 광고 랜딩 URL에 `utm_content`를 넣어야 "
+            "소재별 비교가 됩니다 — 운영 도구 › UTM 빌더에서 만들 수 있습니다."
+        )
+
+    # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
+    spend = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None else pd.DataFrame()
+    spend_by_ch = {}
+    if spend is not None and not spend.empty:
+        for _, r in spend.iterrows():
+            spend_by_ch[_v4_canon_channel(r["channel"])] = float(r.get("cost_incl_vat", 0) or 0)
+    ch_ses = rows.groupby("channel")["sessions"].sum().to_dict()
+
+    def cost_of(r):
+        ch = r["channel"]
+        tot = float(ch_ses.get(ch, 0) or 0)
+        if tot <= 0:
+            return 0.0
+        return spend_by_ch.get(ch, 0.0) * float(r["sessions"]) / tot
+
+    body = [_gc_row_html(r, cost_of(r)) for _, r in rows.iterrows()]
+    tot_r = rows[["sessions", "new", "signup", "conv", "rev"]].sum()
+    tot_r["key"] = "TOTAL"
+    sum_html = _gc_row_html(tot_r, sum(spend_by_ch.get(c, 0.0) for c in ch_ses),
+                            "fv4-sum-row nosort")
+
+    head = list(GC_HEAD)
+    head[0] = {"소재": "소재 (타겟팅 · 등록일)", "타겟팅": "매체 · 타겟팅",
+               "캠페인": "매체 · 캠페인", "매체": "매체"}[level]
+    th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
+                 f'<span class="fv4-ar">&#8645;</span></th>'
+                 for i, h in enumerate(head))
+    table = (f'<table class="fv4-tbl" id="gctbl"><thead><tr>{th}</tr></thead>'
+             f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
+
+    card = (
+        FUNNEL_V4_CSS
+        + '<div class="fv4-wrap"><div class="fv4-card">'
+        f'<span class="fv4-badge-dark">{level}별</span>'
+        f'<div class="fv4-card-title">{level}별 GA 성과</div>'
+        '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
+        '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
+        '소재끼리 비교가 됩니다.</div>'
+        '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. TOTAL은 맨 위 고정입니다.<br>'
+        '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 것입니다 — '
+        '같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
+        '<b>(규칙 외)</b>로 모아 보여주니, 그게 많으면 UTM 작명을 맞춰주세요.<br>'
+        '<b>추정 광고비</b>는 매체 광고비를 그 매체 안에서 방문 비중대로 나눈 값입니다 — '
+        'GA에는 소재별 광고비가 없습니다. <b>순위를 볼 때만</b> 쓰시고 정산에는 쓰지 마세요. '
+        f'광고비가 {FUNNEL_MIN_SPEND:,.0f}원 미만이면 표본이 작아 <b>판단 보류</b>로 둡니다.</div>'
+        + table + '</div></div>'
+        + """
+<script>
+(function(){
+  var t=document.getElementById('gctbl'); if(!t) return;
+  var ths=t.tHead.rows[0].cells, st={i:-1,asc:false};
+  function v(row,i){var c=row.cells[i]; if(!c) return '';
+    var d=c.getAttribute('data-v'); return d!==null?parseFloat(d):c.innerText.trim();}
+  for(var i=0;i<ths.length;i++){(function(i){
+    ths[i].style.cursor='pointer';
+    ths[i].onclick=function(){
+      var asc=(st.i===i)?!st.asc:false; st={i:i,asc:asc};
+      var tb=t.tBodies[0], all=Array.prototype.slice.call(tb.rows);
+      var fixed=all.filter(function(r){return r.classList.contains('nosort');});
+      var mov=all.filter(function(r){return !r.classList.contains('nosort');});
+      mov.sort(function(a,b){var x=v(a,i),y=v(b,i);
+        if(typeof x==='number'&&typeof y==='number'){return asc?x-y:y-x;}
+        return asc?String(x).localeCompare(String(y),'ko')
+                  :String(y).localeCompare(String(x),'ko');});
+      fixed.concat(mov).forEach(function(r){tb.appendChild(r);});
+    };})(i);}
+})();
+</script>"""
+    )
+    st.components.v1.html(card, height=min(1400, 420 + 40 * len(body)), scrolling=True)
+
+
 def render_ga_channel_funnel_page(
     audience: pd.DataFrame,
     ga_channel_inflow: pd.DataFrame,
@@ -10830,6 +11083,9 @@ def main():
             budget=T("channel_budget"), master=T("media_master"),
             decisions=T("decision_log"),
         )
+    elif page == "GA 소재별 성과":
+        render_ga_creative_page(T("ga_creative_daily"), ad_spend=T("ad_spend_daily"),
+                                utm_map=T("utm_channel_map"))
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(
             ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
