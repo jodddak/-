@@ -5864,6 +5864,16 @@ FUNNEL_V4_CSS = """
 .fv4-tbl th:hover{background:#EDEAE3}
 .fv4-ind{padding-left:14px;display:inline-block}
 .fv4-na{color:#C2C6CC}
+.fv4-mixpanel-wide{background:#FFF;border:1px solid #E3E1DC;border-radius:14px;padding:22px 26px;margin-top:16px}
+.fv4-mix-amt-big{font-size:34px;font-weight:800;letter-spacing:-.03em;color:#14181F;margin:4px 0 2px}
+.fv4-mix-ch{font-size:13px;font-weight:700;color:#14181F}
+.fv4-mix-val{font-size:12px;color:#6E747C;font-weight:600}
+.fv4-mix-val b{margin-left:10px;color:#14181F;font-weight:800}
+.fv4-mixpanel-wide .fv4-mix-row{margin-top:12px}
+.fv4-mixpanel-wide .fv4-mix-track{height:7px;background:#EFEDE8;border-radius:4px;margin-top:5px;overflow:hidden}
+.fv4-mixpanel-wide .fv4-mix-track i{display:block;height:100%;background:#8B7BE8;border-radius:4px}
+.fv4-mixpanel-wide .fv4-mix-list{margin-top:16px}
+.cp-rec-det{color:#4A5A16;font-size:11.5px}
 .fv4-chip {
   display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
 }
@@ -6066,6 +6076,102 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
     ads["channel"] = ads["channel"].map(_v4_canon_channel)
     media = fold(ads, "channel").sort_values("users", ascending=False)
     return buckets, media
+
+
+def _v4_actions_html(media, spend_map, is_new, start, end) -> str:
+    """퍼널 화면의 NEXT BEST ACTION. 목적축(신규 발굴 / 매출 확보)에 맞춰 매체를 전부 훑는다.
+
+    예전에는 상단 '오늘의 액션 신호' 3개만 재활용해서 매체 한둘만 나왔다.
+    판단은 매체별로 내리는 거라, 모든 매체를 판정하고 그 이유를 같이 적는다.
+    """
+    if media is None or media.empty:
+        return ""
+    axis = "신규 고객 발굴" if is_new else "매출 확보"
+    rev_k, conv_k, base_k = (("new_rev", "new_conv", "new") if is_new
+                             else ("ret_rev", "ret_conv", "ret"))
+    up, keep, down, hold, skip = [], [], [], [], []
+    for _, m in media.iterrows():
+        ch = m["key"]
+        cost = float(spend_map.get(ch, {}).get("cost_incl_vat", 0) or 0)
+        rev = float(m[rev_k] or 0)
+        conv = float(m[conv_k] or 0)
+        base = float(m[base_k] or 0)
+        roas = (rev / cost * 100) if cost > 0 else None
+        rec = (ch, cost, rev, conv, base, roas)
+        if cost <= 0 and rev > 0:
+            skip.append(rec)
+        elif cost <= 0:
+            continue
+        elif cost < CP_MIN_SPEND_FOR_JUDGE:
+            hold.append(rec)
+        elif roas is None:
+            skip.append(rec)
+        elif roas >= OPS_KPI_ROAS_HIGH:
+            up.append(rec)
+        elif roas >= OPS_KPI_ROAS_LOW:
+            keep.append(rec)
+        else:
+            down.append(rec)
+    up.sort(key=lambda x: -(x[5] or 0))
+    down.sort(key=lambda x: (x[5] or 0))
+
+    if up and down:
+        head = f"<b>{up[0][0]}</b>를 늘리고 <b>{down[0][0]}</b>를 줄이세요."
+    elif up:
+        head = f"<b>{up[0][0]}</b>에 예산을 더 태울 여지가 있습니다."
+    elif down:
+        head = f"<b>{down[0][0]}</b>를 손봐야 합니다."
+    elif keep:
+        head = "지금은 손댈 매체가 없습니다."
+    else:
+        head = "아직 판단할 만한 데이터가 없습니다."
+    sub = (f"{axis} 기준 · 판단 가능 {len(up)+len(keep)+len(down)}개 · "
+           f"보류 {len(hold)}개 · 제외 {len(skip)}개")
+
+    kind_lbl = "첫구매" if is_new else "재구매"
+    base_lbl = "신규" if is_new else "재방문"
+
+    def li(rec, tag, cls, act):
+        ch, cost, rev, conv, base, roas = rec
+        cac = (cost / conv) if conv else None
+        detail = (f'{base_lbl} {base:,.0f}명 → {kind_lbl} {conv:,.0f}건'
+                  + (f' · {kind_lbl} CAC \u20a9{cac:,.0f}' if cac else ''))
+        roas_s = f'{roas:,.0f}%' if roas else '—'
+        return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{ch}</b> — '
+                f'{axis} ROAS {roas_s} · 집행 \u20a9{cost:,.0f}<br>'
+                f'<span class="cp-rec-det">{detail} → {act}</span></li>')
+
+    items = []
+    for r in up:
+        move = r[1] * CP_STEP
+        items.append(li(r, "증액 검토", "up",
+                        f'예산 +{CP_STEP*100:.0f}% (\u20a9{move:,.0f}) 후 48시간 관찰'))
+    for r in down:
+        move = r[1] * CP_STEP
+        items.append(li(r, "감액·점검", "down",
+                        f'예산 -{CP_STEP*100:.0f}% (\u20a9{move:,.0f}) 또는 소재·타겟 점검 먼저'))
+    for r in keep:
+        items.append(li(r, "유지", "keep", "현 수준 유지"))
+    for ch, cost, rev, conv, base, roas in hold:
+        items.append(f'<li><span class="cp-tag hold">판단 보류</span> <b>{ch}</b> — '
+                     f'집행 \u20a9{cost:,.0f}로 표본이 작습니다<br>'
+                     f'<span class="cp-rec-det">{CP_MIN_SPEND_FOR_JUDGE:,}원 넘을 때까지 판단 유보</span></li>')
+    for ch, cost, rev, conv, base, roas in skip:
+        why = (f'매출 \u20a9{rev:,.0f}은 잡히는데 광고비가 없어 ROAS 계산 불가'
+               if cost <= 0 else '판단 근거 부족')
+        items.append(f'<li><span class="cp-tag skip">판단 제외</span> <b>{ch}</b> — '
+                     f'<span class="cp-rec-det">{why}</span></li>')
+
+    return (
+        '<div class="cp-wrap"><div class="cp-rec">'
+        '<div class="cp-rec-eyebrow">NEXT BEST ACTION</div>'
+        f'<div class="cp-rec-head">{head}</div>'
+        f'<div class="cp-rec-sub">{sub}</div>'
+        f'<ul class="cp-rec-list">{"".join(items)}</ul>'
+        f'<div class="cp-rec-foot">기준: {axis} ROAS 목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}% · '
+        f'집행 {CP_MIN_SPEND_FOR_JUDGE:,}원 미만은 판단 보류 · '
+        f'예산 이동은 한 번에 {CP_STEP*100:.0f}%씩 · 조회 기간 {start} ~ {end}</div>'
+        '</div></div>')
 
 
 def _v4_row_new(name, r, cost, extra_cls=""):
@@ -7550,47 +7656,47 @@ def render_manual_spend_panel(ad_spend: pd.DataFrame):
 # ══════════════════════════════════════════════════════════════
 
 MEDIA_MASTER_DEFAULT = [
-    # (매체명, 구분, 순서, 광고비 출처 채널, 예산 라인, 예산 배분, UTM 매칭)
-    # UTM 매칭 값은 'STCO UTM 리스트(260813)'의 소스/매체를 그대로 옮긴 것.
-    # 슬래시 양옆 공백은 비교 전에 제거되므로 'Naver / cpc'와 'naver/cpc'는 같게 취급된다.
-    ("네이버 검색광고",      "자사몰",  10, "네이버 검색광고",    "네이버 검색광고",      1.0,
-     "naver/cpc"),
-    # 브랜드검색은 정액 상품이라 API가 집행액을 안 준다. 노출·클릭만 API에서 오고 광고비는 손입력.
+    # (매체명, 구분, 순서, 광고비 출처, 예산 라인, 예산 배분, UTM 매칭, 예산 직접 지정)
+    # UTM 매칭은 'STCO UTM 리스트(260813)'의 소스/매체를 그대로 옮긴 것.
+    # 예산 직접 지정은 예산 파일에 줄이 없는 매체용 — 값이 있으면 그게 우선한다.
+    ("네이버 검색광고",      "자사몰",  10, "네이버 검색광고",     "네이버 검색광고",      1.0,
+     "naver/cpc", 0),
     ("네이버 브랜드검색광고", "자사몰",  20, "네이버 브랜드검색광고", "네이버 브랜드검색광고",  1.0,
-     "naver/brand_pc,naver/cpm"),
+     "naver/brand_pc,naver/cpm", 0),
     ("메타",               "자사몰",  30, "메타",              "메타",               1.0,
-     "facebook/facebook_feed,meta/cpc,sns/cpc"),
-    # 예산 파일의 '신규 매체' 줄이 곧 애드부스트다(5~8월). GFA와 예산 라인이 다르다.
+     "facebook/facebook_feed,meta/cpc,sns/cpc", 0),
+    # 예산 파일의 '신규 매체' 줄이 곧 애드부스트다(5~8월).
     ("GFA_애드부스트",      "자사몰",  40, "네이버 애드부스트",    "신규 매체",           1.0,
-     "naver/gfa_애드부스트"),
+     "naver/gfa_애드부스트", 0),
     ("GFA_자사몰",         "자사몰",  50, "네이버 GFA",         "네이버 GFA",          1.0,
-     "naver/gfa,naver/da,naver/display"),
+     "naver/gfa,naver/da,naver/display", 0),
     ("크리테오",            "자사몰",  60, "크리테오",           "크리테오",            1.0,
-     "criteo/display,criteo/cpc"),
+     "criteo/display,criteo/cpc", 0),
     ("구글_실적최대화",      "자사몰",  70, "구글",              "구글",               1.0,
-     "google/cpc"),
-    ("네이버 맨즈탭_자사몰",  "자사몰",  80, "",                 "네이버 맨즈탭",        0.5,
-     "naver/n.box,naversb/cpp,naver_sb/cpp"),
+     "google/cpc", 0),
+    # 맨즈탭 8월 예산 500만원은 전액 자사몰이다(외부몰은 미집행).
+    ("네이버 맨즈탭_자사몰",  "자사몰",  80, "네이버 맨즈탭_자사몰", "네이버 맨즈탭",        1.0,
+     "naver/n.box,naversb/cpp,naver_sb/cpp", 0),
     ("카카오톡 플친",       "자사몰",  90, "카카오",             "카카오톡 플친",        1.0,
-     "kakao_msg/email,kakaotalk/display"),
-    ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "네이버 쇼핑검색광고",  1.0,
-     ""),
-    ("네이버 맨즈탭_외부몰",  "외부몰", 120, "",                 "네이버 맨즈탭",        0.5,
-     ""),
-    # 모비온·ADN·트렌드픽은 현재 미집행이라 뺐다. 다시 집행하면 '매체 정의' 패널에서
-    # 행을 추가하면 된다 (UTM: mobon/cpc · adn/cpc · naver/mo.trend).
+     "kakao_msg/email,kakaotalk/display", 0),
+    # 법인카드 정산분. 매체는 아니지만 월 예산 합계를 맞추려면 '기타'로 들고 있어야 한다.
+    ("기타",               "자사몰", 100, "",                 "법인카드정산",         1.0, "", 0),
+    # ── 외부몰: 매출이 GA4에 안 잡힌다(스마트스토어). 예산도 파일에 없어 직접 지정한다. ──
+    ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "",                  0.0, "", 2_200_000),
+    ("네이버 맨즈탭_외부몰",  "외부몰", 120, "네이버 맨즈탭_외부몰", "",                  0.0, "", 0),
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
-                     "budget_line", "budget_share", "utm_match", "note"]
+                     "budget_line", "budget_share", "utm_match", "budget_override", "note"]
 
 
 def media_master_frame(saved: pd.DataFrame = None) -> pd.DataFrame:
     """저장된 매체 정의가 있으면 그걸 쓰고, 없으면 기본값으로 시작한다."""
     if saved is not None and not saved.empty and "media" in saved.columns:
         df = saved.copy()
+        defaults = {"sort_order": 100, "budget_share": 1.0, "budget_override": 0}
         for c in MEDIA_MASTER_COLS:
             if c not in df.columns:
-                df[c] = "" if c not in ("sort_order", "budget_share") else (100 if c == "sort_order" else 1.0)
+                df[c] = defaults.get(c, "")
         return df[MEDIA_MASTER_COLS].sort_values("sort_order").reset_index(drop=True)
     rows = [dict(zip(MEDIA_MASTER_COLS[:-1], r)) for r in MEDIA_MASTER_DEFAULT]
     df = pd.DataFrame(rows)
@@ -7701,6 +7807,38 @@ def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.D
     return pd.DataFrame(out, columns=cols)
 
 
+def _budget_key(s) -> str:
+    """예산 라인 이름을 비교하기 좋게 다듬는다.
+
+    같은 줄인데 파일 버전마다 표기가 조금씩 다르다
+    (예: '법인카드정산' ↔ '법인카드정산 (기타)'). 괄호 안 설명과 공백을 떼고 비교한다.
+    """
+    t = re.sub(r"\([^)]*\)", "", str(s or ""))
+    return "".join(t.split()).lower()
+
+
+def _media_budget(r, budget_map: dict) -> float:
+    """매체 한 줄의 월 예산. 직접 지정값이 있으면 그게 우선이다.
+
+    예산 파일(자사몰)에 줄이 없는 매체가 있다 — 네이버 쇼핑검색광고 같은 외부몰 매체.
+    그런 건 '매체 정의' 패널의 '예산 직접 지정'에 넣어두면 그 값을 쓴다.
+    """
+    try:
+        ov = float(r.get("budget_override") or 0)
+    except Exception:
+        ov = 0.0
+    if ov > 0:
+        return ov
+    bl = str(r.get("budget_line") or "").strip()
+    if not bl:
+        return 0.0
+    amt = budget_map.get(bl)
+    if amt is None:                       # 표기 차이(괄호 설명 등)까지 감안해 다시 찾는다
+        want = _budget_key(bl)
+        amt = next((v for k, v in budget_map.items() if _budget_key(k) == want), 0)
+    return float(amt or 0) * float(r.get("budget_share") or 0)
+
+
 def _cp_month_budget(channel_mix: pd.DataFrame, ref: date,
                      budget: pd.DataFrame = None, scope: str = "자사몰") -> dict:
     """해당 월의 매체별 예산을 꺼낸다.
@@ -7735,7 +7873,7 @@ CP_CSS = """
 .cp-wrap{font-family:-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif;color:#14181F}
 .cp-eyebrow{font-size:10px;letter-spacing:.14em;font-weight:700;color:#8A9099;text-transform:uppercase;margin-bottom:4px}
 .cp-title{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 14px}
-.cp-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#E3E1DC;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;margin-bottom:14px}
+.cp-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#E3E1DC;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;margin-bottom:14px}
 .cp-kpi{background:#FFF;padding:14px 16px}
 .cp-kpi .k{font-size:11px;color:#8A9099;font-weight:600;margin-bottom:6px}
 .cp-kpi .v{font-size:22px;font-weight:800;letter-spacing:-.02em}
@@ -7756,7 +7894,10 @@ CP_CSS = """
 .cp-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10.5px;font-weight:700;background:#EAF7D9;color:#3F6B12}
 .cp-pill.warn{background:#FDEDE3;color:#9A4B14}
 .cp-pill.zero{background:#F1F1EF;color:#9AA0A8}
-.cp-mute{color:#C2C6CC}
+.cp-mute{color:#C2C6CC
+.cp-pace{height:5px;background:#EFEDE8;border-radius:3px;margin-top:7px;overflow:hidden;position:relative}
+.cp-pace i{display:block;height:100%;background:#14181F;border-radius:3px}
+.cp-pace u{position:absolute;top:-3px;width:2px;height:11px;background:#E0654A;text-decoration:none}
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
 .cp-note{font-size:11px;color:#9AA0A8;margin-top:10px;line-height:1.7}
 .cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
@@ -8055,9 +8196,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     for _, r in mst.iterrows():
         sc = str(r.get("spend_channel") or "").strip()
         sp = spend_map.get(sc, {})
-        bl = str(r.get("budget_line") or "").strip()
-        share = float(r.get("budget_share") or 0)
-        budget = budget_map.get(bl, 0) * share if bl else 0
+        budget = _media_budget(r, budget_map)
         g = ga_map.get(r["media"], {"conv": 0.0, "rev": 0.0})
         cost = float(sp.get("cost_incl_vat", 0) or 0)
         recs.append({
@@ -8076,10 +8215,16 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # ── 상단 KPI ─────────────────────────────────────────
     tot_cost = df["비용"].sum()
     tot_budget = df["월예산"].sum()
+    # 월 집행률은 '이번 달 예산 대비 지금까지 쓴 비율'이다. 기간이 얼마나 지났는지와 나란히 봐야
+    # 과속/저속을 판단할 수 있어서, 경과율을 같은 칸에 눈금으로 같이 그린다.
+    ref_m = start.replace(day=1)
+    last_day = (ref_m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    elapsed = (min(end, last_day).day / last_day.day * 100) if last_day.day else 0
     tot_rev = df["GA매출"].sum()
     tot_conv = df["GA구매"].sum()
     roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0
     pace = (tot_cost / tot_budget * 100) if tot_budget > 0 else 0
+    pace_word = "과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")
     st.markdown(
         '<div class="cp-wrap">'
         '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
@@ -8087,8 +8232,13 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         '<div class="cp-kpis">'
         f'<div class="cp-kpi"><div class="k">실제 집행 광고비</div><div class="v">{_cp_won(tot_cost)}</div>'
         f'<div class="s">VAT 포함 · 공급가 {_cp_won(tot_cost / 1.1)}</div></div>'
-        f'<div class="cp-kpi"><div class="k">연간 매체 월 예산</div><div class="v">{_cp_won(tot_budget)}</div>'
-        f'<div class="s">집행률 {pace:.1f}%</div></div>'
+        f'<div class="cp-kpi"><div class="k">월 예산</div><div class="v">{_cp_won(tot_budget)}</div>'
+        f'<div class="s">{ref_m.year}년 {ref_m.month}월 계획</div></div>'
+        f'<div class="cp-kpi"><div class="k">월 집행률 ({start.month}/{start.day}~{end.month}/{end.day})</div>'
+        f'<div class="v">{pace:.1f}%</div>'
+        f'<div class="cp-pace"><i style="width:{min(pace,100):.0f}%"></i>'
+        f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
+        f'<div class="s">기간 경과 {elapsed:.0f}% 대비 <b>{pace_word}</b></div></div>'
         f'<div class="cp-kpi"><div class="k">GA 매출 ROAS</div><div class="v">{roas:,.1f}%</div>'
         f'<div class="s">목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%</div></div>'
         f'<div class="cp-kpi"><div class="k">GA 구매매출</div><div class="v">{_cp_won(tot_rev)}</div>'
@@ -8265,6 +8415,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 "budget_line": st.column_config.TextColumn("예산 라인(채널믹스)"),
                 "budget_share": st.column_config.NumberColumn("예산 배분", format="%.2f", min_value=0.0, max_value=1.0),
                 "utm_match": st.column_config.TextColumn("UTM 매칭 (쉼표 구분)", width="large"),
+                "budget_override": st.column_config.NumberColumn(
+                    "예산 직접 지정", format="%d", min_value=0,
+                    help="예산 파일에 줄이 없는 매체용. 0이면 예산 라인×배분을 씁니다."),
                 "note": st.column_config.TextColumn("메모"),
             },
         )
@@ -8365,8 +8518,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
     for _, r in mst.iterrows():
         sc = str(r.get("spend_channel") or "").strip()
         sp = spend_map.get(sc, {})
-        bl = str(r.get("budget_line") or "").strip()
-        bud = bmap.get(bl, 0) * float(r.get("budget_share") or 0) if bl else 0
+        bud = _media_budget(r, bmap)
         g = ga_map.get(r["media"], {"conv": 0.0, "rev": 0.0})
         cost = float(sp.get("cost_incl_vat", 0) or 0)
         src = str(sp.get("source", "") or "")
@@ -8398,7 +8550,8 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         f'<div class="s">{ref} ~ {end} · {pace:.1f}%</div></div>'
         f'<div class="cp-kpi"><div class="k">남은 예산</div><div class="v">{_cp_won(tot_b - tot_c)}</div>'
         f'<div class="s">남은 {days_left}일 · 일 {_cp_won((tot_b - tot_c) / days_left) if days_left else "-"}</div></div>'
-        f'<div class="cp-kpi"><div class="k">집행 페이스</div><div class="v">{pace:.0f}%</div>'
+        f'<div class="cp-kpi"><div class="k">월 집행률 ({ref.month}/1~{end.month}/{end.day})</div>'
+        f'<div class="v">{pace:.1f}%</div>'
         f'<div class="br-pace"><i style="width:{min(pace,100):.0f}%"></i>'
         f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
         f'<div class="s">기간 경과 {elapsed:.0f}% 대비 '
@@ -8414,22 +8567,15 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             f'광고비 {_cp_won(r_spend)} / 실매출 {_cp_won(r_rev)}'
             '</div></div>', unsafe_allow_html=True)
 
-    # ── 조정 입력 ────────────────────────────────────────
-    st.markdown("#### 매체별 조정")
-    st.caption(
-        "조정률을 바꾸면 조정액이 즉시 다시 계산됩니다. 정액 계약 매체는 금액이 고정이라 제외됩니다. "
-        f"증액분과 감액분의 합이 0이 될 때까지 확정할 수 없습니다."
-    )
-
     def verdict(r):
         """조정 대상인지, 어느 방향인지 정한다.
 
-        먼저 '판단할 수 없는 경우'를 걸러내는 게 중요하다. 외부몰은 매출이 GA에 안 잡혀
+        '판단할 수 없는 경우'를 먼저 걸러내는 게 중요하다. 외부몰은 매출이 GA4에 안 잡혀
         ROAS가 0으로 보이는데, 그대로 읽으면 '감액'이라는 틀린 지시가 나간다.
         정액 계약 매체는 금액이 계약으로 묶여 있어 애초에 조정할 수 없다.
         """
         if r["구분"] == "외부몰":
-            return "판단 제외"          # 매출 미연동 — ROAS 0은 성과가 아니라 데이터 부재
+            return "판단 제외"
         if r["고정"]:
             return "계약 고정"
         if r["예산"] <= 0:
@@ -8445,38 +8591,87 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             return "감액"
         return "유지"
 
+    # ── 조정 입력 ────────────────────────────────────────
+    # 조정률(%)로 받으면 실무에서 쓰기 어렵다는 피드백이 있어, 예산 담당자가 실제로 쓰는 방식
+    # 그대로 '수정 예산 금액'을 직접 넣게 바꿨다. 증/감액은 기존 예산과의 차액으로 자동 표기한다.
+    st.markdown(f"#### {ref.month}월 예산 조정")
+    st.caption(
+        f"**8/1~{end.day}일 기준 전체 집행률 {pace:.1f}%** (기간 경과 {elapsed:.0f}%). "
+        "수정 예산에 금액을 직접 넣으면 증/감액이 자동으로 계산됩니다. "
+        "자사몰과 외부몰은 재원이 달라 따로 봅니다."
+    )
+
     edit = df[["매체", "구분", "집행", "예산", "집행률", "ROAS", "고정"]].copy()
     edit["판정"] = edit.apply(verdict, axis=1)
-    edit["조정률(%)"] = edit["판정"].map({"증액": 10.0, "감액": -10.0}).fillna(0.0)
-    # 조정 불가 판정은 조정률을 0으로 못 박는다
-    edit.loc[edit["판정"].isin(["계약 고정", "판단 제외", "예산 없음", "판단 보류"]),
-             "조정률(%)"] = 0.0
+    edit["수정 예산"] = edit["예산"]
 
-    # 입력칸은 최소로(매체 + 조정률), 보기 좋은 표는 아래에 따로 그린다.
-    # Streamlit 편집표는 셀에 색을 못 넣어서 '입력'과 '표시'를 분리하는 게 결과가 낫다.
-    locked = set(edit[edit["판정"].isin(["계약 고정", "판단 제외", "예산 없음"])]["매체"])
+    locked = set(edit[edit["판정"].isin(["계약 고정", "판단 제외"])]["매체"])
     shown = st.data_editor(
-        edit[["매체", "조정률(%)"]],
+        edit[["매체", "구분", "예산", "수정 예산"]],
         use_container_width=True, hide_index=True, key="br_editor",
-        disabled=["매체"],
+        disabled=["매체", "구분", "예산"],
         column_config={
             "매체": st.column_config.TextColumn("매체", width="medium"),
-            "조정률(%)": st.column_config.NumberColumn(
-                "조정률 (%)", format="%.0f%%", min_value=-50, max_value=50, step=5,
-                help="증액은 +, 감액은 −. 계약 고정·판단 제외 매체는 입력해도 0으로 처리됩니다."),
+            "구분": st.column_config.TextColumn("구분", width="small"),
+            "예산": st.column_config.NumberColumn(f"{ref.month}월 기존 예산", format="₩%d"),
+            "수정 예산": st.column_config.NumberColumn(
+                f"{ref.month}월 수정 예산", format="₩%d", min_value=0, step=10000,
+                help="여기에 바꿀 금액을 직접 넣으세요. 계약 고정·판단 제외 매체는 무시됩니다."),
         },
     )
 
-    adj = edit.merge(shown, on="매체", how="left", suffixes=("_기본", ""))
-    adj["조정률(%)"] = pd.to_numeric(adj["조정률(%)"], errors="coerce").fillna(0.0)
-    adj.loc[adj["매체"].isin(locked), "조정률(%)"] = 0.0
-    adj["조정액"] = (adj["예산"] * adj["조정률(%)"] / 100).round(0)
-    adj["조정 후"] = adj["예산"] + adj["조정액"]
-    balance = adj["조정액"].sum()
+    adj = edit.drop(columns=["수정 예산"]).merge(
+        shown[["매체", "수정 예산"]], on="매체", how="left")
+    adj["수정 예산"] = pd.to_numeric(adj["수정 예산"], errors="coerce").fillna(adj["예산"])
+    adj.loc[adj["매체"].isin(locked), "수정 예산"] = adj["예산"]
+    adj["조정액"] = (adj["수정 예산"] - adj["예산"]).round(0)
+
+    def fmt_move(v):
+        if v > 0:
+            return f'<span class="br-chip up">증액 (\u20a9{v:,.0f})</span>'
+        if v < 0:
+            return f'<span class="br-chip dn">감액 (\u20a9{-v:,.0f})</span>'
+        return '<span class="cp-mute">—</span>'
+
+    VTAG = {"증액": "up", "감액": "down", "유지": "keep",
+            "계약 고정": "hold", "판단 보류": "hold",
+            "판단 제외": "skip", "예산 없음": "skip"}
+
+    def scope_table(scope_name):
+        sub = adj[adj["구분"] == scope_name]
+        if sub.empty:
+            return "", 0.0
+        heads = ["매체", "판정", "현재 집행", "집행률",
+                 f"{ref.month}월 기존 예산", f"{ref.month}월 수정 예산", "증/감액 여부"]
+        th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
+        body = []
+        for _, r in sub.iterrows():
+            pct = ('<span class="cp-mute">—</span>'
+                   if r["집행률"] is None or pd.isna(r["집행률"]) else f'{r["집행률"]:.1f}%')
+            body.append(
+                f'<tr><td class="l m">{r["매체"]}</td>'
+                f'<td class="l"><span class="cp-tag {VTAG.get(r["판정"], "hold")}">{r["판정"]}</span></td>'
+                f'<td>{_cp_won(r["집행"])}</td><td>{pct}</td>'
+                f'<td>{_cp_won(r["예산"])}</td><td class="m">{_cp_won(r["수정 예산"])}</td>'
+                f'<td>{fmt_move(r["조정액"])}</td></tr>')
+        body.append(
+            f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
+            f'<td>{_cp_won(sub["집행"].sum())}</td><td></td>'
+            f'<td>{_cp_won(sub["예산"].sum())}</td><td>{_cp_won(sub["수정 예산"].sum())}</td>'
+            f'<td>{fmt_move(sub["조정액"].sum())}</td></tr>')
+        html = (f'<div class="cp-wrap"><div class="br-sec">{scope_name}</div>'
+                f'<table class="cp-tbl"><thead><tr>{th}</tr></thead>'
+                f'<tbody>{"".join(body)}</tbody></table></div>')
+        return html, float(sub["조정액"].sum())
+
+    html_own, bal_own = scope_table("자사몰")
+    html_ext, bal_ext = scope_table("외부몰")
+    balance = bal_own + bal_ext
     up_sum = adj[adj["조정액"] > 0]["조정액"].sum()
     dn_sum = -adj[adj["조정액"] < 0]["조정액"].sum()
     ok = abs(balance) < 1
 
+    st.markdown(CP_CSS + BR_CSS + html_own + html_ext, unsafe_allow_html=True)
     st.markdown(
         f'<div class="cp-wrap"><div class="br-bal {"ok" if ok else "bad"}">'
         f'<div><div class="l1">BALANCE</div><div class="l2">'
@@ -8484,40 +8679,6 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         f'{"총예산 변동 없음" if ok else f"차액 {balance:+,.0f}원"}</div></div>'
         f'<div class="l3">{"확정 가능" if ok else "합이 0이어야 확정됩니다"}</div>'
         '</div></div>', unsafe_allow_html=True)
-
-    # ── 재배분 결과 표 ───────────────────────────────────
-    VTAG = {"증액": "up", "감액": "down", "유지": "keep",
-            "계약 고정": "hold", "판단 보류": "hold",
-            "판단 제외": "skip", "예산 없음": "skip"}
-    heads = ["매체", "판정", "현재 집행", "월 예산", "집행률", "GA ROAS",
-             "조정률", "조정액", "조정 후 예산"]
-    th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
-    body = []
-    for _, r in adj.iterrows():
-        rate = r["조정률(%)"]
-        amt = r["조정액"]
-        rate_html = ('<span class="cp-mute">—</span>' if rate == 0
-                     else f'<span class="br-chip {"up" if rate > 0 else "dn"}">{rate:+.0f}%</span>')
-        amt_html = '<span class="cp-mute">—</span>' if amt == 0 else f'{amt:+,.0f}원'
-        roas = ('<span class="cp-mute">—</span>'
-                if r["ROAS"] is None or pd.isna(r["ROAS"]) else f'{r["ROAS"]:,.0f}%')
-        rate_pct = ('<span class="cp-mute">—</span>'
-                    if r["집행률"] is None or pd.isna(r["집행률"]) else f'{r["집행률"]:.1f}%')
-        body.append(
-            f'<tr><td class="l m">{r["매체"]}</td>'
-            f'<td class="l"><span class="cp-tag {VTAG.get(r["판정"], "hold")}">{r["판정"]}</span></td>'
-            f'<td>{_cp_won(r["집행"])}</td><td>{_cp_won(r["예산"])}</td>'
-            f'<td>{rate_pct}</td><td>{roas}</td>'
-            f'<td>{rate_html}</td><td>{amt_html}</td>'
-            f'<td class="m">{_cp_won(r["조정 후"])}</td></tr>')
-    body.append(
-        f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
-        f'<td>{_cp_won(adj["집행"].sum())}</td><td>{_cp_won(adj["예산"].sum())}</td>'
-        f'<td></td><td></td><td></td>'
-        f'<td>{balance:+,.0f}원</td><td>{_cp_won(adj["조정 후"].sum())}</td></tr>')
-    st.markdown(
-        f'<div class="cp-wrap"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
-        f'<tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
 
     note = st.text_input("결정 근거 (선택)", key="br_note",
                          placeholder="예: 구글 ROAS 213%로 목표 하단 근접, 검색광고로 이동")
@@ -8528,7 +8689,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         else:
             recs = [{
                 "decided_on": today, "channel": r["매체"],
-                "action": f'예산 {r["조정률(%)"]:+.0f}% ({r["조정액"]:+,.0f}원)',
+                "action": f'예산 {r["예산"]:,.0f} → {r["수정 예산"]:,.0f}원 ({r["조정액"]:+,.0f})',
                 "note": note or f'{ref.year}년 {ref.month}월 예산 재배분',
             } for _, r in moved.iterrows()]
             n = save_table("decision_log", pd.DataFrame(recs),
@@ -8565,6 +8726,7 @@ BR_CSS = """
 .br-chip{display:inline-block;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:800}
 .br-chip.up{background:#EAF7D9;color:#3F6B12;border:1px solid #B7DE7E}
 .br-chip.dn{background:#FDEDE3;color:#9A4B14;border:1px solid #E9C0A0}
+.br-sec{font-size:13px;font-weight:800;color:#14181F;margin:18px 0 7px;letter-spacing:-.01em}
 </style>
 """
 
@@ -9330,50 +9492,44 @@ def render_ga_channel_funnel_page(
                     reason += f" · 광고비가 {FUNNEL_MIN_SPEND:,}원 미만이라 판단 보류"
                 st.markdown(f"**{ch} → {label}**  \n{reason}")
 
-    # ── 하단: 채널 믹스 + Next Best Action ──
+    # ── 하단: 채널 믹스 ──
+    # 예전엔 비중(%)만 막대로 보여줬는데, 실제 판단할 땐 "그래서 얼마짜리인지"가 같이 필요하다.
+    # 금액을 줄여 쓰면(4.7억) 감이 안 잡혀서 원 단위 그대로 적는다.
     mix_rows = ""
     mix_total_amt = float(mix_ratio["budget"].sum()) if (mix_ratio is not None and not mix_ratio.empty) else 0.0
     if mix_ratio is not None and not mix_ratio.empty:
-        top_mix = mix_ratio.sort_values("budget_ratio", ascending=False).head(6)
+        top_mix = mix_ratio.sort_values("budget_ratio", ascending=False).head(8)
         top_share = float(top_mix["budget_ratio"].max()) or 1.0
         for _, m in top_mix.iterrows():
             w = m["budget_ratio"] / top_share * 100
             mix_rows += (
                 f'<div class="fv4-mix-row"><div class="fv4-mix-row-top">'
-                f'<span>{m["channel"]}</span><span>{m["budget_ratio"]:.1f}%</span></div>'
+                f'<span class="fv4-mix-ch">{m["channel"]}</span>'
+                f'<span class="fv4-mix-val">\u20a9{float(m["budget"]):,.0f}'
+                f'<b>{m["budget_ratio"]:.1f}%</b></span></div>'
                 f'<div class="fv4-mix-track"><i style="width:{w:.1f}%"></i></div></div>'
             )
-    nba_items = ""
-    for i, (kind, chip, ch, title, sub) in enumerate(signals[:3], start=1):
-        if kind == "bad":
-            act, det = f"{ch} 신규발굴 예산 10% 보류", "가입 전환율 회복 전까지 증액 중단"
-        elif kind == "good":
-            act, det = f"{ch} 예산 +10% 테스트", f"ROAS {OPS_KPI_ROAS_HIGH:.0f}% 이상 유지 여부를 48시간 관찰"
-        elif kind == "warn":
-            act, det = f"{ch} 집행 속도 조정", "월말 잔여 예산 기준으로 일예산 재설정"
-        else:
-            act, det = "현행 유지", "다음 리포트까지 현재 배분 유지"
-        nba_items += (
-            f'<div class="fv4-nba-item"><div class="fv4-nba-no">{i:02d}</div>'
-            f'<div><div class="fv4-nba-h">{act}</div><div class="fv4-nba-s">{det}</div></div></div>'
-        )
     mix_year = int(pd.to_numeric(channel_mix["year"], errors="coerce").max()) \
         if (channel_mix is not None and not channel_mix.empty) else start.year
     mix_list_html = mix_rows or '<div class="fv4-card-sub">채널 믹스 파일을 올리면 표시됩니다.</div>'
 
     st.markdown(
-        '<div class="fv4-wrap"><div class="fv4-bottom">'
-        '<div class="fv4-mixpanel"><div class="fv4-mix-total">'
+        '<div class="fv4-wrap"><div class="fv4-mixpanel-wide">'
         f'<div class="fv4-eyebrow">{mix_year} CHANNEL MIX</div>'
-        f'<div class="fv4-mix-amt">{_v4_money_short(mix_total_amt)}</div>'
-        '<div class="fv4-kpi-sub">연간 매체 예산</div></div>'
+        f'<div class="fv4-mix-amt-big">\u20a9{mix_total_amt:,.0f}</div>'
+        '<div class="fv4-kpi-sub">연간 매체 예산</div>'
         f'<div class="fv4-mix-list">{mix_list_html}</div>'
-        "</div>"
-        '<div class="fv4-nba"><div class="fv4-nba-eyebrow">NEXT BEST ACTION</div>'
-        '<div class="fv4-nba-title">오늘의 예산 판단</div>'
-        f"{nba_items}</div>"
-        "</div>"
-        '<div class="fv4-foot"><span>STCO PERFORMANCE · 내부 의사결정용</span>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── NEXT BEST ACTION (목적축별 · 매체 전부) ──
+    st.markdown(CP_CSS + _v4_actions_html(media, spend_map, is_new, start, end),
+                unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="fv4-wrap"><div class="fv4-foot">'
+        '<span>STCO PERFORMANCE · 내부 의사결정용</span>'
         f"<span>{start:%Y-%m-%d} ~ {end:%Y-%m-%d}</span></div></div>",
         unsafe_allow_html=True,
     )
