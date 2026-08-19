@@ -5995,6 +5995,8 @@ FUNNEL_V4_CSS = """
 .fv4-kpi-label { color:#8a8a7c; font-size:12px; margin-bottom:9px; }
 .fv4-kpi-value { color:#17170f; font-size:26px; font-weight:800; letter-spacing:-.02em; display:flex; align-items:baseline; gap:8px; }
 .fv4-kpi-value.money { font-size:21px; letter-spacing:-.03em; flex-wrap:wrap; gap:6px; }
+.fv4-chg-note { margin-top:10px; padding-top:9px; border-top:1px dashed #DEDCCF;
+                color:#8a8a7c; font-size:12.5px; line-height:1.6; }
 .fv4-kpi-delta { font-size:12px; font-weight:700; }
 .fv4-up   { color:#c0392b; }
 .fv4-down { color:#2563c9; }
@@ -6462,7 +6464,7 @@ def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7) -> list:
     cur = d[d["report_date"] == today_d].set_index("channel")
     prv = d[d["report_date"] == prev_d].set_index("channel")
 
-    logs = []
+    logs = [("_meta", (today_d, prev_d))]   # 첫 항목은 비교한 날짜 (그리는 쪽에서 꺼내 씀)
     for ch in cur.index:
         if ch not in prv.index:
             continue
@@ -6478,17 +6480,22 @@ def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7) -> list:
             pct = (u_now - u_prev) / u_prev * 100
             if abs(pct) >= CHANGE_ALERT_PCT:
                 kind = "down" if pct < 0 else "up"
-                logs.append((kind, f"{ch} 유입 {u_now:,.0f}명 ({pct:+.0f}%){streak_txt}"))
+                logs.append((kind, f"{ch} 유입 {u_now:,.0f} "
+                                   f"(전일 {u_prev:,.0f} · {pct:+.0f}%){streak_txt}"))
 
         r_now, r_prev = float(cur.loc[ch, "revenue"]), float(prv.loc[ch, "revenue"])
         if r_prev > 0:
             rp = (r_now - r_prev) / r_prev * 100
             if abs(rp) >= CHANGE_ALERT_PCT:
-                logs.append(("down" if rp < 0 else "up", f"{ch} 매출 {_v4_money_short(r_now)} ({rp:+.0f}%)"))
+                # 0원은 '실제로 안 팔림'과 'GA4가 아직 집계 중'이 구분이 안 된다.
+                # 전일 금액을 같이 적어야 형이 판단할 수 있다.
+                logs.append(("down" if rp < 0 else "up",
+                             f"{ch} 매출 {r_now:,.0f}원 (전일 {r_prev:,.0f}원 · {rp:+.0f}%)"))
 
+    meta, body = logs[0], logs[1:]
     order = {"down": 0, "up": 1}
-    logs.sort(key=lambda x: order.get(x[0], 9))
-    return logs[:6]
+    body.sort(key=lambda x: order.get(x[0], 9))
+    return [meta] + body[:6]
 
 
 def _loop_signal_streak(daily: pd.DataFrame, channel: str, end: date, lookback: int = 7) -> str:
@@ -9566,13 +9573,25 @@ def render_ga_channel_funnel_page(
     # ── 어제 대비 달라진 것 ── 스냅샷이 아니라 '변화'를 먼저 보여준다.
     daily_ch = _loop_daily_by_channel(gci)
     change_logs = _loop_change_log(daily_ch, end)
-    if change_logs:
+    if change_logs and len(change_logs) > 1:
+        (_, (_cmp_new, _cmp_old)), *_body = change_logs
         items = "".join(
             f'<div class="fv4-chg-item"><span class="fv4-chg-dot {k}"></span>{t}</div>'
-            for k, t in change_logs
+            for k, t in _body
         )
+        # '어제 대비'라고만 적으면 실제로 언제와 언제를 비교했는지 알 수 없다. GA4 동기화가
+        # 하루 밀려 있으면 어제가 아니라 그제와 그그제를 비교하고 있을 수도 있어서 날짜를 박아둔다.
+        _hdr = f"{_cmp_new:%-m/%d}(vs {_cmp_old:%-m/%d}) 달라진 것"
+        _warn = ""
+        if _cmp_new >= date.today() - timedelta(days=1):
+            # GA4는 구매·매출을 최대 이틀까지 늦게 채운다. 그래서 가장 최근 날짜의 매출이
+            # 0으로 보이는 건 '안 팔린 것'이 아니라 '아직 안 들어온 것'일 때가 많다.
+            _warn = ('<div class="fv4-chg-note">매출은 GA4 집계가 최대 이틀 늦습니다 — '
+                     f'{_cmp_new:%-m/%d} 매출 0원은 아직 안 들어온 것일 수 있습니다. '
+                     '확정 판단은 하루 뒤에 하세요.</div>')
         st.markdown(
-            f'<div class="fv4-wrap"><div class="fv4-chg"><div class="fv4-chg-h">어제 대비 달라진 것</div>{items}</div></div>',
+            f'<div class="fv4-wrap"><div class="fv4-chg"><div class="fv4-chg-h">{_hdr}</div>'
+            f'{items}{_warn}</div></div>',
             unsafe_allow_html=True,
         )
 
