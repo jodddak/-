@@ -5775,7 +5775,7 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     g = ga_daily.copy()
     g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
     for c in ["users", "sessions", "conversions", "revenue", "signups"]:
-        g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0)
+        g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0).astype(float)
     # 목적축(신규 발굴 / 매출 확보)마다 봐야 할 숫자가 다르다. 사용자만 쪼개고 구매·매출을
     # 합쳐버리면 두 탭이 똑같은 표가 되어버리므로, 구매·매출·가입도 유형별로 나눠 들고 간다.
     is_new = g["user_type"] == "신규"
@@ -6035,19 +6035,20 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
             "new_signups", "new_conv", "new_rev", "ret_conv", "ret_rev")
     for c in need:
         if c not in g.columns:
-            g[c] = 0
-        g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0)
-    # 엑셀로 올린 옛 데이터에는 유형별 구매·매출이 없다. 그럴 땐 사용자 비율로 나눠
-    # 근사치를 쓰되, 화면 각주에 '추정'이라고 밝힌다.
-    miss = (g[["new_conv", "ret_conv", "new_rev", "ret_rev"]].sum(axis=1) == 0) & \
-           (g["conversions"] + g["revenue"] > 0)
-    if miss.any():
-        share = np.where(g["users"] > 0, g["new_users"] / g["users"].replace(0, np.nan), 0)
-        share = pd.Series(share, index=g.index).fillna(0)
-        g.loc[miss, "new_conv"] = g.loc[miss, "conversions"] * share[miss]
-        g.loc[miss, "ret_conv"] = g.loc[miss, "conversions"] * (1 - share[miss])
-        g.loc[miss, "new_rev"] = g.loc[miss, "revenue"] * share[miss]
-        g.loc[miss, "ret_rev"] = g.loc[miss, "revenue"] * (1 - share[miss])
+            g[c] = 0.0
+        g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0).astype(float)
+
+    # 엑셀로 올린 옛 데이터에는 유형별 구매·매출이 없다(전체 값만 있음).
+    # 그럴 때만 사용자 비율로 나눠 근사치를 쓴다. GA4 API로 받은 데이터는 실제 값이라 손대지 않는다.
+    # 컬럼 일부만 .loc으로 덮으면 pandas가 dtype 충돌로 막으므로, 컬럼 전체를 한 번에 바꾼다.
+    split_sum = g[["new_conv", "ret_conv", "new_rev", "ret_rev"]].sum(axis=1)
+    miss = (split_sum == 0) & ((g["conversions"] + g["revenue"]) > 0)
+    if bool(miss.any()):
+        share = (g["new_users"] / g["users"]).replace([np.inf, -np.inf], np.nan).fillna(0)
+        g["new_conv"] = np.where(miss, g["conversions"] * share, g["new_conv"])
+        g["ret_conv"] = np.where(miss, g["conversions"] * (1 - share), g["ret_conv"])
+        g["new_rev"] = np.where(miss, g["revenue"] * share, g["new_rev"])
+        g["ret_rev"] = np.where(miss, g["revenue"] * (1 - share), g["ret_rev"])
     g["_bucket"] = g.apply(classify_ga_bucket, axis=1)
 
     def fold(df, key):
