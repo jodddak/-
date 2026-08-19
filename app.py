@@ -464,6 +464,17 @@ def inject_theme():
         h3 {{ font-size: 19px !important; font-weight: 600 !important; }}
         h4 {{ font-size: 17px !important; font-weight: 600 !important; }}
         p, span, label, div {{ color: {THEME_COLORS["body"]}; }}
+        .stco-daterange {{
+            display:inline-block; margin:2px 0 10px;
+            padding:6px 13px; border-radius:8px;
+            background:#F4F2ED; border:1px solid #E3E1DC;
+            font-size:15px; font-weight:700; letter-spacing:-.01em;
+            color:{THEME_COLORS["body"]};
+        }}
+        /* 날짜 입력칸(시작일/종료일)과 기간 셀렉트도 같이 키운다 */
+        [data-testid="stDateInput"] input {{ font-size:14.5px !important; font-weight:600 !important; }}
+        [data-testid="stDateInput"] label, [data-testid="stSelectbox"] label {{ font-size:12.5px !important; }}
+        [data-baseweb="calendar"] {{ font-size:14px !important; }}
         [data-testid="stCaptionContainer"], .stCaption, small {{
             color: {THEME_COLORS["body"]} !important;
             font-weight: 600 !important;
@@ -2923,7 +2934,12 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     else:
         start, end = _preset_to_range(preset, min_d, max_d)
 
-    st.caption(f"📆 {start:%Y-%m-%d} ~ {end:%Y-%m-%d}")
+    # 지금 어느 기간을 보고 있는지는 화면에서 가장 자주 확인하는 정보다.
+    # 기본 caption은 너무 작아서 전용 스타일로 크게 뽑는다.
+    st.markdown(
+        f'<div class="stco-daterange">📆 {start:%Y-%m-%d} ~ {end:%Y-%m-%d}</div>',
+        unsafe_allow_html=True,
+    )
     return start, end
 
 
@@ -8828,8 +8844,10 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
 
     # ── 표 ② 이번 달 매체별 집행 현황 ─────────────────────
     st.markdown(f"#### {ref.month}월 매체별 집행 현황")
-    st.caption(
-        f"{ref.month}/1~{end.month}/{end.day} 기준 · 전체 예산 소진율 {pace:.1f}% (기간 경과 {elapsed:.0f}%)"
+    st.markdown(
+        f'<div class="stco-daterange">📆 {ref.year}-{ref.month:02d}-01 ~ {end:%Y-%m-%d}'
+        f' · 예산 소진율 {pace:.1f}% · 기간 경과 {elapsed:.0f}%</div>',
+        unsafe_allow_html=True,
     )
     VTAG = {"증액": "up", "감액": "down", "유지": "keep",
             "계약 고정": "hold", "판단 보류": "hold",
