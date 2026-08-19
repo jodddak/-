@@ -699,7 +699,9 @@ def _local_store():
     return st.session_state["local_store"]
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+# 데이터는 하루 단위로 들어오는데 캐시 수명이 60초면, 조작할 때마다 사실상 매번 다시 읽는다.
+# 15분으로 늘리고, 즉시 갱신이 필요할 땐 화면의 '지금 동기화'가 캐시를 비우게 해둔다.
+@st.cache_data(ttl=900, show_spinner=False)
 def load_table(name: str) -> pd.DataFrame:
     client = get_supabase_client()
     if client is None:
@@ -10268,71 +10270,70 @@ def main():
     )
     render_upload_panel()
 
-    weekly = load_table("weekly_overview")
-    monthly = load_table("monthly_overview")
-    daily = load_table("daily_overview")
-    channels = load_table("channel_monthly")
-    snapshot = load_table("channel_snapshot")
-    ga = load_table("ga_source")
-    creatives = load_table("creative_performance")
-    audience = load_table("channel_audience_snapshot")
-    inflow_revenue = load_table("inflow_revenue_daily")
-    ga_channel_inflow = load_table("ga_channel_inflow")
-    agency_notes = load_table("agency_notes")
-    channels_weekly = load_table("channel_weekly")
-    budget = load_table("channel_budget")
-    channel_mix = load_table("channel_mix_budget")
-    ga_daily = load_table("ga_channel_daily")      # GA4 API 자동 수집분
-    utm_map = load_table("utm_channel_map")
-    decisions = load_table("decision_log")
-    ad_spend = load_table("ad_spend_daily")   # 매체 API 일별 실집행 광고비
+    # 어느 페이지를 보든 모든 테이블을 다 불러오면 화면 전환·정렬·날짜 변경 같은 사소한 조작마다
+    # 수십 번의 DB 왕복이 생긴다(Streamlit은 조작할 때마다 스크립트를 처음부터 다시 실행한다).
+    # 그래서 '지금 보는 페이지가 실제로 쓰는 테이블'만 그때그때 불러온다.
+    T = load_table
 
+    # 데이터가 아예 없을 때의 안내는 가벼운 두 테이블로만 판단한다.
+    weekly, monthly = T("weekly_overview"), T("monthly_overview")
     if weekly.empty and monthly.empty:
         st.info("아직 저장된 데이터가 없습니다. 왼쪽 사이드바에서 주간 리포트 파일을 업로드하고 '전체 저장하기'를 눌러주세요.")
         return
 
-    for df, col in [(weekly, "week_start"), (weekly, "week_end"), (monthly, "report_month"), (daily, "report_date")]:
-        if not df.empty and col in df.columns:
+    def to_date(df, col):
+        if df is not None and not df.empty and col in df.columns:
             df[col] = pd.to_datetime(df[col]).dt.date
+        return df
+
+    to_date(weekly, "week_start"); to_date(weekly, "week_end")
+    to_date(monthly, "report_month")
 
     page = render_nav()  # ← st.tabs() 대신 사이드바 그룹 네비게이션
 
     if page == "종합 대시보드":
-        render_overview_page(weekly, monthly, daily, channels, channels_weekly, ga_channel_inflow)
+        render_overview_page(weekly, monthly, to_date(T("daily_overview"), "report_date"),
+                             T("channel_monthly"), T("channel_weekly"), T("ga_channel_inflow"))
     elif page == "매체별 성과":
-        render_channel_page(channels, snapshot, ga_channel_inflow)
+        render_channel_page(T("channel_monthly"), T("channel_snapshot"), T("ga_channel_inflow"))
     elif page == "타겟팅별 성과":
-        render_targeting_performance_page(audience, creatives_fallback=creatives)
+        render_targeting_performance_page(T("channel_audience_snapshot"),
+                                          creatives_fallback=T("creative_performance"))
     elif page == "소재별 성과":
-        render_creative_performance(creatives)
+        render_creative_performance(T("creative_performance"))
     elif page == "예산 현황":
-        render_budget_page(monthly, budget)
+        render_budget_page(monthly, T("channel_budget"))
     elif page == "운영 코멘트":
         render_operation_comment_page(
-            weekly, monthly, daily, channels, snapshot, creatives, audience,
-            inflow_revenue, ga_channel_inflow, agency_notes,
+            weekly, monthly, to_date(T("daily_overview"), "report_date"),
+            T("channel_monthly"), T("channel_snapshot"), T("creative_performance"),
+            T("channel_audience_snapshot"), T("inflow_revenue_daily"),
+            T("ga_channel_inflow"), T("agency_notes"),
         )
     elif page == "채널 퍼널 리포트":
         render_ga_channel_funnel_page(
-            audience, ga_channel_inflow, inflow_revenue, channels_weekly, channel_mix,
-            ga_daily=ga_daily, utm_map=utm_map, decisions=decisions, ad_spend=ad_spend,
+            T("channel_audience_snapshot"), T("ga_channel_inflow"),
+            T("inflow_revenue_daily"), T("channel_weekly"), T("channel_mix_budget"),
+            ga_daily=T("ga_channel_daily"), utm_map=T("utm_channel_map"),
+            decisions=T("decision_log"), ad_spend=T("ad_spend_daily"),
         )
     elif page == "채널 성과":
         render_channel_performance_page(
-            ad_spend, ga_daily, channel_mix, master=load_table("media_master"),
-            budget=budget,
+            T("ad_spend_daily"), T("ga_channel_daily"), T("channel_mix_budget"),
+            master=T("media_master"), budget=T("channel_budget"),
         )
     elif page == "예산 재배분":
         render_budget_realloc_page(
-            ad_spend, ga_daily, channel_mix, budget=budget,
-            master=load_table("media_master"), decisions=decisions,
+            T("ad_spend_daily"), T("ga_channel_daily"), T("channel_mix_budget"),
+            budget=T("channel_budget"), master=T("media_master"),
+            decisions=T("decision_log"),
         )
     elif page == "GA 매체별 유입 경로":
-        render_ga_channel_inflow_page(ga_channel_inflow)
+        render_ga_channel_inflow_page(T("ga_channel_inflow"))
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
     elif page == "유입·매출 비교":
-        render_inflow_revenue_page(inflow_revenue, ga_channel_inflow)
+        render_inflow_revenue_page(T("inflow_revenue_daily"), T("ga_channel_inflow"))
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
