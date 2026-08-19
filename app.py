@@ -8255,28 +8255,37 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         })
     df = pd.DataFrame(recs)
 
-    # ── 상단 KPI ─────────────────────────────────────────
-    tot_cost = df["비용"].sum()
-    tot_budget = df["월예산"].sum()
-    # 월 예산 소진율은 '이번 달 예산 대비 지금까지 쓴 비율'이다. 기간이 얼마나 지났는지와 나란히 봐야
-    # 과속/저속을 판단할 수 있어서, 경과율을 같은 칸에 눈금으로 같이 그린다.
+    # ── 구분 필터 (KPI보다 위) ────────────────────────────
+    # 필터를 KPI 아래에 두면 '자사몰'을 골라도 위 숫자는 전체라서 예산·ROAS를 잘못 읽게 된다.
+    # 자사몰과 외부몰은 재원도 매출 집계 방식도 달라 반드시 같이 걸러야 한다.
+    scope_f = st.radio("구분", ["전체", "자사몰", "외부몰"], horizontal=True, key="cp_scope")
+    view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
+
+    # ── 상단 KPI (선택한 구분 기준) ────────────────────────
+    tot_cost = view["비용"].sum()
+    tot_budget = view["월예산"].sum()
+    tot_rev = view["GA매출"].sum()
+    tot_conv = view["GA구매"].sum()
     ref_m = start.replace(day=1)
     last_day = (ref_m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     elapsed = (min(end, last_day).day / last_day.day * 100) if last_day.day else 0
-    tot_rev = df["GA매출"].sum()
-    tot_conv = df["GA구매"].sum()
     roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0
     pace = (tot_cost / tot_budget * 100) if tot_budget > 0 else 0
     pace_word = "과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")
+    scope_note = "자사몰 + 외부몰" if scope_f == "전체" else scope_f
+    ext_note = ('<div class="cp-note" style="margin:-6px 0 12px">'
+                '· 외부몰 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 ROAS는 0으로 나옵니다.'
+                '</div>') if scope_f == "외부몰" else ""
     st.markdown(
         '<div class="cp-wrap">'
         '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
-        '<div class="cp-title">광고비 · ROAS</div>'
+        f'<div class="cp-title">채널별 성과 <span class="cp-scope">{scope_note}</span></div>'
+        + ext_note +
         '<div class="cp-kpis">'
         f'<div class="cp-kpi"><div class="k">실제 집행 광고비</div><div class="v">{_cp_won(tot_cost)}</div>'
         f'<div class="s">VAT 포함 · 공급가 {_cp_won(tot_cost / 1.1)}</div></div>'
         f'<div class="cp-kpi"><div class="k">월 예산</div><div class="v">{_cp_won(tot_budget)}</div>'
-        f'<div class="s">{ref_m.year}년 {ref_m.month}월 계획</div></div>'
+        f'<div class="s">{ref_m.year}년 {ref_m.month}월 · {scope_note}</div></div>'
         f'<div class="cp-kpi"><div class="k">예산 소진율</div>'
         f'<div class="v">{pace:.1f}%</div>'
         f'<div class="cp-pace"><i style="width:{min(pace,100):.0f}%"></i>'
@@ -8291,10 +8300,6 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         f'<div class="cp-kpi"><div class="k">GA 구매매출</div><div class="v">{_cp_won(tot_rev)}</div>'
         f'<div class="s">구매 {_cp_int(tot_conv)}건</div></div>'
         '</div></div>', unsafe_allow_html=True)
-
-    # ── 필터 (정렬은 표 헤더 클릭으로) ─────────────────────
-    scope_f = st.radio("구분", ["전체", "자사몰", "외부몰"], horizontal=True, key="cp_scope")
-    view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
 
     # ── 표 ───────────────────────────────────────────────
     heads = ["구분", "매체", "노출", "클릭", "총비용(VAT 포함)", "GA 구매", "GA 매출", "GA ROAS", "월 예산", "예산 소진율"]
