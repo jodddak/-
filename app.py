@@ -661,6 +661,7 @@ TABLES = {
     "ad_spend_daily": "ad_spend_daily",
     "media_master": "media_master",
     "ad_contract": "ad_contract",
+    "ga_creative_daily": "ga_creative_daily",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -5490,6 +5491,10 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
 # 세션수를 둘 다 받아 저장해두고, 화면에는 기존 표들과 단위를 맞추기 위해 사용자수를 쓰되
 # 필요하면 세션 기준으로 언제든 바꿔볼 수 있게 한다.
 GA4_DIMENSIONS = ["date", "sessionSourceMedium", "newVsReturning"]
+# 소재별 성과용. utm_campaign(캠페인) / utm_content(소재)까지 쪼갠다. 차원이 늘수록 행이
+# 곱으로 불어나므로(날짜×소스×캠페인×소재×신규재방문) 채널용과 테이블을 나눠 저장한다.
+GA4_CREATIVE_DIMENSIONS = ["date", "sessionSourceMedium", "sessionCampaignName",
+                           "sessionManualAdContent", "newVsReturning"]
 GA4_METRICS = ["totalUsers", "sessions", "transactions", "purchaseRevenue"]
 GA4_LOOKBACK_DAYS = 30      # 최초 연동 시 끌어올 기간
 GA4_RESYNC_TAIL_DAYS = 3    # GA는 하루이틀 뒤 값이 보정되므로 최근 며칠은 매번 다시 받아 덮어쓴다
@@ -5623,6 +5628,126 @@ def fetch_ga4_channel_daily(start: date, end: date, channel_map: dict = None) ->
     else:
         out["channel"] = None
     return out.reset_index(drop=True)
+
+
+def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -> pd.DataFrame:
+    """GA4에서 [날짜 × 소스/매체 × 캠페인 × 소재 × 신규·재방문] 단위로 받아온다.
+
+    소재(utm_content)는 광고 랜딩 URL에 utm_content가 박혀 있어야만 채워진다. 안 박혀 있으면
+    GA4가 '(not set)'을 주는데, 그걸 그대로 두면 소재별 표가 (not set) 한 줄로 뭉개진다.
+    그래서 '(미설정)'으로 바꿔 표시하고, 화면에서 비율을 같이 보여줘 UTM을 고칠 근거로 쓴다.
+    """
+    client, err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return pd.DataFrame()
+
+    from google.analytics.data_v1beta.types import (
+        DateRange, Dimension, Metric, RunReportRequest,
+    )
+
+    def _run(metrics, dim_filter=None, out_key=None):
+        rows, offset, page = [], 0, 100_000
+        while True:
+            kw = dict(
+                property=f"properties/{prop}",
+                date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+                dimensions=[Dimension(name=d) for d in GA4_CREATIVE_DIMENSIONS],
+                metrics=[Metric(name=m) for m in metrics],
+                limit=page, offset=offset,
+            )
+            if dim_filter is not None:
+                kw["dimension_filter"] = dim_filter
+            resp = client.run_report(RunReportRequest(**kw))
+            for r in resp.rows:
+                dv = [d.value for d in r.dimension_values]
+                mv = [m.value for m in r.metric_values]
+                rec = {"report_date": dv[0], "source_medium": dv[1],
+                       "campaign": dv[2], "creative": dv[3], "user_type": dv[4]}
+                if out_key:
+                    rec[out_key] = mv[0]
+                else:
+                    rec.update({"sessions": mv[0], "conversions": mv[1], "revenue": mv[2]})
+                rows.append(rec)
+            offset += page
+            if offset >= getattr(resp, "row_count", 0) or not resp.rows:
+                break
+        return rows
+
+    base = _run(["sessions", "transactions", "purchaseRevenue"])
+    if not base:
+        return pd.DataFrame()
+
+    signup_rows = []
+    try:
+        from google.analytics.data_v1beta.types import Filter, FilterExpression
+        ev = str(_secrets_get("GA4_SIGNUP_EVENT", "sign_up")).strip()
+        signup_rows = _run(
+            ["eventCount"],
+            dim_filter=FilterExpression(
+                filter=Filter(field_name="eventName",
+                              string_filter=Filter.StringFilter(value=ev))),
+            out_key="signups",
+        )
+    except Exception:
+        signup_rows = []
+
+    out = pd.DataFrame(base)
+    keys = ["report_date", "source_medium", "campaign", "creative", "user_type"]
+    if signup_rows:
+        out = out.merge(pd.DataFrame(signup_rows), on=keys, how="left")
+    if "signups" not in out.columns:
+        out["signups"] = 0
+
+    out["report_date"] = pd.to_datetime(out["report_date"], format="%Y%m%d", errors="coerce")
+    out = out.dropna(subset=["report_date"])
+    out["report_date"] = out["report_date"].dt.date
+    for c in ["sessions", "conversions", "revenue", "signups"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    out["user_type"] = out["user_type"].map(
+        lambda v: "신규" if str(v).lower().startswith("new")
+        else ("재방문" if str(v).lower().startswith("return") else "미상")
+    )
+    for c in ("campaign", "creative"):
+        out[c] = out[c].map(
+            lambda v: "(미설정)" if str(v).strip().lower() in
+            ("(not set)", "(not provided)", "", "nan", "none") else str(v).strip()
+        )
+    if channel_map:
+        out["channel"] = out["source_medium"].map(
+            lambda sm: channel_map.get(str(sm).strip().lower()))
+    else:
+        out["channel"] = None
+    return out.reset_index(drop=True)
+
+
+def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_full: bool = False):
+    """소재별 GA 데이터 동기화. 채널용과 같은 규칙(어제까지, 최근 며칠 재수집)으로 돈다."""
+    client, err = get_ga4_client()
+    if client is None:
+        return 0, None, None, err
+    end = date.today() - timedelta(days=1)
+    if force_full or existing is None or existing.empty or "report_date" not in existing.columns:
+        start = end - timedelta(days=GA4_LOOKBACK_DAYS - 1)
+    else:
+        last = pd.to_datetime(existing["report_date"]).max().date()
+        start = min(last - timedelta(days=GA4_RESYNC_TAIL_DAYS - 1), end)
+    if start > end:
+        return 0, None, None, None
+    try:
+        df = fetch_ga4_creative_daily(start, end, channel_map)
+    except Exception as e:
+        return 0, None, None, f"GA4 조회 실패: {e}"
+    if df.empty:
+        return 0, start, end, "GA4에서 받아온 소재 데이터가 0행입니다"
+    n = save_table("ga_creative_daily", df,
+                   "report_date,source_medium,campaign,creative,user_type", "GA4 API")
+    if not n:
+        return 0, start, end, (
+            "GA4에서 데이터는 받았지만 저장에 실패했습니다 — "
+            "ga_creative_daily 테이블이 없을 수 있습니다(배포 SQL 실행 필요)"
+        )
+    return n, start, end, None
 
 
 def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full: bool = False):
@@ -6021,7 +6146,8 @@ FUNNEL_V4_CSS = """
 .fv4-funnel { display:flex; align-items:stretch; background:#f0efe6; border-radius:10px; padding:6px; }
 .fv4-stage { flex:1 1 0; text-align:center; padding:18px 6px; border-radius:8px; }
 .fv4-stage.hot { background:#fdeaea; box-shadow:inset 0 0 0 1px #f3cccc; }
-.fv4-stage-v { color:#17170f; font-size:22px; font-weight:800; letter-spacing:-.02em; }
+.fv4-stage-v { color:#17170f; font-size:19px; font-weight:800; letter-spacing:-.03em;
+               white-space:nowrap; }
 .fv4-stage-l { color:#8a8a7c; font-size:13.5px; margin-top:6px; }
 .fv4-conv { flex:0 0 62px; display:flex; align-items:center; justify-content:center; color:#a3a396; font-size:13.5px; font-weight:600; }
 .fv4-conv.low { color:#c0392b; }
@@ -6391,7 +6517,7 @@ def _v4_funnel_html(stages: list, benchmarks: dict) -> str:
         mark = " ⚠" if hot else ""
         parts.append(
             f'<div class="fv4-stage{" hot" if hot else ""}">'
-            f'<div class="fv4-stage-v">{_v4_compact(value)}</div>'
+            f'<div class="fv4-stage-v">{_v4_num(value)}</div>'
             f'<div class="fv4-stage-l">{label}{mark}</div></div>'
         )
     return '<div class="fv4-funnel">' + "".join(parts) + "</div>"
