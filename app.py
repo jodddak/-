@@ -5946,83 +5946,88 @@ FUNNEL_V4_CSS = """
   width:34px; height:34px; border-radius:50%; background:#c8f231; color:#17170f;
   font-weight:800; font-size:16px; display:flex; align-items:center; justify-content:center; flex:none;
 }
-.fv4-banner-eyebrow { color:#8f8f80; font-size:12px; letter-spacing:.04em; margin-bottom:6px; }
+.fv4-banner-eyebrow { color:#8f8f80; font-size:13.5px; letter-spacing:.04em; margin-bottom:6px; }
 .fv4-banner-title { color:#fdfdf7; font-size:21px; font-weight:800; line-height:1.42; }
 .fv4-signals { display:flex; gap:30px; flex:2 1 520px; flex-wrap:wrap; }
 .fv4-signal { min-width:180px; flex:1 1 180px; }
-.fv4-bk-cap{font-size:13px;color:#6E747C;margin:16px 0 9px;line-height:1.75}
+.fv4-bk-cap{font-size:14px;color:#6E747C;margin:16px 0 9px;line-height:1.75}
 .fv4-bk{margin-bottom:4px}
-.fv4-bk-row td{background:#FBFAF7;font-size:12.5px;font-weight:600}
+.fv4-bk-row td{background:#FBFAF7;font-size:14px;font-weight:600}
 .fv4-bk-row td.l{text-align:left}
-.fv4-bk-sub{font-size:11.5px;color:#7A8088;font-weight:400;margin-left:8px}
+.fv4-bk-sub{font-size:13.5px;color:#7A8088;font-weight:400;margin-left:8px}
 .fv4-bk-share{display:inline-block;padding:2px 7px;border-radius:5px;
-  background:#EAF7D9;color:#3F6B12;font-size:11px;font-weight:700}
-.fv4-bk-split{font-size:11px;font-weight:700;color:#6E747C;margin:18px 0 6px;letter-spacing:.02em}
-.fv4-bk-split-row td{background:#FFF !important;color:#6E747C;font-size:12px;font-weight:700;
+  background:#EAF7D9;color:#3F6B12;font-size:13px;font-weight:700}
+.fv4-bk-split{font-size:13px;font-weight:700;color:#6E747C;margin:18px 0 6px;letter-spacing:.02em}
+.fv4-bk-split-row td{background:#FFF !important;color:#6E747C;font-size:13.5px;font-weight:700;
   letter-spacing:.06em;padding-top:16px !important;border-bottom:1px solid #E3E1DC}
 .fv4-sum-row td{background:#14181F !important;color:#F3F1EC !important;font-weight:800;
   border-bottom:none}
 .fv4-sum-row td.l{color:#D9F27E !important;letter-spacing:.06em}
 .fv4-sum-row .fv4-bk-share{background:rgba(217,242,126,.18);color:#D9F27E}
-.fv4-sec{font-size:12px;font-weight:800;color:#14181F;margin:22px 0 6px;letter-spacing:-.01em}
-.fv4-ar{margin-left:5px;color:#C2C6CC;font-size:10px;font-weight:400}
+.fv4-sec{font-size:13.5px;font-weight:800;color:#14181F;margin:22px 0 6px;letter-spacing:-.01em}
+.fv4-ar{margin-left:5px;color:#C2C6CC;font-size:13px;font-weight:400}
 .fv4-tbl th:hover{background:#EDEAE3}
 .fv4-ind{padding-left:14px;display:inline-block}
 .fv4-na{color:#C2C6CC}
 .fv4-mixpanel-wide{background:#FFF;border:1px solid #E3E1DC;border-radius:14px;padding:22px 26px;margin-top:16px}
 .fv4-mix-amt-big{font-size:34px;font-weight:800;letter-spacing:-.03em;color:#14181F;margin:4px 0 2px}
-.fv4-mix-ch{font-size:13px;font-weight:700;color:#14181F}
-.fv4-mix-val{font-size:12px;color:#6E747C;font-weight:600}
+.fv4-mix-ch{font-size:14px;font-weight:700;color:#14181F}
+.fv4-mix-val{font-size:13.5px;color:#6E747C;font-weight:600}
 .fv4-mix-val b{margin-left:10px;color:#14181F;font-weight:800}
 .fv4-mixpanel-wide .fv4-mix-row{margin-top:12px}
 .fv4-mixpanel-wide .fv4-mix-track{height:7px;background:#EFEDE8;border-radius:4px;margin-top:5px;overflow:hidden}
 .fv4-mixpanel-wide .fv4-mix-track i{display:block;height:100%;background:#8B7BE8;border-radius:4px}
 .fv4-mixpanel-wide .fv4-mix-list{margin-top:16px}
-.cp-rec-det{color:#3F5210;font-size:13.5px}
+.cp-rec-det{color:#3F5210;font-size:14.5px}
 .fv4-chip {
-  display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
+  display:inline-block; font-size:13px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
 }
 .fv4-chip.bad  { background:#fadadd; color:#a3172b; }
 .fv4-chip.good { background:#d9f5cf; color:#1f6b2c; }
 .fv4-chip.warn { background:#f7edc4; color:#7a5c14; }
 .fv4-chip.hold { background:#ececdf; color:#6d6d5d; }
 .fv4-signal-title { color:#fdfdf7; font-size:14px; font-weight:700; margin-bottom:5px; }
-.fv4-signal-sub { color:#96968a; font-size:12px; line-height:1.5; }
+.fv4-signal-sub { color:#96968a; font-size:13.5px; line-height:1.5; }
 
 .fv4-kpis { display:flex; border:1px solid #e6e4da; border-radius:12px; overflow:hidden; background:#fffef9; margin-bottom:26px; flex-wrap:wrap; }
 .fv4-kpi { flex:1 1 170px; padding:17px 20px; border-right:1px solid #eceadf; }
 .fv4-kpi:last-child { border-right:none; }
-.fv4-kpi-label { color:#8a8a7c; font-size:12px; margin-bottom:9px; }
+.fv4-kpi-label { color:#8a8a7c; font-size:13.5px; margin-bottom:9px; }
 .fv4-kpi-value { color:#17170f; font-size:26px; font-weight:800; letter-spacing:-.02em; display:flex; align-items:baseline; gap:8px; }
 .fv4-kpi-value.money { font-size:21px; letter-spacing:-.03em; flex-wrap:wrap; gap:6px; }
 .fv4-chg-note { margin-top:10px; padding-top:9px; border-top:1px dashed #DEDCCF;
-                color:#8a8a7c; font-size:12.5px; line-height:1.6; }
-.fv4-kpi-delta { font-size:12px; font-weight:700; }
+                color:#8a8a7c; font-size:14px; line-height:1.6; }
+.fv4-chg-p   { color:#8a8a7c; font-weight:500; }
+.fv4-chg-tag { display:inline-block; margin-left:6px; padding:2px 9px; border-radius:999px;
+               background:#EFEEE6; color:#7A7A6E; font-size:13px; font-weight:700; }
+.fv4-chg-tag.warn { background:#FBE9E7; color:#B03A2E; }
+.fv4-chg-dot.flat { background:#C9C7BA; }
+.fv4-kpi-delta { font-size:13.5px; font-weight:700; }
 .fv4-up   { color:#c0392b; }
 .fv4-down { color:#2563c9; }
-.fv4-kpi-sub { color:#7A7A6E; font-size:12.5px; margin-top:7px; }
+.fv4-kpi-sub { color:#7A7A6E; font-size:14px; margin-top:7px; }
 .fv4-stack { display:flex; height:9px; border-radius:5px; overflow:hidden; margin:12px 0 8px; background:#eceadf; }
 .fv4-stack i { display:block; height:100%; }
 
-.fv4-eyebrow { color:#85857a; font-size:12px; font-weight:700; letter-spacing:.14em; margin-bottom:6px; }
+.fv4-eyebrow { color:#85857a; font-size:13.5px; font-weight:700; letter-spacing:.14em; margin-bottom:6px; }
 .fv4-h2 { color:#17170f; font-size:23px; font-weight:800; margin:0 0 4px 0; }
 
 .fv4-card { border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:22px 24px; margin-bottom:16px; }
-.fv4-badge-dark { display:inline-block; background:#17170f; color:#fdfdf7; font-size:10px; font-weight:700;
+.fv4-badge-dark { display:inline-block; background:#17170f; color:#fdfdf7; font-size:13px; font-weight:700;
   letter-spacing:.1em; padding:4px 9px; border-radius:4px; margin-bottom:11px; }
 .fv4-card-title { color:#17170f; font-size:18px; font-weight:800; margin-bottom:4px; }
-.fv4-card-sub { color:#8a8a7c; font-size:12.5px; margin-bottom:18px; }
+.fv4-card-sub { color:#8a8a7c; font-size:14px; margin-bottom:18px; }
 
 .fv4-funnel { display:flex; align-items:stretch; background:#f0efe6; border-radius:10px; padding:6px; }
 .fv4-stage { flex:1 1 0; text-align:center; padding:18px 6px; border-radius:8px; }
 .fv4-stage.hot { background:#fdeaea; box-shadow:inset 0 0 0 1px #f3cccc; }
 .fv4-stage-v { color:#17170f; font-size:22px; font-weight:800; letter-spacing:-.02em; }
-.fv4-stage-l { color:#8a8a7c; font-size:12px; margin-top:6px; }
-.fv4-conv { flex:0 0 62px; display:flex; align-items:center; justify-content:center; color:#a3a396; font-size:11.5px; font-weight:600; }
+.fv4-stage-l { color:#8a8a7c; font-size:13.5px; margin-top:6px; }
+.fv4-conv { flex:0 0 62px; display:flex; align-items:center; justify-content:center; color:#a3a396; font-size:13.5px; font-weight:600; }
 .fv4-conv.low { color:#c0392b; }
 
-.fv4-tbl { width:100%; border-collapse:collapse; font-size:13px; margin-top:18px; }
-.fv4-tbl th { color:#8a8a7c; font-weight:600; font-size:12px; text-align:right; padding:10px 12px;
+.fv4-tbl { width:100%; border-collapse:collapse; font-size:14px; margin-top:18px; }
+.fv4-tbl th { color:#8a8a7c; font-weight:600; font-size:13.5px; text-align:right; padding:10px 12px;
   border-bottom:1px solid #e6e4da; background:#f7f6ef; white-space:nowrap; }
 .fv4-tbl th:first-child, .fv4-tbl th:nth-child(2) { text-align:left; }
 .fv4-tbl td { color:#26261c; text-align:right; padding:13px 12px; border-bottom:1px solid #efeee4; white-space:nowrap; }
@@ -6033,7 +6038,7 @@ FUNNEL_V4_CSS = """
 .fv4-mix-bar b { position:absolute; left:0; top:0; height:100%; display:block; border-radius:3px; }
 .fv4-mix-plan { background:#17170f; }
 .fv4-mix-act  { background:#c8f231; }
-.fv4-mix-lbl { color:#9a9a8c; font-size:10.5px; margin-top:5px; }
+.fv4-mix-lbl { color:#9a9a8c; font-size:13px; margin-top:5px; }
 
 .fv4-bottom { display:flex; gap:16px; flex-wrap:wrap; }
 .fv4-mixpanel { flex:2 1 420px; border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:24px; display:flex; gap:30px; flex-wrap:wrap; }
@@ -6041,32 +6046,32 @@ FUNNEL_V4_CSS = """
 .fv4-mix-amt { color:#17170f; font-size:31px; font-weight:800; letter-spacing:-.03em; margin:8px 0 6px; }
 .fv4-mix-list { flex:1 1 240px; }
 .fv4-mix-row { margin-bottom:11px; }
-.fv4-mix-row-top { display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; }
+.fv4-mix-row-top { display:flex; justify-content:space-between; font-size:13.5px; margin-bottom:5px; }
 .fv4-mix-row-top span:first-child { color:#26261c; font-weight:600; }
 .fv4-mix-row-top span:last-child { color:#26261c; font-weight:700; }
 .fv4-mix-track { height:7px; border-radius:4px; background:#eceadf; overflow:hidden; }
 .fv4-mix-track i { display:block; height:100%; background:#6b5ce7; border-radius:4px; }
 
 .fv4-nba { flex:1 1 300px; background:#ccf344; border-radius:12px; padding:24px; }
-.fv4-nba-eyebrow { color:#5a6b1c; font-size:11px; font-weight:700; letter-spacing:.12em; margin-bottom:6px; }
+.fv4-nba-eyebrow { color:#5a6b1c; font-size:13px; font-weight:700; letter-spacing:.12em; margin-bottom:6px; }
 .fv4-nba-title { color:#17170f; font-size:19px; font-weight:800; margin-bottom:16px; }
 .fv4-nba-item { border-top:1px solid rgba(23,23,15,.16); padding:13px 0; display:flex; gap:12px; }
-.fv4-nba-no { color:#5a6b1c; font-size:12px; font-weight:800; flex:none; padding-top:1px; }
+.fv4-nba-no { color:#5a6b1c; font-size:13.5px; font-weight:800; flex:none; padding-top:1px; }
 .fv4-nba-h { color:#17170f; font-size:14px; font-weight:700; margin-bottom:3px; }
-.fv4-nba-s { color:#4b5a1a; font-size:12px; line-height:1.5; }
+.fv4-nba-s { color:#4b5a1a; font-size:13.5px; line-height:1.5; }
 .fv4-chg { border:1px solid #e6e4da; border-left:3px solid #17170f; border-radius:10px; background:#fffef9;
   padding:15px 18px; margin-bottom:14px; }
-.fv4-chg-h { color:#8a8a7c; font-size:11px; font-weight:700; letter-spacing:.1em; margin-bottom:10px; }
-.fv4-chg-item { color:#26261c; font-size:13.5px; padding:4px 0; display:flex; align-items:center; gap:9px; }
+.fv4-chg-h { color:#8a8a7c; font-size:13px; font-weight:700; letter-spacing:.1em; margin-bottom:10px; }
+.fv4-chg-item { color:#26261c; font-size:14.5px; padding:4px 0; display:flex; align-items:center; gap:9px; }
 .fv4-chg-dot { width:6px; height:6px; border-radius:50%; flex:none; }
 .fv4-chg-dot.down { background:#c0392b; }
 .fv4-chg-dot.up { background:#2f8f46; }
 .fv4-rev { border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:20px 24px; margin-top:16px; }
 .fv4-rev-item { border-top:1px solid #efeee4; padding:12px 0; }
 .fv4-rev-item:first-of-type { border-top:none; }
-.fv4-rev-h { color:#17170f; font-size:13.5px; font-weight:700; }
-.fv4-rev-s { color:#8a8a7c; font-size:12px; margin-top:3px; }
-.fv4-foot { display:flex; justify-content:space-between; color:#a3a396; font-size:11.5px; padding:14px 2px 0; flex-wrap:wrap; gap:8px; }
+.fv4-rev-h { color:#17170f; font-size:14.5px; font-weight:700; }
+.fv4-rev-s { color:#8a8a7c; font-size:13.5px; margin-top:3px; }
+.fv4-foot { display:flex; justify-content:space-between; color:#a3a396; font-size:13.5px; padding:14px 2px 0; flex-wrap:wrap; gap:8px; }
 </style>
 """
 
@@ -6449,9 +6454,16 @@ def _loop_streak(series: list) -> int:
     return streak * sign
 
 
-def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7) -> list:
-    """마지막 날(end) vs 그 전날을 비교해서 '달라진 것'만 문장으로 만든다.
-    연속 추세가 있으면 '3일째'를 같이 붙인다. [(종류, 문장), ...] 형태로 돌려준다."""
+def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7,
+                     spend_daily: pd.DataFrame = None, universe=None) -> list:
+    """마지막 날 vs 그 전날을 매체별로 한 줄씩 비교한다.
+
+    예전에는 20% 이상 움직인 것만, 그것도 6개만 보여줬다. 그러다 보니 브랜드검색·크리테오처럼
+    조용히 도는 매체는 화면에서 아예 사라져서 "오늘 얘는 어땠지"를 확인할 수가 없었다.
+    운영 중인 매체는 변화가 없어도 전부 세워두고, 눈에 띄는 것만 색으로 구분한다.
+
+    돌려주는 값: [("_meta", (오늘, 전일)), (종류, 문장), ...]
+    """
     if daily is None or daily.empty:
         return []
     d = daily[daily["report_date"] <= end]
@@ -6461,41 +6473,84 @@ def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7) -> list:
     if len(days) < 2:
         return []
     today_d, prev_d = days[-1], days[-2]
-    cur = d[d["report_date"] == today_d].set_index("channel")
-    prv = d[d["report_date"] == prev_d].set_index("channel")
+    cur = d[d["report_date"] == today_d].groupby("channel").sum(numeric_only=True)
+    prv = d[d["report_date"] == prev_d].groupby("channel").sum(numeric_only=True)
 
-    logs = [("_meta", (today_d, prev_d))]   # 첫 항목은 비교한 날짜 (그리는 쪽에서 꺼내 씀)
-    for ch in cur.index:
-        if ch not in prv.index:
+    # 운영 매체 목록 = GA 유입이 잡힌 매체 ∪ 광고비가 나간 매체.
+    # 광고비만 있고 GA 유입이 0인 매체(=UTM 누락 의심)도 반드시 보여야 해서 합집합으로 만든다.
+    chans = set(cur.index) | set(prv.index)
+    spend_map = {}
+    if spend_daily is not None and not spend_daily.empty and "channel" in spend_daily.columns:
+        sp = spend_daily.copy()
+        sp["report_date"] = pd.to_datetime(sp["report_date"], errors="coerce").dt.date
+        sp = sp[(sp["report_date"] >= days[max(0, len(days) - lookback)]) & (sp["report_date"] <= today_d)]
+        if not sp.empty and "cost_incl_vat" in sp.columns:
+            agg = sp.groupby("channel")["cost_incl_vat"].sum()
+            spend_map = {_v4_canon_channel(k): float(v) for k, v in agg.items() if float(v) > 0}
+            chans |= set(spend_map)
+    if universe:
+        chans |= {_v4_canon_channel(c) for c in universe if str(c).strip()}
+
+    def g(df, ch, col):
+        try:
+            return float(df.loc[ch, col])
+        except Exception:
+            return 0.0
+
+    rows = []
+    for ch in chans:
+        u_now, u_prev = g(cur, ch, "users"), g(prv, ch, "users")
+        r_now, r_prev = g(cur, ch, "revenue"), g(prv, ch, "revenue")
+        if u_now <= 0 and u_prev <= 0 and r_now <= 0 and r_prev <= 0 and ch not in spend_map:
             continue
-        u_now, u_prev = float(cur.loc[ch, "users"]), float(prv.loc[ch, "users"])
-        if u_now < CHANGE_MIN_USERS and u_prev < CHANGE_MIN_USERS:
-            continue
+
         hist = [(dd, float(d[(d["report_date"] == dd) & (d["channel"] == ch)]["users"].sum()))
                 for dd in days[-lookback:]]
         streak = _loop_streak(hist)
-        streak_txt = f" ({abs(streak)}일째)" if abs(streak) >= STREAK_MIN_DAYS else ""
+        streak_txt = f" · {abs(streak)}일째" if abs(streak) >= STREAK_MIN_DAYS else ""
 
-        if u_prev > 0:
-            pct = (u_now - u_prev) / u_prev * 100
-            if abs(pct) >= CHANGE_ALERT_PCT:
-                kind = "down" if pct < 0 else "up"
-                logs.append((kind, f"{ch} 유입 {u_now:,.0f} "
-                                   f"(전일 {u_prev:,.0f} · {pct:+.0f}%){streak_txt}"))
+        def delta(now, prev):
+            if prev > 0:
+                return (now - prev) / prev * 100
+            return None if now <= 0 else float("inf")
 
-        r_now, r_prev = float(cur.loc[ch, "revenue"]), float(prv.loc[ch, "revenue"])
-        if r_prev > 0:
-            rp = (r_now - r_prev) / r_prev * 100
-            if abs(rp) >= CHANGE_ALERT_PCT:
-                # 0원은 '실제로 안 팔림'과 'GA4가 아직 집계 중'이 구분이 안 된다.
-                # 전일 금액을 같이 적어야 형이 판단할 수 있다.
-                logs.append(("down" if rp < 0 else "up",
-                             f"{ch} 매출 {r_now:,.0f}원 (전일 {r_prev:,.0f}원 · {rp:+.0f}%)"))
+        up_, rp_ = delta(u_now, u_prev), delta(r_now, r_prev)
+        thin = max(u_now, u_prev) < CHANGE_MIN_USERS      # 표본이 작으면 변동률이 튄다
 
-    meta, body = logs[0], logs[1:]
-    order = {"down": 0, "up": 1}
-    body.sort(key=lambda x: order.get(x[0], 9))
-    return [meta] + body[:6]
+        def txt(pct):
+            if pct is None:
+                return "변동 없음"
+            if pct == float("inf"):
+                return "신규 발생"
+            return f"{pct:+.0f}%"
+
+        parts = [f'<b>{ch}</b>',
+                 f'유입 {u_now:,.0f} <span class="fv4-chg-p">(전일 {u_prev:,.0f} · {txt(up_)})</span>',
+                 f'매출 {r_now:,.0f}원 <span class="fv4-chg-p">(전일 {r_prev:,.0f}원 · {txt(rp_)})</span>']
+
+        worst = min([p for p in (up_, rp_) if p is not None and p != float("inf")], default=0.0)
+        best = max([p for p in (up_, rp_) if p is not None and p != float("inf")], default=0.0)
+        if thin:
+            kind = "flat"
+            parts.append('<span class="fv4-chg-tag">표본 적음</span>')
+        elif worst <= -CHANGE_ALERT_PCT:
+            kind = "down"
+        elif best >= CHANGE_ALERT_PCT:
+            kind = "up"
+        else:
+            kind = "flat"
+
+        # 광고비는 나갔는데 GA 유입이 0이면 UTM이 안 붙은 것이다 — 성과가 아니라 설정 문제다.
+        if ch in spend_map and u_now <= 0 and u_prev <= 0:
+            kind = "down"
+            parts = [p for p in parts if "표본 적음" not in p]   # 더 중요한 경고로 덮는다
+            parts.append('<span class="fv4-chg-tag warn">광고비 집행 중인데 GA 유입 0 · UTM 확인</span>')
+
+        rows.append((kind, " · ".join(parts) + streak_txt, worst))
+
+    order = {"down": 0, "up": 1, "flat": 2}
+    rows.sort(key=lambda x: (order.get(x[0], 9), x[2]))
+    return [("_meta", (today_d, prev_d))] + [(k, t) for k, t, _ in rows]
 
 
 def _loop_signal_streak(daily: pd.DataFrame, channel: str, end: date, lookback: int = 7) -> str:
@@ -8072,7 +8127,7 @@ def _cp_month_budget(channel_mix: pd.DataFrame, ref: date,
 CP_CSS = """
 <style>
 .cp-wrap{font-family:-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif;color:#14181F}
-.cp-eyebrow{font-size:11.5px;letter-spacing:.14em;font-weight:700;color:#7A8088;text-transform:uppercase;margin-bottom:5px}
+.cp-eyebrow{font-size:13.5px;letter-spacing:.14em;font-weight:700;color:#7A8088;text-transform:uppercase;margin-bottom:5px}
 .cp-title{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 14px}
 /* 칸 개수가 화면마다 달라서 grid를 고정 칸수로 잡으면 빈 칸이 생기고 칸막이가 끊긴다.
    flex로 두고 칸막이를 왼쪽 테두리로 그리면 몇 개든 알아서 맞는다. */
@@ -8080,58 +8135,58 @@ CP_CSS = """
   overflow:hidden;margin-bottom:14px}
 .cp-kpi{flex:1 1 0;min-width:0;padding:14px 16px;border-left:1px solid #E3E1DC}
 .cp-kpi:first-child{border-left:none}
-.cp-kpi .k{font-size:12.5px;color:#6E747C;font-weight:600;margin-bottom:6px}
+.cp-kpi .k{font-size:14px;color:#6E747C;font-weight:600;margin-bottom:6px}
 .cp-kpi .v{font-size:22px;font-weight:800;letter-spacing:-.02em}
-.cp-kpi .s{font-size:12px;color:#7A8088;margin-top:5px}
-.cp-tbl{width:100%;border-collapse:collapse;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;font-size:13.5px}
-.cp-tbl th{background:#F4F2ED;color:#5E646C;font-size:12.5px;font-weight:700;text-align:right;padding:11px 12px;border-bottom:1px solid #E3E1DC;white-space:nowrap}
+.cp-kpi .s{font-size:13.5px;color:#7A8088;margin-top:5px}
+.cp-tbl{width:100%;border-collapse:collapse;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;font-size:14.5px}
+.cp-tbl th{background:#F4F2ED;color:#5E646C;font-size:14px;font-weight:700;text-align:right;padding:11px 12px;border-bottom:1px solid #E3E1DC;white-space:nowrap}
 .cp-tbl th.l,.cp-tbl td.l{text-align:left}
-.cp-ar{margin-left:6px;color:#B9BEC5;font-size:11px}
+.cp-ar{margin-left:6px;color:#B9BEC5;font-size:13px}
 .cp-tbl th:hover{background:#EDEAE3}
 .cp-tbl td{padding:11px 12px;text-align:right;border-bottom:1px solid #F0EEE9;white-space:nowrap}
 .cp-tbl tr:last-child td{border-bottom:none}
 .cp-tbl tr:hover td{background:#FAFAF8}
 .cp-tbl td.m{font-weight:700;color:#14181F}
-.cp-tbl td.sub{font-size:12px;color:#7A8088;font-weight:400}
-.cp-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10.5px;font-weight:700}
+.cp-tbl td.sub{font-size:13.5px;color:#7A8088;font-weight:400}
+.cp-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:13px;font-weight:700}
 .cp-own{background:#14181F;color:#EFEDE7}
 .cp-ext{background:#E7E4F7;color:#4B3FA8}
-.cp-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10.5px;font-weight:700;background:#EAF7D9;color:#3F6B12}
+.cp-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:13px;font-weight:700;background:#EAF7D9;color:#3F6B12}
 .cp-pill.warn{background:#FDEDE3;color:#9A4B14}
 .cp-pill.zero{background:#F1F1EF;color:#9AA0A8}
 .cp-mute{color:#C2C6CC}
 .cp-scope{display:inline-block;margin-left:10px;padding:4px 11px;border-radius:6px;
-  background:#EFEDE8;color:#6E747C;font-size:12px;font-weight:700;vertical-align:middle}
+  background:#EFEDE8;color:#6E747C;font-size:13.5px;font-weight:700;vertical-align:middle}
 .cp-pace{height:5px;background:#EFEDE8;border-radius:3px;margin-top:7px;overflow:hidden;position:relative}
 .cp-pace i{display:block;height:100%;background:#14181F;border-radius:3px}
 .cp-pace u{position:absolute;top:-3px;width:2px;height:11px;background:#E0654A;text-decoration:none}
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
-.cp-note{font-size:13px;color:#6E747C;margin-top:12px;line-height:1.85}
+.cp-note{font-size:14px;color:#6E747C;margin-top:12px;line-height:1.85}
 .cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
 .cp-rec{background:#D9F27E;border-radius:12px;padding:22px 26px;margin-top:16px}
-.cp-rec-eyebrow{font-size:11px;letter-spacing:.14em;font-weight:800;color:#4A5A16;margin-bottom:7px}
+.cp-rec-eyebrow{font-size:13px;letter-spacing:.14em;font-weight:800;color:#4A5A16;margin-bottom:7px}
 .cp-rec-head{font-size:23px;font-weight:800;letter-spacing:-.02em;color:#14181F;margin-bottom:5px}
-.cp-rec-sub{font-size:13.5px;color:#4A5A16;margin-bottom:14px}
+.cp-rec-sub{font-size:14.5px;color:#4A5A16;margin-bottom:14px}
 .cp-rec-list{margin:0;padding-left:0;list-style:none}
 .cp-rec-list li{font-size:15px;color:#1E2530;padding:11px 0;border-top:1px solid rgba(0,0,0,.09);line-height:1.65}
-.cp-tag{display:inline-block;padding:3px 9px;border-radius:5px;font-size:12px;font-weight:800;margin-right:8px}
+.cp-tag{display:inline-block;padding:3px 9px;border-radius:5px;font-size:13.5px;font-weight:800;margin-right:8px}
 .cp-tag.up{background:#14181F;color:#D9F27E}
 .cp-tag.down{background:#FDEDE3;color:#9A4B14}
 .cp-tag.keep{background:#FFF;color:#4A5A16}
 .cp-tag.hold{background:#EFEFEA;color:#6E747C}
 .cp-tag.skip{background:#E7E4F7;color:#4B3FA8}
-.cp-rec-foot{font-size:12px;color:#5E6B2A;margin-top:14px;line-height:1.65}
+.cp-rec-foot{font-size:13.5px;color:#5E6B2A;margin-top:14px;line-height:1.65}
 .cp-btnpad{height:26px}
 </style>
 <style>
 /* 기간 바: 컨트롤들을 한 덩어리 카드처럼 보이게 한다 */
 .st-key-cpbar{background:#FFF;border:1px solid #E3E1DC;border-radius:12px;
   padding:10px 14px 4px;margin-bottom:14px}
-.st-key-cpbar label{font-size:10.5px !important;color:#8A9099 !important;font-weight:600 !important}
+.st-key-cpbar label{font-size:13px !important;color:#8A9099 !important;font-weight:600 !important}
 .st-key-cpbar [data-baseweb="select"]>div,
-.st-key-cpbar [data-testid="stDateInput"] input{border-radius:8px !important;font-size:13px !important}
+.st-key-cpbar [data-testid="stDateInput"] input{border-radius:8px !important;font-size:14px !important}
 .st-key-cpbar .stButton>button{border-radius:8px;background:#14181F;color:#F3F1EC;
-  border:none;font-weight:700;font-size:13px;padding:7px 0}
+  border:none;font-weight:700;font-size:14px;padding:7px 0}
 .st-key-cpbar .stButton>button:hover{background:#2A3038;color:#FFF}
 </style>
 """
@@ -9002,32 +9057,32 @@ BR_CSS = """
 .br-pace{height:6px;background:#EFEDE8;border-radius:3px;margin-top:8px;overflow:hidden;position:relative}
 .br-pace i{display:block;height:100%;background:#14181F;border-radius:3px}
 .br-pace u{position:absolute;top:-3px;width:2px;height:12px;background:#E0654A;text-decoration:none}
-.br-ratio{border-radius:10px;padding:11px 15px;font-size:12.5px;margin-bottom:14px}
+.br-ratio{border-radius:10px;padding:11px 15px;font-size:14px;margin-bottom:14px}
 .br-ratio.ok{background:#EAF7D9;color:#3F6B12}
 .br-ratio.over{background:#FDEDE3;color:#9A4B14}
 .br-bal{border-radius:10px;padding:14px 18px;margin:12px 0;display:flex;
   justify-content:space-between;align-items:center}
 .br-bal.ok{background:#D9F27E}
 .br-bal.bad{background:#F1EFEA}
-.br-bal .l1{font-size:10px;font-weight:800;letter-spacing:.12em;color:#4A5A16}
+.br-bal .l1{font-size:13px;font-weight:800;letter-spacing:.12em;color:#4A5A16}
 .br-bal .l2{font-size:15px;font-weight:800;color:#14181F;margin-top:2px}
-.br-bal .l3{font-size:12px;font-weight:700;color:#4A5A16}
+.br-bal .l3{font-size:13.5px;font-weight:700;color:#4A5A16}
 .br-bal.bad .l1,.br-bal.bad .l3{color:#8A9099}
-.br-chip{display:inline-block;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:800}
+.br-chip{display:inline-block;padding:3px 9px;border-radius:6px;font-size:13px;font-weight:800}
 .br-chip.up{background:#EAF7D9;color:#3F6B12;border:1px solid #B7DE7E}
 .br-chip.dn{background:#FDEDE3;color:#9A4B14;border:1px solid #E9C0A0}
-.br-sec{font-size:13px;font-weight:800;color:#14181F;margin:18px 0 7px;letter-spacing:-.01em}
-.br-sub td{background:#EFEDE8;font-weight:800;font-size:12.5px;border-top:1px solid #DDD9D1}
+.br-sec{font-size:14px;font-weight:800;color:#14181F;margin:18px 0 7px;letter-spacing:-.01em}
+.br-sub td{background:#EFEDE8;font-weight:800;font-size:14px;border-top:1px solid #DDD9D1}
 .br-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
-.br-matrix{font-size:12px;min-width:1260px}
+.br-matrix{font-size:13.5px;min-width:1260px}
 .br-matrix th,.br-matrix td{padding:6px 7px;white-space:nowrap}
 .br-now{background:#EAF1FD !important;font-weight:800}
 th.br-now{background:#DCE8FA !important;color:#2C4E86}
 .br-ratio-row td{background:#FAF8F2;font-weight:800;border-bottom:2px solid #E3E1DC}
 .br-ratio-row td.br-over{color:#B0431A}
-.br-tiny{font-size:11px;color:#7A8088;font-weight:600;margin-left:6px}
+.br-tiny{font-size:13px;color:#7A8088;font-weight:600;margin-left:6px}
 .br-warn{background:#FDEDE3;color:#9A4B14;border-radius:8px;padding:9px 13px;
-  font-size:12px;margin-bottom:10px}
+  font-size:13.5px;margin-bottom:10px}
 .br-ind{padding-left:12px;display:inline-block}
 </style>
 """
@@ -9249,6 +9304,7 @@ def render_ga_channel_funnel_page(
     utm_map: pd.DataFrame = None,
     decisions: pd.DataFrame = None,
     ad_spend: pd.DataFrame = None,
+    master: pd.DataFrame = None,
 ):
     """채널 퍼널 리포트 V4 — '신규 고객 발굴' / '매출 확보' 두 목적축을 하나의 화면에서 본다.
     노출·클릭·가입·구매·매출은 channel_audience_snapshot(대행사 캠페인 신규/리타겟 태그 기준),
@@ -9572,7 +9628,10 @@ def render_ga_channel_funnel_page(
 
     # ── 어제 대비 달라진 것 ── 스냅샷이 아니라 '변화'를 먼저 보여준다.
     daily_ch = _loop_daily_by_channel(gci)
-    change_logs = _loop_change_log(daily_ch, end)
+    change_logs = _loop_change_log(
+        daily_ch, end, spend_daily=ad_spend,
+        universe=list(master["media"]) if (master is not None and not master.empty
+                                           and "media" in master.columns) else None)
     if change_logs and len(change_logs) > 1:
         (_, (_cmp_new, _cmp_old)), *_body = change_logs
         items = "".join(
@@ -10632,6 +10691,7 @@ def main():
             T("inflow_revenue_daily"), T("channel_weekly"), T("channel_mix_budget"),
             ga_daily=T("ga_channel_daily"), utm_map=T("utm_channel_map"),
             decisions=T("decision_log"), ad_spend=T("ad_spend_daily"),
+            master=T("media_master"),
         )
     elif page == "채널 성과":
         render_channel_performance_page(
