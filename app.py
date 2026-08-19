@@ -4474,10 +4474,11 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
-    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
+    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "예산 재배분",
+                    "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
-    "운영 도구": ["UTM 빌더", "소재 로그", "예산 재배분"],
+    "운영 도구": ["UTM 빌더", "소재 로그"],
     "가이드": ["가이드"],
 }
 
@@ -7819,6 +7820,39 @@ def _budget_key(s) -> str:
     return "".join(t.split()).lower()
 
 
+def _channel_mix_panel(channel_mix) -> str:
+    """연간 채널 믹스 패널(매체별 금액 + 비중).
+
+    성과를 보는 화면보다 '예산을 어떻게 나눠 쓸까'를 정하는 화면에 있어야 쓸모가 있어서
+    예산 재배분 탭으로 옮겼다. 비중만으로는 감이 안 잡혀 금액을 원 단위로 같이 적는다.
+    """
+    if channel_mix is None or channel_mix.empty:
+        return ""
+    m = channel_mix.copy()
+    m["year"] = pd.to_numeric(m["year"], errors="coerce")
+    year = m["year"].max()
+    m = m[m["year"] == year]
+    agg = m.groupby("channel", as_index=False).agg(budget=("budget", "sum"))
+    agg = agg[agg["budget"] > 0]
+    if agg.empty:
+        return ""
+    total = float(agg["budget"].sum())
+    agg["ratio"] = agg["budget"] / total * 100
+    agg = agg.sort_values("budget", ascending=False).head(10)
+    top = float(agg["ratio"].max()) or 1.0
+    rows = "".join(
+        f'<div class="fv4-mix-row"><div class="fv4-mix-row-top">'
+        f'<span class="fv4-mix-ch">{r["channel"]}</span>'
+        f'<span class="fv4-mix-val">\u20a9{r["budget"]:,.0f}<b>{r["ratio"]:.1f}%</b></span></div>'
+        f'<div class="fv4-mix-track"><i style="width:{r["ratio"] / top * 100:.1f}%"></i></div></div>'
+        for _, r in agg.iterrows())
+    return ('<div class="fv4-wrap"><div class="fv4-mixpanel-wide">'
+            f'<div class="fv4-eyebrow">{int(year)} CHANNEL MIX</div>'
+            f'<div class="fv4-mix-amt-big">\u20a9{total:,.0f}</div>'
+            '<div class="fv4-kpi-sub">연간 매체 예산</div>'
+            f'<div class="fv4-mix-list">{rows}</div></div></div>')
+
+
 def _media_budget(r, budget_map: dict) -> float:
     """매체 한 줄의 월 예산. 직접 지정값이 있으면 그게 우선이다.
 
@@ -8608,6 +8642,24 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
     edit["수정 예산"] = edit["예산"]
 
     locked = set(edit[edit["판정"].isin(["계약 고정", "판단 제외"])]["매체"])
+
+    # 편집표 안에는 합계 줄을 못 넣는다(그 줄까지 사용자가 고칠 수 있어서).
+    # 대신 바로 위에 구분별 TOTAL을 고정으로 보여준다.
+    tot_rows = "".join(
+        f'<tr><td class="l m">{sc}</td>'
+        f'<td>{_cp_won(gg["예산"].sum())}</td>'
+        f'<td class="m">{_cp_won(gg["예산"].sum())}</td></tr>'
+        for sc, gg in edit.groupby("구분"))
+    st.markdown(
+        CP_CSS + '<div class="cp-wrap"><table class="cp-tbl"><thead><tr>'
+        f'<th class="l">TOTAL</th><th>{ref.month}월 기존 예산</th>'
+        f'<th>{ref.month}월 수정 예산</th></tr></thead>'
+        f'<tbody>{tot_rows}'
+        f'<tr class="cp-tot"><td class="l">전체</td>'
+        f'<td>{_cp_won(edit["예산"].sum())}</td>'
+        f'<td>{_cp_won(edit["예산"].sum())}</td></tr>'
+        '</tbody></table></div>', unsafe_allow_html=True)
+
     shown = st.data_editor(
         edit[["매체", "구분", "예산", "수정 예산"]],
         use_container_width=True, hide_index=True, key="br_editor",
@@ -8698,6 +8750,8 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
                            "decided_on,channel,action", "예산 재배분")
             st.success(f"{n}건 기록했습니다. 7일 뒤 채널 퍼널 리포트에서 자동 회고됩니다.")
             st.cache_data.clear()
+
+    st.markdown(FUNNEL_V4_CSS + _channel_mix_panel(channel_mix), unsafe_allow_html=True)
 
     st.markdown(
         '<div class="cp-wrap"><div class="cp-note">'
@@ -9493,37 +9547,6 @@ def render_ga_channel_funnel_page(
                 if cost < FUNNEL_MIN_SPEND:
                     reason += f" · 광고비가 {FUNNEL_MIN_SPEND:,}원 미만이라 판단 보류"
                 st.markdown(f"**{ch} → {label}**  \n{reason}")
-
-    # ── 하단: 채널 믹스 ──
-    # 예전엔 비중(%)만 막대로 보여줬는데, 실제 판단할 땐 "그래서 얼마짜리인지"가 같이 필요하다.
-    # 금액을 줄여 쓰면(4.7억) 감이 안 잡혀서 원 단위 그대로 적는다.
-    mix_rows = ""
-    mix_total_amt = float(mix_ratio["budget"].sum()) if (mix_ratio is not None and not mix_ratio.empty) else 0.0
-    if mix_ratio is not None and not mix_ratio.empty:
-        top_mix = mix_ratio.sort_values("budget_ratio", ascending=False).head(8)
-        top_share = float(top_mix["budget_ratio"].max()) or 1.0
-        for _, m in top_mix.iterrows():
-            w = m["budget_ratio"] / top_share * 100
-            mix_rows += (
-                f'<div class="fv4-mix-row"><div class="fv4-mix-row-top">'
-                f'<span class="fv4-mix-ch">{m["channel"]}</span>'
-                f'<span class="fv4-mix-val">\u20a9{float(m["budget"]):,.0f}'
-                f'<b>{m["budget_ratio"]:.1f}%</b></span></div>'
-                f'<div class="fv4-mix-track"><i style="width:{w:.1f}%"></i></div></div>'
-            )
-    mix_year = int(pd.to_numeric(channel_mix["year"], errors="coerce").max()) \
-        if (channel_mix is not None and not channel_mix.empty) else start.year
-    mix_list_html = mix_rows or '<div class="fv4-card-sub">채널 믹스 파일을 올리면 표시됩니다.</div>'
-
-    st.markdown(
-        '<div class="fv4-wrap"><div class="fv4-mixpanel-wide">'
-        f'<div class="fv4-eyebrow">{mix_year} CHANNEL MIX</div>'
-        f'<div class="fv4-mix-amt-big">\u20a9{mix_total_amt:,.0f}</div>'
-        '<div class="fv4-kpi-sub">연간 매체 예산</div>'
-        f'<div class="fv4-mix-list">{mix_list_html}</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
 
     # ── NEXT BEST ACTION (목적축별 · 매체 전부) ──
     st.markdown(CP_CSS + _v4_actions_html(media, spend_map, is_new, start, end),
