@@ -4474,7 +4474,7 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
-    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "예산 재배분",
+    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "예산 관리",
                     "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
     "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
@@ -7824,7 +7824,7 @@ def _channel_mix_panel(channel_mix) -> str:
     """연간 채널 믹스 패널(매체별 금액 + 비중).
 
     성과를 보는 화면보다 '예산을 어떻게 나눠 쓸까'를 정하는 화면에 있어야 쓸모가 있어서
-    예산 재배분 탭으로 옮겼다. 비중만으로는 감이 안 잡혀 금액을 원 단위로 같이 적는다.
+    예산 관리 탭으로 옮겼다. 비중만으로는 감이 안 잡혀 금액을 원 단위로 같이 적는다.
     """
     if channel_mix is None or channel_mix.empty:
         return ""
@@ -7909,8 +7909,12 @@ CP_CSS = """
 .cp-wrap{font-family:-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif;color:#14181F}
 .cp-eyebrow{font-size:10px;letter-spacing:.14em;font-weight:700;color:#8A9099;text-transform:uppercase;margin-bottom:4px}
 .cp-title{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 14px}
-.cp-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#E3E1DC;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;margin-bottom:14px}
-.cp-kpi{background:#FFF;padding:14px 16px}
+/* 칸 개수가 화면마다 달라서 grid를 고정 칸수로 잡으면 빈 칸이 생기고 칸막이가 끊긴다.
+   flex로 두고 칸막이를 왼쪽 테두리로 그리면 몇 개든 알아서 맞는다. */
+.cp-kpis{display:flex;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;
+  overflow:hidden;margin-bottom:14px}
+.cp-kpi{flex:1 1 0;min-width:0;padding:14px 16px;border-left:1px solid #E3E1DC}
+.cp-kpi:first-child{border-left:none}
 .cp-kpi .k{font-size:11px;color:#8A9099;font-weight:600;margin-bottom:6px}
 .cp-kpi .v{font-size:22px;font-weight:800;letter-spacing:-.02em}
 .cp-kpi .s{font-size:11px;color:#9AA0A8;margin-top:4px}
@@ -8270,11 +8274,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         f'<div class="s">VAT 포함 · 공급가 {_cp_won(tot_cost / 1.1)}</div></div>'
         f'<div class="cp-kpi"><div class="k">월 예산</div><div class="v">{_cp_won(tot_budget)}</div>'
         f'<div class="s">{ref_m.year}년 {ref_m.month}월 계획</div></div>'
-        f'<div class="cp-kpi"><div class="k">월 집행률 ({start.month}/{start.day}~{end.month}/{end.day})</div>'
+        f'<div class="cp-kpi"><div class="k">예산 소진율</div>'
         f'<div class="v">{pace:.1f}%</div>'
         f'<div class="cp-pace"><i style="width:{min(pace,100):.0f}%"></i>'
         f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
-        f'<div class="s">기간 경과 {elapsed:.0f}% 대비 <b>{pace_word}</b></div></div>'
+        f'<div class="s">쓴 돈 ÷ 월 예산 · <b>{pace_word}</b></div></div>'
+        f'<div class="cp-kpi"><div class="k">기간 경과</div>'
+        f'<div class="v">{elapsed:.0f}%</div>'
+        f'<div class="s">{start.month}/{start.day}~{end.month}/{end.day} · '
+        f'{last_day.day}일 중 {min(end, last_day).day}일</div></div>'
         f'<div class="cp-kpi"><div class="k">GA 매출 ROAS</div><div class="v">{roas:,.1f}%</div>'
         f'<div class="s">목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%</div></div>'
         f'<div class="cp-kpi"><div class="k">GA 구매매출</div><div class="v">{_cp_won(tot_rev)}</div>'
@@ -8494,7 +8502,7 @@ def force_resync_ad_spend(start: date, end: date):
 
 
 # ══════════════════════════════════════════════════════════════
-# 예산 재배분 — "다음 주 예산을 어디로 옮길까"
+# 예산 관리 — "다음 주 예산을 어디로 옮길까"
 #
 # 채널 성과 탭이 '무엇이 잘 되고 있나'라면, 여기는 '그래서 돈을 어떻게 옮길까'다.
 # 두 가지를 강제한다.
@@ -8586,12 +8594,16 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         f'<div class="s">{ref} ~ {end} · {pace:.1f}%</div></div>'
         f'<div class="cp-kpi"><div class="k">남은 예산</div><div class="v">{_cp_won(tot_b - tot_c)}</div>'
         f'<div class="s">남은 {days_left}일 · 일 {_cp_won((tot_b - tot_c) / days_left) if days_left else "-"}</div></div>'
-        f'<div class="cp-kpi"><div class="k">월 집행률 ({ref.month}/1~{end.month}/{end.day})</div>'
+        f'<div class="cp-kpi"><div class="k">예산 소진율</div>'
         f'<div class="v">{pace:.1f}%</div>'
         f'<div class="br-pace"><i style="width:{min(pace,100):.0f}%"></i>'
         f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
-        f'<div class="s">기간 경과 {elapsed:.0f}% 대비 '
+        f'<div class="s">쓴 돈 ÷ 월 예산 · '
         f'<b>{"과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")}</b></div></div>'
+        f'<div class="cp-kpi"><div class="k">기간 경과</div>'
+        f'<div class="v">{elapsed:.0f}%</div>'
+        f'<div class="s">{ref.month}/1~{end.month}/{end.day} · '
+        f'{last_day.day}일 중 {days_done}일</div></div>'
         '</div></div>', unsafe_allow_html=True)
 
     if ratio is not None:
@@ -8744,10 +8756,10 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             recs = [{
                 "decided_on": today, "channel": r["매체"],
                 "action": f'예산 {r["예산"]:,.0f} → {r["수정 예산"]:,.0f}원 ({r["조정액"]:+,.0f})',
-                "note": note or f'{ref.year}년 {ref.month}월 예산 재배분',
+                "note": note or f'{ref.year}년 {ref.month}월 예산 관리',
             } for _, r in moved.iterrows()]
             n = save_table("decision_log", pd.DataFrame(recs),
-                           "decided_on,channel,action", "예산 재배분")
+                           "decided_on,channel,action", "예산 관리")
             st.success(f"{n}건 기록했습니다. 7일 뒤 채널 퍼널 리포트에서 자동 회고됩니다.")
             st.cache_data.clear()
 
@@ -10345,7 +10357,7 @@ def main():
             T("ad_spend_daily"), T("ga_channel_daily"), T("channel_mix_budget"),
             master=T("media_master"), budget=T("channel_budget"),
         )
-    elif page == "예산 재배분":
+    elif page == "예산 관리":
         render_budget_realloc_page(
             T("ad_spend_daily"), T("ga_channel_daily"), T("channel_mix_budget"),
             budget=T("channel_budget"), master=T("media_master"),
