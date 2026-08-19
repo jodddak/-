@@ -8539,6 +8539,58 @@ def _br_ratio_actual(budget: pd.DataFrame, year: int, scope: str = "자사몰"):
     return (spend / rev if rev else None), spend, rev
 
 
+def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰") -> str:
+    """26년 월별×매체별 예산표. 예산 파일의 '매체 세부내역' 블록을 그대로 옮긴 화면.
+
+    금액을 원 단위로 14칸에 늘어놓으면 읽을 수가 없어서 파일과 같은 '천원' 단위로 줄인다.
+    이번 달 열은 색을 다르게 해서 눈이 바로 가게 한다.
+    """
+    if budget is None or budget.empty or "budget_cost" not in budget.columns:
+        return '<div class="cp-note">연간 예산 파일을 올리면 표시됩니다.</div>'
+    b = budget.copy()
+    for c in ("year", "month"):
+        b[c] = pd.to_numeric(b.get(c), errors="coerce")
+    b = b[(b.get("scope") == scope) & (b["year"] == year) & (b["month"].between(1, 12))]
+    b = b[~b["channel"].astype(str).str.startswith("__")]
+    b = b[~b["channel"].astype(str).isin(["TOTAL"])]
+    if b.empty:
+        return '<div class="cp-note">해당 연도 예산 데이터가 없습니다.</div>'
+
+    piv = b.pivot_table(index="channel", columns="month", values="budget_cost",
+                        aggfunc="sum", fill_value=0)
+    for m in range(1, 13):
+        if m not in piv.columns:
+            piv[m] = 0
+    piv = piv[sorted(piv.columns)]
+    piv["TOTAL"] = piv[list(range(1, 13))].sum(axis=1)
+    piv["누계"] = piv[[m for m in range(1, ref_month + 1)]].sum(axis=1)
+    piv = piv[piv["TOTAL"] > 0].sort_values("TOTAL", ascending=False)
+
+    def k(v):  # 천원
+        return f"{v/1000:,.0f}" if v else '<span class="cp-mute">-</span>'
+
+    heads = (['<th class="l">매체</th>', "<th>TOTAL</th>", f"<th>~{ref_month}월 누계</th>"]
+             + [f'<th class="{"br-now" if m == ref_month else ""}">{m}월</th>'
+                for m in range(1, 13)])
+    rows = []
+    for ch, r in piv.iterrows():
+        cells = "".join(
+            f'<td class="{"br-now" if m == ref_month else ""}">{k(r[m])}</td>'
+            for m in range(1, 13))
+        rows.append(f'<tr><td class="l m">{ch}</td>'
+                    f'<td class="m">{k(r["TOTAL"])}</td><td>{k(r["누계"])}</td>{cells}</tr>')
+    tot = piv.sum()
+    rows.append(
+        '<tr class="cp-tot"><td class="l">합계</td>'
+        f'<td>{k(tot["TOTAL"])}</td><td>{k(tot["누계"])}</td>'
+        + "".join(f'<td class="{"br-now" if m == ref_month else ""}">{k(tot[m])}</td>'
+                  for m in range(1, 13)) + "</tr>")
+    return (f'<table class="cp-tbl br-matrix"><thead><tr>{"".join(heads)}</tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table>'
+            '<div class="cp-note">단위: 천원 (VAT 포함) · 파란 열이 이번 달입니다 · '
+            f'{year}년 {scope} 기준</div>')
+
+
 def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
                                master=None, decisions=None):
     st.markdown(CP_CSS + BR_CSS, unsafe_allow_html=True)
@@ -8639,116 +8691,56 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             return "감액"
         return "유지"
 
-    # ── 조정 입력 ────────────────────────────────────────
-    # 조정률(%)로 받으면 실무에서 쓰기 어렵다는 피드백이 있어, 예산 담당자가 실제로 쓰는 방식
-    # 그대로 '수정 예산 금액'을 직접 넣게 바꿨다. 증/감액은 기존 예산과의 차액으로 자동 표기한다.
-    st.markdown(f"#### {ref.month}월 예산 조정")
+    df["판정"] = df.apply(verdict, axis=1)
+
+    # ── 표 ① 연간 월별 예산 ──────────────────────────────
+    st.markdown(f"#### {ref.year}년 월별 · 매체별 예산")
+    st.markdown(CP_CSS + BR_CSS
+                + '<div class="cp-wrap">'
+                + _br_year_matrix(budget, ref.year, ref.month)
+                + '</div>', unsafe_allow_html=True)
+
+    # ── 표 ② 이번 달 매체별 집행 현황 ─────────────────────
+    st.markdown(f"#### {ref.month}월 매체별 집행 현황")
     st.caption(
-        f"**8/1~{end.day}일 기준 전체 집행률 {pace:.1f}%** (기간 경과 {elapsed:.0f}%). "
-        "수정 예산에 금액을 직접 넣으면 증/감액이 자동으로 계산됩니다. "
-        "자사몰과 외부몰은 재원이 달라 따로 봅니다."
+        f"{ref.month}/1~{end.month}/{end.day} 기준 · 전체 집행률 {pace:.1f}% (기간 경과 {elapsed:.0f}%)"
     )
-
-    edit = df[["매체", "구분", "집행", "예산", "집행률", "ROAS", "고정"]].copy()
-    edit["판정"] = edit.apply(verdict, axis=1)
-    edit["수정 예산"] = edit["예산"]
-
-    locked = set(edit[edit["판정"].isin(["계약 고정", "판단 제외"])]["매체"])
-
-    shown = st.data_editor(
-        edit[["매체", "구분", "예산", "수정 예산"]],
-        use_container_width=True, hide_index=True, key="br_editor",
-        disabled=["매체", "구분", "예산"],
-        column_config={
-            "매체": st.column_config.TextColumn("매체", width="medium"),
-            "구분": st.column_config.TextColumn("구분", width="small"),
-            "예산": st.column_config.NumberColumn(f"{ref.month}월 기존 예산", format="₩%d"),
-            "수정 예산": st.column_config.NumberColumn(
-                f"{ref.month}월 수정 예산", format="₩%d", min_value=0, step=10000,
-                help="바꿀 금액을 직접 넣으세요. 계약 고정·판단 제외 매체는 무시됩니다."),
-        },
-    )
-
-    adj = edit.drop(columns=["수정 예산"]).merge(
-        shown[["매체", "수정 예산"]], on="매체", how="left")
-    adj["수정 예산"] = pd.to_numeric(adj["수정 예산"], errors="coerce").fillna(adj["예산"])
-    adj.loc[adj["매체"].isin(locked), "수정 예산"] = adj["예산"]
-    adj["조정액"] = (adj["수정 예산"] - adj["예산"]).round(0)
-
-    def fmt_move(v):
-        if v > 0:
-            return f'<span class="br-chip up">증액 \u20a9{v:,.0f}</span>'
-        if v < 0:
-            return f'<span class="br-chip dn">감액 \u20a9{-v:,.0f}</span>'
-        return '<span class="cp-mute">—</span>'
-
     VTAG = {"증액": "up", "감액": "down", "유지": "keep",
             "계약 고정": "hold", "판단 보류": "hold",
             "판단 제외": "skip", "예산 없음": "skip"}
-
-    # ── 결과 표 (자사몰/외부몰을 한 표에 두고 소계로 나눈다) ──
-    # 예전엔 TOTAL 요약표 + 자사몰표 + 외부몰표로 세 개였는데, 같은 숫자를 세 번 보게 돼
-    # 오히려 읽기 어려웠다. 한 표에 구분 배지와 소계행을 넣으면 한 번에 다 보인다.
-    heads = ["매체", "판정", "현재 집행", "집행률",
-             f"{ref.month}월 기존 예산", f"{ref.month}월 수정 예산", "증/감액"]
+    heads = ["매체", "판정", "월 예산", "집행", "집행률", "남은 예산", "GA ROAS"]
     th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
     body = []
     for scope_name in ["자사몰", "외부몰"]:
-        sub = adj[adj["구분"] == scope_name]
+        sub = df[df["구분"] == scope_name]
         if sub.empty:
             continue
+        s_b, s_c = sub["예산"].sum(), sub["집행"].sum()
         body.append(
             f'<tr class="br-sub"><td class="l" colspan="2">{scope_name}</td>'
-            f'<td>{_cp_won(sub["집행"].sum())}</td><td></td>'
-            f'<td>{_cp_won(sub["예산"].sum())}</td><td>{_cp_won(sub["수정 예산"].sum())}</td>'
-            f'<td>{fmt_move(sub["조정액"].sum())}</td></tr>')
-        for _, r in sub.iterrows():
+            f'<td>{_cp_won(s_b)}</td><td>{_cp_won(s_c)}</td>'
+            f'<td>{(s_c / s_b * 100) if s_b else 0:.1f}%</td>'
+            f'<td>{_cp_won(s_b - s_c)}</td><td></td></tr>')
+        for _, r in sub.sort_values("집행", ascending=False).iterrows():
             pct = ('<span class="cp-mute">—</span>'
                    if r["집행률"] is None or pd.isna(r["집행률"]) else f'{r["집행률"]:.1f}%')
+            roas = ('<span class="cp-mute">—</span>'
+                    if r["ROAS"] is None or pd.isna(r["ROAS"]) else f'{r["ROAS"]:,.0f}%')
             body.append(
                 f'<tr><td class="l m"><span class="br-ind">{r["매체"]}</span></td>'
                 f'<td class="l"><span class="cp-tag {VTAG.get(r["판정"], "hold")}">{r["판정"]}</span></td>'
-                f'<td>{_cp_won(r["집행"])}</td><td>{pct}</td>'
-                f'<td>{_cp_won(r["예산"])}</td><td class="m">{_cp_won(r["수정 예산"])}</td>'
-                f'<td>{fmt_move(r["조정액"])}</td></tr>')
+                f'<td>{_cp_won(r["예산"])}</td><td>{_cp_won(r["집행"])}</td>'
+                f'<td>{pct}</td><td>{_cp_won(r["예산"] - r["집행"])}</td>'
+                f'<td>{roas}</td></tr>')
+    t_b, t_c = df["예산"].sum(), df["집행"].sum()
     body.append(
         f'<tr class="cp-tot"><td class="l" colspan="2">전체 합계</td>'
-        f'<td>{_cp_won(adj["집행"].sum())}</td><td></td>'
-        f'<td>{_cp_won(adj["예산"].sum())}</td><td>{_cp_won(adj["수정 예산"].sum())}</td>'
-        f'<td>{fmt_move(adj["조정액"].sum())}</td></tr>')
-
-    balance = float(adj["조정액"].sum())
-    up_sum = adj[adj["조정액"] > 0]["조정액"].sum()
-    dn_sum = -adj[adj["조정액"] < 0]["조정액"].sum()
-    ok = abs(balance) < 1
-
+        f'<td>{_cp_won(t_b)}</td><td>{_cp_won(t_c)}</td>'
+        f'<td>{(t_c / t_b * 100) if t_b else 0:.1f}%</td>'
+        f'<td>{_cp_won(t_b - t_c)}</td><td></td></tr>')
     st.markdown(
-        CP_CSS + BR_CSS
-        + f'<div class="cp-wrap"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
-        + f'<tbody>{"".join(body)}</tbody></table></div>'
-        + f'<div class="cp-wrap"><div class="br-bal {"ok" if ok else "bad"}">'
-        f'<div><div class="l1">BALANCE</div><div class="l2">'
-        f'증액 +{up_sum:,.0f}원 · 감액 −{dn_sum:,.0f}원 → '
-        f'{"총예산 변동 없음" if ok else f"차액 {balance:+,.0f}원"}</div></div>'
-        f'<div class="l3">{"확정 가능" if ok else "합이 0이어야 확정됩니다"}</div>'
-        '</div></div>', unsafe_allow_html=True)
-
-    note = st.text_input("결정 근거 (선택)", key="br_note",
-                         placeholder="예: 구글 ROAS 213%로 목표 하단 근접, 검색광고로 이동")
-    if st.button("이 배분으로 확정", key="br_confirm", type="primary", disabled=not ok):
-        moved = adj[adj["조정액"] != 0]
-        if moved.empty:
-            st.warning("조정할 매체가 없습니다.")
-        else:
-            recs = [{
-                "decided_on": today, "channel": r["매체"],
-                "action": f'예산 {r["예산"]:,.0f} → {r["수정 예산"]:,.0f}원 ({r["조정액"]:+,.0f})',
-                "note": note or f'{ref.year}년 {ref.month}월 예산 관리',
-            } for _, r in moved.iterrows()]
-            n = save_table("decision_log", pd.DataFrame(recs),
-                           "decided_on,channel,action", "예산 관리")
-            st.success(f"{n}건 기록했습니다. 7일 뒤 채널 퍼널 리포트에서 자동 회고됩니다.")
-            st.cache_data.clear()
+        f'<div class="cp-wrap"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
 
     with st.expander("📊 연간 채널 믹스 (매체별 연간 예산 비중)"):
         st.markdown(FUNNEL_V4_CSS + _channel_mix_panel(channel_mix), unsafe_allow_html=True)
@@ -8784,6 +8776,10 @@ BR_CSS = """
 .br-chip.dn{background:#FDEDE3;color:#9A4B14;border:1px solid #E9C0A0}
 .br-sec{font-size:13px;font-weight:800;color:#14181F;margin:18px 0 7px;letter-spacing:-.01em}
 .br-sub td{background:#EFEDE8;font-weight:800;font-size:12.5px;border-top:1px solid #DDD9D1}
+.br-matrix{font-size:11.5px}
+.br-matrix th,.br-matrix td{padding:7px 8px}
+.br-now{background:#EAF1FD !important;font-weight:800}
+th.br-now{background:#DCE8FA !important;color:#2C4E86}
 .br-ind{padding-left:12px;display:inline-block}
 </style>
 """
