@@ -7934,7 +7934,9 @@ CP_CSS = """
 .cp-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10.5px;font-weight:700;background:#EAF7D9;color:#3F6B12}
 .cp-pill.warn{background:#FDEDE3;color:#9A4B14}
 .cp-pill.zero{background:#F1F1EF;color:#9AA0A8}
-.cp-mute{color:#C2C6CC
+.cp-mute{color:#C2C6CC}
+.cp-scope{display:inline-block;margin-left:10px;padding:4px 11px;border-radius:6px;
+  background:#EFEDE8;color:#6E747C;font-size:12px;font-weight:700;vertical-align:middle}
 .cp-pace{height:5px;background:#EFEDE8;border-radius:3px;margin-top:7px;overflow:hidden;position:relative}
 .cp-pace i{display:block;height:100%;background:#14181F;border-radius:3px}
 .cp-pace u{position:absolute;top:-3px;width:2px;height:11px;background:#E0654A;text-decoration:none}
