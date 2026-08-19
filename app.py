@@ -6082,7 +6082,9 @@ def _v4_row_new(name, r, cost, extra_cls=""):
     cac_sign = (cost / sign) if sign else None
     cac_buy = (cost / conv) if conv else None
     roas = (rev / cost * 100) if cost > 0 else None
-    n = lambda v: f'<span class="fv4-na">—</span>' if v is None else f'\u20a9{v:,.0f}'
+    NA = '<span class="fv4-na">\u2014</span>'
+    roas_txt = f"{roas:,.0f}%" if roas else NA
+    n = lambda v: NA if v is None else f'\u20a9{v:,.0f}'
     return (
         f'<tr class="{extra_cls}"><td class="l">{name}</td>'
         f'<td data-v="{users:.0f}">{_v4_num(users)}</td>'
@@ -6111,7 +6113,9 @@ def _v4_row_ret(name, r, cost, extra_cls=""):
     aov = (rev / conv) if conv else None
     cac = (cost / conv) if conv else None
     roas = (rev / cost * 100) if cost > 0 else None
-    n = lambda v: f'<span class="fv4-na">—</span>' if v is None else f'\u20a9{v:,.0f}'
+    NA = '<span class="fv4-na">\u2014</span>'
+    roas_txt = f"{roas:,.0f}%" if roas else NA
+    n = lambda v: NA if v is None else f'\u20a9{v:,.0f}'
     return (
         f'<tr class="{extra_cls}"><td class="l">{name}</td>'
         f'<td data-v="{users:.0f}">{_v4_num(users)}</td>'
