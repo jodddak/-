@@ -5876,7 +5876,7 @@ FUNNEL_V4_CSS = """
 .fv4-mixpanel-wide .fv4-mix-track{height:7px;background:#EFEDE8;border-radius:4px;margin-top:5px;overflow:hidden}
 .fv4-mixpanel-wide .fv4-mix-track i{display:block;height:100%;background:#8B7BE8;border-radius:4px}
 .fv4-mixpanel-wide .fv4-mix-list{margin-top:16px}
-.cp-rec-det{color:#4A5A16;font-size:11.5px}
+.cp-rec-det{color:#3F5210;font-size:13.5px}
 .fv4-chip {
   display:inline-block; font-size:11px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
 }
@@ -7943,19 +7943,19 @@ CP_CSS = """
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
 .cp-note{font-size:11px;color:#9AA0A8;margin-top:10px;line-height:1.7}
 .cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
-.cp-rec{background:#D9F27E;border-radius:12px;padding:18px 20px;margin-top:14px}
-.cp-rec-eyebrow{font-size:10px;letter-spacing:.14em;font-weight:800;color:#4A5A16;margin-bottom:6px}
-.cp-rec-head{font-size:19px;font-weight:800;letter-spacing:-.02em;color:#14181F;margin-bottom:4px}
-.cp-rec-sub{font-size:12px;color:#4A5A16;margin-bottom:12px}
+.cp-rec{background:#D9F27E;border-radius:12px;padding:22px 26px;margin-top:16px}
+.cp-rec-eyebrow{font-size:11px;letter-spacing:.14em;font-weight:800;color:#4A5A16;margin-bottom:7px}
+.cp-rec-head{font-size:23px;font-weight:800;letter-spacing:-.02em;color:#14181F;margin-bottom:5px}
+.cp-rec-sub{font-size:13.5px;color:#4A5A16;margin-bottom:14px}
 .cp-rec-list{margin:0;padding-left:0;list-style:none}
-.cp-rec-list li{font-size:12.5px;color:#1E2530;padding:7px 0;border-top:1px solid rgba(0,0,0,.09);line-height:1.6}
-.cp-tag{display:inline-block;padding:2px 7px;border-radius:5px;font-size:10.5px;font-weight:800;margin-right:6px}
+.cp-rec-list li{font-size:15px;color:#1E2530;padding:11px 0;border-top:1px solid rgba(0,0,0,.09);line-height:1.65}
+.cp-tag{display:inline-block;padding:3px 9px;border-radius:5px;font-size:12px;font-weight:800;margin-right:8px}
 .cp-tag.up{background:#14181F;color:#D9F27E}
 .cp-tag.down{background:#FDEDE3;color:#9A4B14}
 .cp-tag.keep{background:#FFF;color:#4A5A16}
 .cp-tag.hold{background:#EFEFEA;color:#6E747C}
 .cp-tag.skip{background:#E7E4F7;color:#4B3FA8}
-.cp-rec-foot{font-size:10.5px;color:#5E6B2A;margin-top:12px;line-height:1.6}
+.cp-rec-foot{font-size:12px;color:#5E6B2A;margin-top:14px;line-height:1.65}
 .cp-btnpad{height:26px}
 </style>
 <style>
@@ -8606,16 +8606,14 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         f'<div class="v">{elapsed:.0f}%</div>'
         f'<div class="s">{ref.month}/1~{end.month}/{end.day} · '
         f'{last_day.day}일 중 {days_done}일</div></div>'
-        '</div></div>', unsafe_allow_html=True)
+        + (f'<div class="cp-kpi"><div class="k">누적 광고비 비율</div>'
+           f'<div class="v">{ratio*100:.1f}%</div>'
+           f'<div class="s">목표 {BR_AD_RATIO_TARGET*100:.0f}% · '
+           f'{"초과" if ratio > BR_AD_RATIO_TARGET else "여유"} '
+           f'{abs(ratio - BR_AD_RATIO_TARGET)*100:.1f}%p</div></div>'
+           if ratio is not None else '')
+        + '</div></div>', unsafe_allow_html=True)
 
-    if ratio is not None:
-        gap = (ratio - BR_AD_RATIO_TARGET) * 100
-        st.markdown(
-            f'<div class="cp-wrap"><div class="br-ratio {"over" if gap > 0 else "ok"}">'
-            f'<b>누적 광고비 비율 {ratio*100:.1f}%</b> · 목표 {BR_AD_RATIO_TARGET*100:.0f}% '
-            f'({"초과" if gap > 0 else "여유"} {abs(gap):.1f}%p) — '
-            f'광고비 {_cp_won(r_spend)} / 실매출 {_cp_won(r_rev)}'
-            '</div></div>', unsafe_allow_html=True)
 
     def verdict(r):
         """조정 대상인지, 어느 방향인지 정한다.
@@ -8657,23 +8655,6 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
 
     locked = set(edit[edit["판정"].isin(["계약 고정", "판단 제외"])]["매체"])
 
-    # 편집표 안에는 합계 줄을 못 넣는다(그 줄까지 사용자가 고칠 수 있어서).
-    # 대신 바로 위에 구분별 TOTAL을 고정으로 보여준다.
-    tot_rows = "".join(
-        f'<tr><td class="l m">{sc}</td>'
-        f'<td>{_cp_won(gg["예산"].sum())}</td>'
-        f'<td class="m">{_cp_won(gg["예산"].sum())}</td></tr>'
-        for sc, gg in edit.groupby("구분"))
-    st.markdown(
-        CP_CSS + '<div class="cp-wrap"><table class="cp-tbl"><thead><tr>'
-        f'<th class="l">TOTAL</th><th>{ref.month}월 기존 예산</th>'
-        f'<th>{ref.month}월 수정 예산</th></tr></thead>'
-        f'<tbody>{tot_rows}'
-        f'<tr class="cp-tot"><td class="l">전체</td>'
-        f'<td>{_cp_won(edit["예산"].sum())}</td>'
-        f'<td>{_cp_won(edit["예산"].sum())}</td></tr>'
-        '</tbody></table></div>', unsafe_allow_html=True)
-
     shown = st.data_editor(
         edit[["매체", "구분", "예산", "수정 예산"]],
         use_container_width=True, hide_index=True, key="br_editor",
@@ -8684,7 +8665,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             "예산": st.column_config.NumberColumn(f"{ref.month}월 기존 예산", format="₩%d"),
             "수정 예산": st.column_config.NumberColumn(
                 f"{ref.month}월 수정 예산", format="₩%d", min_value=0, step=10000,
-                help="여기에 바꿀 금액을 직접 넣으세요. 계약 고정·판단 제외 매체는 무시됩니다."),
+                help="바꿀 금액을 직접 넣으세요. 계약 고정·판단 제외 매체는 무시됩니다."),
         },
     )
 
@@ -8696,52 +8677,56 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
 
     def fmt_move(v):
         if v > 0:
-            return f'<span class="br-chip up">증액 (\u20a9{v:,.0f})</span>'
+            return f'<span class="br-chip up">증액 \u20a9{v:,.0f}</span>'
         if v < 0:
-            return f'<span class="br-chip dn">감액 (\u20a9{-v:,.0f})</span>'
+            return f'<span class="br-chip dn">감액 \u20a9{-v:,.0f}</span>'
         return '<span class="cp-mute">—</span>'
 
     VTAG = {"증액": "up", "감액": "down", "유지": "keep",
             "계약 고정": "hold", "판단 보류": "hold",
             "판단 제외": "skip", "예산 없음": "skip"}
 
-    def scope_table(scope_name):
+    # ── 결과 표 (자사몰/외부몰을 한 표에 두고 소계로 나눈다) ──
+    # 예전엔 TOTAL 요약표 + 자사몰표 + 외부몰표로 세 개였는데, 같은 숫자를 세 번 보게 돼
+    # 오히려 읽기 어려웠다. 한 표에 구분 배지와 소계행을 넣으면 한 번에 다 보인다.
+    heads = ["매체", "판정", "현재 집행", "집행률",
+             f"{ref.month}월 기존 예산", f"{ref.month}월 수정 예산", "증/감액"]
+    th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
+    body = []
+    for scope_name in ["자사몰", "외부몰"]:
         sub = adj[adj["구분"] == scope_name]
         if sub.empty:
-            return "", 0.0
-        heads = ["매체", "판정", "현재 집행", "집행률",
-                 f"{ref.month}월 기존 예산", f"{ref.month}월 수정 예산", "증/감액 여부"]
-        th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
-        body = []
+            continue
+        body.append(
+            f'<tr class="br-sub"><td class="l" colspan="2">{scope_name}</td>'
+            f'<td>{_cp_won(sub["집행"].sum())}</td><td></td>'
+            f'<td>{_cp_won(sub["예산"].sum())}</td><td>{_cp_won(sub["수정 예산"].sum())}</td>'
+            f'<td>{fmt_move(sub["조정액"].sum())}</td></tr>')
         for _, r in sub.iterrows():
             pct = ('<span class="cp-mute">—</span>'
                    if r["집행률"] is None or pd.isna(r["집행률"]) else f'{r["집행률"]:.1f}%')
             body.append(
-                f'<tr><td class="l m">{r["매체"]}</td>'
+                f'<tr><td class="l m"><span class="br-ind">{r["매체"]}</span></td>'
                 f'<td class="l"><span class="cp-tag {VTAG.get(r["판정"], "hold")}">{r["판정"]}</span></td>'
                 f'<td>{_cp_won(r["집행"])}</td><td>{pct}</td>'
                 f'<td>{_cp_won(r["예산"])}</td><td class="m">{_cp_won(r["수정 예산"])}</td>'
                 f'<td>{fmt_move(r["조정액"])}</td></tr>')
-        body.append(
-            f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
-            f'<td>{_cp_won(sub["집행"].sum())}</td><td></td>'
-            f'<td>{_cp_won(sub["예산"].sum())}</td><td>{_cp_won(sub["수정 예산"].sum())}</td>'
-            f'<td>{fmt_move(sub["조정액"].sum())}</td></tr>')
-        html = (f'<div class="cp-wrap"><div class="br-sec">{scope_name}</div>'
-                f'<table class="cp-tbl"><thead><tr>{th}</tr></thead>'
-                f'<tbody>{"".join(body)}</tbody></table></div>')
-        return html, float(sub["조정액"].sum())
+    body.append(
+        f'<tr class="cp-tot"><td class="l" colspan="2">전체 합계</td>'
+        f'<td>{_cp_won(adj["집행"].sum())}</td><td></td>'
+        f'<td>{_cp_won(adj["예산"].sum())}</td><td>{_cp_won(adj["수정 예산"].sum())}</td>'
+        f'<td>{fmt_move(adj["조정액"].sum())}</td></tr>')
 
-    html_own, bal_own = scope_table("자사몰")
-    html_ext, bal_ext = scope_table("외부몰")
-    balance = bal_own + bal_ext
+    balance = float(adj["조정액"].sum())
     up_sum = adj[adj["조정액"] > 0]["조정액"].sum()
     dn_sum = -adj[adj["조정액"] < 0]["조정액"].sum()
     ok = abs(balance) < 1
 
-    st.markdown(CP_CSS + BR_CSS + html_own + html_ext, unsafe_allow_html=True)
     st.markdown(
-        f'<div class="cp-wrap"><div class="br-bal {"ok" if ok else "bad"}">'
+        CP_CSS + BR_CSS
+        + f'<div class="cp-wrap"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
+        + f'<tbody>{"".join(body)}</tbody></table></div>'
+        + f'<div class="cp-wrap"><div class="br-bal {"ok" if ok else "bad"}">'
         f'<div><div class="l1">BALANCE</div><div class="l2">'
         f'증액 +{up_sum:,.0f}원 · 감액 −{dn_sum:,.0f}원 → '
         f'{"총예산 변동 없음" if ok else f"차액 {balance:+,.0f}원"}</div></div>'
@@ -8765,7 +8750,8 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             st.success(f"{n}건 기록했습니다. 7일 뒤 채널 퍼널 리포트에서 자동 회고됩니다.")
             st.cache_data.clear()
 
-    st.markdown(FUNNEL_V4_CSS + _channel_mix_panel(channel_mix), unsafe_allow_html=True)
+    with st.expander("📊 연간 채널 믹스 (매체별 연간 예산 비중)"):
+        st.markdown(FUNNEL_V4_CSS + _channel_mix_panel(channel_mix), unsafe_allow_html=True)
 
     st.markdown(
         '<div class="cp-wrap"><div class="cp-note">'
@@ -8797,6 +8783,8 @@ BR_CSS = """
 .br-chip.up{background:#EAF7D9;color:#3F6B12;border:1px solid #B7DE7E}
 .br-chip.dn{background:#FDEDE3;color:#9A4B14;border:1px solid #E9C0A0}
 .br-sec{font-size:13px;font-weight:800;color:#14181F;margin:18px 0 7px;letter-spacing:-.01em}
+.br-sub td{background:#EFEDE8;font-weight:800;font-size:12.5px;border-top:1px solid #DDD9D1}
+.br-ind{padding-left:12px;display:inline-block}
 </style>
 """
 
