@@ -6234,6 +6234,7 @@ def _v4_row_ret(name, r, cost, extra_cls=""):
     핵심 지표: 재구매 건수 · 재구매 매출 · 재구매 ROAS · 방문→재구매 전환율."""
     users = float(r["users"] or 0)
     ret = float(r["ret"] or 0)
+    new = float(r["new"] or 0)
     conv = float(r.get("ret_conv", 0) or 0)
     rev = float(r.get("ret_rev", 0) or 0)
     share = (ret / users * 100) if users else 0
@@ -6248,6 +6249,7 @@ def _v4_row_ret(name, r, cost, extra_cls=""):
         f'<tr class="{extra_cls}"><td class="l">{name}</td>'
         f'<td data-v="{users:.0f}">{_v4_num(users)}</td>'
         f'<td data-v="{ret:.0f}">{_v4_num(ret)}</td>'
+        f'<td data-v="{new:.0f}">{_v4_num(new)}</td>'
         f'<td data-v="{share:.2f}"><span class="fv4-bk-share">{share:.1f}%</span></td>'
         f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
         f'<td data-v="{buy_rate:.3f}">{buy_rate:.2f}%</td>'
@@ -6258,10 +6260,10 @@ def _v4_row_ret(name, r, cost, extra_cls=""):
         f'<td data-v="{roas if roas else -1:.2f}">{roas_txt}</td>')
 
 
-HEAD_NEW = ["채널", "총 사용자", "신규 사용자", "신규 비율", "회원가입", "가입률",
+HEAD_NEW = ["채널", "총 방문자", "신규 방문자", "신규 비율", "회원가입", "가입률",
             "첫구매", "첫구매율", "신규 매출", "광고비", "가입 CAC", "첫구매 CAC",
             "신규 ROAS", "판정"]
-HEAD_RET = ["채널", "총 사용자", "재방문 사용자", "재방문 비율", "재구매", "재구매율",
+HEAD_RET = ["채널", "총 방문자", "재방문자", "신규 방문자", "재방문 비율", "재구매", "재구매율",
             "재구매 매출", "객단가", "광고비", "재구매 CAC", "재구매 ROAS", "판정"]
 
 
@@ -9490,10 +9492,10 @@ def render_ga_channel_funnel_page(
     etc_p = bucket_share["기타"] / bucket_total * 100
     st.markdown(
         '<div class="fv4-wrap"><div class="fv4-kpis">'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 유입</div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 방문자</div>'
         f'<div class="fv4-kpi-value">{users_now:,.0f}{_v4_delta_html(users_now, users_prev)}</div>'
-        f'<div class="fv4-kpi-sub">명</div></div>'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">신규 유입</div>'
+        f'<div class="fv4-kpi-sub">일별 합계 · 중복 방문 포함</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">신규 방문자</div>'
         f'<div class="fv4-kpi-value">{new_now:,.0f}{_v4_delta_html(new_now, new_prev)}</div>'
         f'<div class="fv4-kpi-sub">{new_ratio:.1f}%</div></div>'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">GA 구매</div>'
@@ -9627,7 +9629,10 @@ def render_ga_channel_funnel_page(
             + '<div class="fv4-sec">채널 대분류</div>'
             + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위 고정입니다. '
               '광고비는 신규·재방문으로 나눌 수 없어 <b>전액 기준</b>이라, '
-              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.</div>'
+              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.<br>'
+              '<b>방문자 수는 날짜별 합계</b>라 GA4 보고서의 총 사용자보다 큽니다 — '
+              '한 사람이 사흘에 걸쳐 오면 GA는 1명, 여기서는 3명으로 셉니다. '
+              '기간 내 순수 사용자 수는 GA4 보고서에서 확인하세요.</div>'
             + build_table("fvtblA", head, brows_sum, brows)
             + '<div class="fv4-sec">광고 매체별 상세</div>'
             + '<div class="fv4-bk-cap">위 표의 <b>광고</b> 줄을 매체로 쪼갠 것입니다 — '
