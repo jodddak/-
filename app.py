@@ -7888,8 +7888,9 @@ def _cp_month_budget(channel_mix: pd.DataFrame, ref: date,
         for c in ("year", "month"):
             b[c] = pd.to_numeric(b.get(c), errors="coerce")
         b = b[(b.get("scope") == scope) & (b["year"] == ref.year) & (b["month"] == ref.month)]
-        b = b[~b["channel"].astype(str).str.startswith("__")]
-        b = b[b["channel"].astype(str) != "TOTAL"]
+        _ch = b["channel"].astype(str)
+        b = b[(~_ch.str.startswith("__")) & (_ch != "TOTAL")
+              & (~_ch.str.contains(BUDGET_HARD_EXCLUDE_RE))]
         if not b.empty:
             return {str(r["channel"]): float(r["budget_cost"] or 0) for _, r in b.iterrows()}
 
@@ -8249,7 +8250,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "GA구매": g["conv"], "GA매출": g["rev"],
             "GA ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
             "월예산": budget,
-            "집행률": (cost / budget * 100) if budget > 0 else None,
+            "예산 소진율": (cost / budget * 100) if budget > 0 else None,
             "_src": sp.get("source", ""), "_order": int(r.get("sort_order") or 100),
         })
     df = pd.DataFrame(recs)
@@ -8257,7 +8258,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # ── 상단 KPI ─────────────────────────────────────────
     tot_cost = df["비용"].sum()
     tot_budget = df["월예산"].sum()
-    # 월 집행률은 '이번 달 예산 대비 지금까지 쓴 비율'이다. 기간이 얼마나 지났는지와 나란히 봐야
+    # 월 예산 소진율은 '이번 달 예산 대비 지금까지 쓴 비율'이다. 기간이 얼마나 지났는지와 나란히 봐야
     # 과속/저속을 판단할 수 있어서, 경과율을 같은 칸에 눈금으로 같이 그린다.
     ref_m = start.replace(day=1)
     last_day = (ref_m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
@@ -8296,7 +8297,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
 
     # ── 표 ───────────────────────────────────────────────
-    heads = ["구분", "매체", "노출", "클릭", "총비용(VAT 포함)", "GA 구매", "GA 매출", "GA ROAS", "월 예산", "집행률"]
+    heads = ["구분", "매체", "노출", "클릭", "총비용(VAT 포함)", "GA 구매", "GA 매출", "GA ROAS", "월 예산", "예산 소진율"]
     th = "".join(
         f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}<span class="cp-ar">&#8645;</span></th>'
         for h in heads)
@@ -8307,13 +8308,13 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                   if r["GA ROAS"] is None or pd.isna(r["GA ROAS"])
                   else f'{r["GA ROAS"]:,.1f}%')
         bud = _cp_won(r["월예산"]) if r["월예산"] > 0 else '<span class="cp-mute">미배정</span>'
-        if r["집행률"] is None or pd.isna(r["집행률"]):
+        if r["예산 소진율"] is None or pd.isna(r["예산 소진율"]):
             pace_v = '<span class="cp-mute">—</span>'
         else:
-            cls = "cp-pill" if r["집행률"] <= 110 else "cp-pill warn"
-            if r["집행률"] == 0:
+            cls = "cp-pill" if r["예산 소진율"] <= 110 else "cp-pill warn"
+            if r["예산 소진율"] == 0:
                 cls = "cp-pill zero"
-            pace_v = f'<span class="{cls}">{r["집행률"]:.1f}%</span>'
+            pace_v = f'<span class="{cls}">{r["예산 소진율"]:.1f}%</span>'
         src = AD_SPEND_SOURCE_LABEL.get(r["_src"], "")
         sub = f'<div class="sub">{src}</div>' if src else ""
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
@@ -8327,7 +8328,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             f'<td data-v="{r["GA매출"]:.0f}">{_cp_won(r["GA매출"])}</td>'
             f'<td data-v="{nn(r["GA ROAS"]):.2f}">{roas_v}</td>'
             f'<td data-v="{r["월예산"]:.0f}">{bud}</td>'
-            f'<td data-v="{nn(r["집행률"]):.2f}">{pace_v}</td></tr>')
+            f'<td data-v="{nn(r["예산 소진율"]):.2f}">{pace_v}</td></tr>')
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{view["GA매출"].sum() / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
@@ -8527,15 +8528,16 @@ def _br_ratio_actual(budget: pd.DataFrame, year: int, scope: str = "자사몰"):
     if b.empty:
         return None, None, None
     rev = b[b["channel"] == BUDGET_SENTINEL_ACTUAL_REVENUE]["budget_cost"].sum()
-    spend = b[(~b["channel"].astype(str).str.startswith("__"))
-              & (b["channel"].astype(str) != "TOTAL")]["budget_cost"].sum()
+    _c = b["channel"].astype(str)
+    spend = b[(~_c.str.startswith("__")) & (_c != "TOTAL")
+              & (~_c.str.contains(BUDGET_HARD_EXCLUDE_RE))]["budget_cost"].sum()
     # 실매출이 입력된 달까지만 비교해야 비율이 안 왜곡된다
     months = sorted(b[(b["channel"] == BUDGET_SENTINEL_ACTUAL_REVENUE)
                       & (b["budget_cost"] > 0)]["month"].unique())
     if months:
-        spend = b[(b["month"].isin(months))
-                  & (~b["channel"].astype(str).str.startswith("__"))
-                  & (b["channel"].astype(str) != "TOTAL")]["budget_cost"].sum()
+        spend = b[(b["month"].isin(months)) & (~_c.str.startswith("__"))
+                  & (_c != "TOTAL")
+                  & (~_c.str.contains(BUDGET_HARD_EXCLUDE_RE))]["budget_cost"].sum()
     return (spend / rev if rev else None), spend, rev
 
 
@@ -8564,8 +8566,12 @@ def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰")
                     '최신 것만 썼습니다. 예산 파일을 다시 올리면 깔끔해집니다.</div>')
 
     rev = b[b["channel"] == BUDGET_SENTINEL_ACTUAL_REVENUE].set_index("month")["budget_cost"]
-    media = b[(~b["channel"].astype(str).str.startswith("__"))
-              & (b["channel"].astype(str) != "TOTAL")]
+    # 예전 파서로 저장된 데이터에는 '잔여 광고비 (7월~12월)', '매출 달성율' 같은 요약 줄이
+    # 매체로 섞여 있다. 그대로 더하면 연간 총액이 실제의 1.5배가 된다.
+    # 파일을 다시 안 올려도 되도록 그릴 때 한 번 더 걸러낸다.
+    ch = b["channel"].astype(str)
+    media = b[(~ch.str.startswith("__")) & (ch != "TOTAL")
+              & (~ch.str.contains(BUDGET_HARD_EXCLUDE_RE))]
     if media.empty:
         return '<div class="cp-note">매체별 예산 데이터가 없습니다.</div>'
 
@@ -8663,7 +8669,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         rows.append({
             "매체": r["media"], "구분": r.get("scope", "자사몰"),
             "집행": cost, "예산": bud,
-            "집행률": (cost / bud * 100) if bud > 0 else None,
+            "예산 소진율": (cost / bud * 100) if bud > 0 else None,
             "ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
             "출처": src,
             # 계약 저장 전이라 출처가 아직 안 붙었어도, 정액 상품이면 조정 대상이 아니다.
@@ -8743,12 +8749,12 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
     # ── 표 ② 이번 달 매체별 집행 현황 ─────────────────────
     st.markdown(f"#### {ref.month}월 매체별 집행 현황")
     st.caption(
-        f"{ref.month}/1~{end.month}/{end.day} 기준 · 전체 집행률 {pace:.1f}% (기간 경과 {elapsed:.0f}%)"
+        f"{ref.month}/1~{end.month}/{end.day} 기준 · 전체 예산 소진율 {pace:.1f}% (기간 경과 {elapsed:.0f}%)"
     )
     VTAG = {"증액": "up", "감액": "down", "유지": "keep",
             "계약 고정": "hold", "판단 보류": "hold",
             "판단 제외": "skip", "예산 없음": "skip"}
-    heads = ["매체", "판정", "월 예산", "집행", "집행률", "남은 예산", "GA ROAS"]
+    heads = ["매체", "판정", "월 예산", "집행", "예산 소진율", "남은 예산", "GA ROAS"]
     th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
     body = []
     for scope_name in ["자사몰", "외부몰"]:
@@ -8763,7 +8769,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
             f'<td>{_cp_won(s_b - s_c)}</td><td></td></tr>')
         for _, r in sub.sort_values("집행", ascending=False).iterrows():
             pct = ('<span class="cp-mute">—</span>'
-                   if r["집행률"] is None or pd.isna(r["집행률"]) else f'{r["집행률"]:.1f}%')
+                   if r["예산 소진율"] is None or pd.isna(r["예산 소진율"]) else f'{r["예산 소진율"]:.1f}%')
             roas = ('<span class="cp-mute">—</span>'
                     if r["ROAS"] is None or pd.isna(r["ROAS"]) else f'{r["ROAS"]:,.0f}%')
             body.append(
