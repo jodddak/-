@@ -8540,55 +8540,95 @@ def _br_ratio_actual(budget: pd.DataFrame, year: int, scope: str = "자사몰"):
 
 
 def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰") -> str:
-    """26년 월별×매체별 예산표. 예산 파일의 '매체 세부내역' 블록을 그대로 옮긴 화면.
+    """연도별 월×매체 예산표. 예산 파일의 '매체 세부내역' 블록을 그대로 옮긴 화면.
 
-    금액을 원 단위로 14칸에 늘어놓으면 읽을 수가 없어서 파일과 같은 '천원' 단위로 줄인다.
-    이번 달 열은 색을 다르게 해서 눈이 바로 가게 한다.
+    같은 (매체, 월)이 두 번 들어오면 합쳐져서 금액이 배로 부푼다. 파일을 여러 번 올리거나
+    예전 업로드분이 남아 있으면 실제로 그런 일이 생겨서, 그릴 때 중복을 먼저 걷어낸다.
     """
     if budget is None or budget.empty or "budget_cost" not in budget.columns:
         return '<div class="cp-note">연간 예산 파일을 올리면 표시됩니다.</div>'
     b = budget.copy()
     for c in ("year", "month"):
         b[c] = pd.to_numeric(b.get(c), errors="coerce")
-    b = b[(b.get("scope") == scope) & (b["year"] == year) & (b["month"].between(1, 12))]
-    b = b[~b["channel"].astype(str).str.startswith("__")]
-    b = b[~b["channel"].astype(str).isin(["TOTAL"])]
+    # month 0 = 파일의 'TOTAL' 열, -1 = '당월 누계' 열. 촬영샘플·잔여비용은 월별로 안 나뉘고
+    # TOTAL에만 값이 있어서, 월 합계만 보면 이 둘이 통째로 사라진다.
+    b = b[(b.get("scope") == scope) & (b["year"] == year) & (b["month"].between(0, 12))]
     if b.empty:
         return '<div class="cp-note">해당 연도 예산 데이터가 없습니다.</div>'
 
-    piv = b.pivot_table(index="channel", columns="month", values="budget_cost",
-                        aggfunc="sum", fill_value=0)
-    for m in range(1, 13):
+    dup_note = ""
+    n_before = len(b)
+    b = b.drop_duplicates(subset=["channel", "month"], keep="last")
+    if len(b) < n_before:
+        dup_note = (f'<div class="br-warn">같은 매체·월 데이터가 {n_before - len(b)}건 중복돼 있어 '
+                    '최신 것만 썼습니다. 예산 파일을 다시 올리면 깔끔해집니다.</div>')
+
+    rev = b[b["channel"] == BUDGET_SENTINEL_ACTUAL_REVENUE].set_index("month")["budget_cost"]
+    media = b[(~b["channel"].astype(str).str.startswith("__"))
+              & (b["channel"].astype(str) != "TOTAL")]
+    if media.empty:
+        return '<div class="cp-note">매체별 예산 데이터가 없습니다.</div>'
+
+    piv = media.pivot_table(index="channel", columns="month", values="budget_cost",
+                            aggfunc="sum", fill_value=0)
+    for m in range(0, 13):
         if m not in piv.columns:
             piv[m] = 0
     piv = piv[sorted(piv.columns)]
-    piv["TOTAL"] = piv[list(range(1, 13))].sum(axis=1)
+    # TOTAL은 파일에 적힌 값(0열)을 그대로 쓴다. 월 합계로 계산하면 월별 배분이 없는
+    # 항목(촬영샘플·잔여비용)이 0이 되어 연간 총액이 안 맞는다.
+    month_sum = piv[list(range(1, 13))].sum(axis=1)
+    piv["TOTAL"] = np.where(piv[0] > 0, piv[0], month_sum)
     piv["누계"] = piv[[m for m in range(1, ref_month + 1)]].sum(axis=1)
     piv = piv[piv["TOTAL"] > 0].sort_values("TOTAL", ascending=False)
 
-    def k(v):  # 천원
-        return f"{v/1000:,.0f}" if v else '<span class="cp-mute">-</span>'
+    def w(v):
+        return f"{v:,.0f}" if v else '<span class="cp-mute">-</span>'
 
     heads = (['<th class="l">매체</th>', "<th>TOTAL</th>", f"<th>~{ref_month}월 누계</th>"]
              + [f'<th class="{"br-now" if m == ref_month else ""}">{m}월</th>'
                 for m in range(1, 13)])
-    rows = []
+    tot = piv.sum()
+
+    # 광고비 비율(광고비 ÷ 실매출)은 예산 파일의 회사 목표(14%)와 직접 비교되는 줄이라 맨 위에 둔다.
+    ratio_cells = ""
+    for m in range(1, 13):
+        r = float(rev.get(m, 0) or 0)
+        val = (tot[m] / r * 100) if r > 0 else None
+        cls = "br-now" if m == ref_month else ""
+        if val is None:
+            ratio_cells += f'<td class="{cls}"><span class="cp-mute">-</span></td>'
+        else:
+            over = " br-over" if val > BR_AD_RATIO_TARGET * 100 else ""
+            ratio_cells += f'<td class="{cls}{over}">{val:.1f}%</td>'
+    rev_done = float(rev[rev > 0].sum()) if len(rev) else 0
+    spend_done = float(sum(tot[m] for m in range(1, 13) if float(rev.get(m, 0) or 0) > 0))
+    ratio_all = (spend_done / rev_done * 100) if rev_done > 0 else None
+    rows = [f'<tr class="br-ratio-row"><td class="l">광고비 비율 '
+            f'<span class="br-tiny">목표 {BR_AD_RATIO_TARGET*100:.0f}%</span></td>'
+            f'<td class="m">{f"{ratio_all:.1f}%" if ratio_all else "-"}</td>'
+            f'<td><span class="cp-mute">-</span></td>{ratio_cells}</tr>']
+
     for ch, r in piv.iterrows():
         cells = "".join(
-            f'<td class="{"br-now" if m == ref_month else ""}">{k(r[m])}</td>'
+            f'<td class="{"br-now" if m == ref_month else ""}">{w(r[m])}</td>'
             for m in range(1, 13))
         rows.append(f'<tr><td class="l m">{ch}</td>'
-                    f'<td class="m">{k(r["TOTAL"])}</td><td>{k(r["누계"])}</td>{cells}</tr>')
-    tot = piv.sum()
+                    f'<td class="m">{w(r["TOTAL"])}</td><td>{w(r["누계"])}</td>{cells}</tr>')
     rows.append(
         '<tr class="cp-tot"><td class="l">합계</td>'
-        f'<td>{k(tot["TOTAL"])}</td><td>{k(tot["누계"])}</td>'
-        + "".join(f'<td class="{"br-now" if m == ref_month else ""}">{k(tot[m])}</td>'
+        f'<td>{w(tot["TOTAL"])}</td><td>{w(tot["누계"])}</td>'
+        + "".join(f'<td class="{"br-now" if m == ref_month else ""}">{w(tot[m])}</td>'
                   for m in range(1, 13)) + "</tr>")
-    return (f'<table class="cp-tbl br-matrix"><thead><tr>{"".join(heads)}</tr></thead>'
-            f'<tbody>{"".join(rows)}</tbody></table>'
-            '<div class="cp-note">단위: 천원 (VAT 포함) · 파란 열이 이번 달입니다 · '
-            f'{year}년 {scope} 기준</div>')
+
+    return (dup_note
+            + '<div class="br-scroll">'
+            f'<table class="cp-tbl br-matrix"><thead><tr>{"".join(heads)}</tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>'
+            '<div class="cp-note">단위: 원 (VAT 포함) · 파란 열이 이번 달입니다 · '
+            f'{year}년 {scope} 기준 · 광고비 비율이 목표({BR_AD_RATIO_TARGET*100:.0f}%)를 '
+            '넘는 달은 붉게 표시됩니다.</div>')
+
 
 
 def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
@@ -8776,10 +8816,16 @@ BR_CSS = """
 .br-chip.dn{background:#FDEDE3;color:#9A4B14;border:1px solid #E9C0A0}
 .br-sec{font-size:13px;font-weight:800;color:#14181F;margin:18px 0 7px;letter-spacing:-.01em}
 .br-sub td{background:#EFEDE8;font-weight:800;font-size:12.5px;border-top:1px solid #DDD9D1}
-.br-matrix{font-size:11.5px}
-.br-matrix th,.br-matrix td{padding:7px 8px}
+.br-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.br-matrix{font-size:11px;min-width:1180px}
+.br-matrix th,.br-matrix td{padding:6px 7px;white-space:nowrap}
 .br-now{background:#EAF1FD !important;font-weight:800}
 th.br-now{background:#DCE8FA !important;color:#2C4E86}
+.br-ratio-row td{background:#FAF8F2;font-weight:800;border-bottom:2px solid #E3E1DC}
+.br-ratio-row td.br-over{color:#B0431A}
+.br-tiny{font-size:9.5px;color:#9AA0A8;font-weight:600;margin-left:5px}
+.br-warn{background:#FDEDE3;color:#9A4B14;border-radius:8px;padding:9px 13px;
+  font-size:12px;margin-bottom:10px}
 .br-ind{padding-left:12px;display:inline-block}
 </style>
 """
