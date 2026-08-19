@@ -5768,20 +5768,33 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     모양(날짜×소스매체 1행, new_users/returning_users 컬럼)으로 바꾼다. 이렇게 해두면 기존
     집계 함수들(_ga_visits_by_channel, classify_ga_bucket 등)을 그대로 재사용할 수 있다."""
     cols = ["report_date", "source_medium", "channel", "users", "new_users",
-            "returning_users", "sessions", "signups", "conversions", "revenue"]
+            "returning_users", "sessions", "signups", "conversions", "revenue",
+            "new_signups", "new_conv", "new_rev", "ret_conv", "ret_rev"]
     if ga_daily is None or ga_daily.empty:
         return pd.DataFrame(columns=cols)
     g = ga_daily.copy()
     g["report_date"] = pd.to_datetime(g["report_date"]).dt.date
     for c in ["users", "sessions", "conversions", "revenue", "signups"]:
         g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0)
-    g["new_users"] = np.where(g["user_type"] == "신규", g["users"], 0)
-    g["returning_users"] = np.where(g["user_type"] == "재방문", g["users"], 0)
+    # 목적축(신규 발굴 / 매출 확보)마다 봐야 할 숫자가 다르다. 사용자만 쪼개고 구매·매출을
+    # 합쳐버리면 두 탭이 똑같은 표가 되어버리므로, 구매·매출·가입도 유형별로 나눠 들고 간다.
+    is_new = g["user_type"] == "신규"
+    is_ret = g["user_type"] == "재방문"
+    g["new_users"] = np.where(is_new, g["users"], 0)
+    g["returning_users"] = np.where(is_ret, g["users"], 0)
+    g["new_signups"] = np.where(is_new, g["signups"], 0)
+    g["new_conv"] = np.where(is_new, g["conversions"], 0)
+    g["new_rev"] = np.where(is_new, g["revenue"], 0)
+    g["ret_conv"] = np.where(is_ret, g["conversions"], 0)
+    g["ret_rev"] = np.where(is_ret, g["revenue"], 0)
     out = g.groupby(["report_date", "source_medium"], as_index=False).agg(
         channel=("channel", "first"), users=("users", "sum"), new_users=("new_users", "sum"),
         returning_users=("returning_users", "sum"), sessions=("sessions", "sum"),
         signups=("signups", "sum"),
         conversions=("conversions", "sum"), revenue=("revenue", "sum"),
+        new_signups=("new_signups", "sum"),
+        new_conv=("new_conv", "sum"), new_rev=("new_rev", "sum"),
+        ret_conv=("ret_conv", "sum"), ret_rev=("ret_rev", "sum"),
     )
     return out[cols]
 
@@ -6007,7 +6020,8 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
     위 소계표와 아래 매체표가 같은 원본·같은 방식이어야 '광고' 줄 합계와 매체 합계가 맞는다.
     신규/재방문을 둘 다 담아두고, 어느 걸 앞에 세울지는 그리는 쪽에서 정한다.
     """
-    cols = ["key", "users", "new", "ret", "signup", "conv", "rev"]
+    cols = ["key", "users", "new", "ret", "signup",
+            "new_conv", "new_rev", "ret_conv", "ret_rev", "conv", "rev"]
     empty = pd.DataFrame(columns=cols)
     if ga_inflow is None or ga_inflow.empty:
         return empty, empty
@@ -6017,16 +6031,32 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
     if g.empty:
         return empty, empty
 
-    for c in ("users", "new_users", "returning_users", "signups", "conversions", "revenue"):
+    need = ("users", "new_users", "returning_users", "signups", "conversions", "revenue",
+            "new_signups", "new_conv", "new_rev", "ret_conv", "ret_rev")
+    for c in need:
         if c not in g.columns:
             g[c] = 0
         g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0)
+    # 엑셀로 올린 옛 데이터에는 유형별 구매·매출이 없다. 그럴 땐 사용자 비율로 나눠
+    # 근사치를 쓰되, 화면 각주에 '추정'이라고 밝힌다.
+    miss = (g[["new_conv", "ret_conv", "new_rev", "ret_rev"]].sum(axis=1) == 0) & \
+           (g["conversions"] + g["revenue"] > 0)
+    if miss.any():
+        share = np.where(g["users"] > 0, g["new_users"] / g["users"].replace(0, np.nan), 0)
+        share = pd.Series(share, index=g.index).fillna(0)
+        g.loc[miss, "new_conv"] = g.loc[miss, "conversions"] * share[miss]
+        g.loc[miss, "ret_conv"] = g.loc[miss, "conversions"] * (1 - share[miss])
+        g.loc[miss, "new_rev"] = g.loc[miss, "revenue"] * share[miss]
+        g.loc[miss, "ret_rev"] = g.loc[miss, "revenue"] * (1 - share[miss])
     g["_bucket"] = g.apply(classify_ga_bucket, axis=1)
 
     def fold(df, key):
         out = df.groupby(key, as_index=False).agg(
             users=("users", "sum"), new=("new_users", "sum"),
-            ret=("returning_users", "sum"), signup=("signups", "sum"),
+            ret=("returning_users", "sum"),
+            signup=("new_signups", "sum") if "new_signups" in df.columns else ("signups", "sum"),
+            new_conv=("new_conv", "sum"), new_rev=("new_rev", "sum"),
+            ret_conv=("ret_conv", "sum"), ret_rev=("ret_rev", "sum"),
             conv=("conversions", "sum"), rev=("revenue", "sum"))
         return out.rename(columns={key: "key"})
 
@@ -6037,29 +6067,69 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
     return buckets, media
 
 
-def _v4_ga_row_html(name, r, is_new, extra="", cls=""):
-    """대분류 줄과 매체 줄을 같은 컬럼 구성으로 그린다.
-
-    신규 발굴이면 [총 사용자 · 신규 · 재방문 · 신규 비율], 매출 확보면 순서를 뒤집는다.
-    비율은 '그 매체 안에서의 비율'이다 — 이 매체가 신규를 데려오는 곳인지 재방문을 다시
-    부르는 곳인지가 바로 보인다.
-    """
+def _v4_row_new(name, r, cost, extra_cls=""):
+    """신규 고객 발굴 표의 한 줄.
+    핵심 지표: 신규가입 수 · 신규가입 CAC · 신규 첫구매 CAC · 신규 ROAS."""
     users = float(r["users"] or 0)
-    a, b = (r["new"], r["ret"]) if is_new else (r["ret"], r["new"])
-    share = (float(a) / users * 100) if users else 0
-    cvr = (float(r["conv"]) / users * 100) if users else 0
-    sign = f'<td>{_v4_num(r.get("signup", 0))}</td>' if is_new else ""
+    new = float(r["new"] or 0)
+    sign = float(r.get("signup", 0) or 0)
+    conv = float(r.get("new_conv", 0) or 0)
+    rev = float(r.get("new_rev", 0) or 0)
+    share = (new / users * 100) if users else 0
+    sign_rate = (sign / new * 100) if new else 0
+    buy_rate = (conv / new * 100) if new else 0
+    cac_sign = (cost / sign) if sign else None
+    cac_buy = (cost / conv) if conv else None
+    roas = (rev / cost * 100) if cost > 0 else None
+    n = lambda v: f'<span class="fv4-na">—</span>' if v is None else f'\u20a9{v:,.0f}'
     return (
-        f'<tr class="{cls}"><td class="l">{name}</td>'
+        f'<tr class="{extra_cls}"><td class="l">{name}</td>'
         f'<td data-v="{users:.0f}">{_v4_num(users)}</td>'
-        f'<td data-v="{float(a):.0f}">{_v4_num(a)}</td>'
-        f'<td data-v="{float(b):.0f}">{_v4_num(b)}</td>'
+        f'<td data-v="{new:.0f}">{_v4_num(new)}</td>'
         f'<td data-v="{share:.2f}"><span class="fv4-bk-share">{share:.1f}%</span></td>'
-        + (f'<td data-v="{float(r.get("signup", 0)):.0f}">{_v4_num(r.get("signup", 0))}</td>'
-           if is_new else "")
-        + f'<td data-v="{float(r["conv"]):.0f}">{_v4_num(r["conv"])}</td>'
-        f'<td data-v="{float(r["rev"]):.0f}">\u20a9{r["rev"]:,.0f}</td>'
-        f'<td data-v="{cvr:.3f}">{cvr:.2f}%</td>{extra}</tr>')
+        f'<td data-v="{sign:.0f}">{_v4_num(sign)}</td>'
+        f'<td data-v="{sign_rate:.3f}">{sign_rate:.2f}%</td>'
+        f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
+        f'<td data-v="{buy_rate:.3f}">{buy_rate:.2f}%</td>'
+        f'<td data-v="{rev:.0f}">\u20a9{rev:,.0f}</td>'
+        f'<td data-v="{cost:.0f}">\u20a9{cost:,.0f}</td>'
+        f'<td data-v="{cac_sign if cac_sign else -1:.0f}">{n(cac_sign)}</td>'
+        f'<td data-v="{cac_buy if cac_buy else -1:.0f}">{n(cac_buy)}</td>'
+        f'<td data-v="{roas if roas else -1:.2f}">{roas_txt}</td>')
+
+
+def _v4_row_ret(name, r, cost, extra_cls=""):
+    """매출 확보 표의 한 줄.
+    핵심 지표: 재구매 건수 · 재구매 매출 · 재구매 ROAS · 방문→재구매 전환율."""
+    users = float(r["users"] or 0)
+    ret = float(r["ret"] or 0)
+    conv = float(r.get("ret_conv", 0) or 0)
+    rev = float(r.get("ret_rev", 0) or 0)
+    share = (ret / users * 100) if users else 0
+    buy_rate = (conv / ret * 100) if ret else 0
+    aov = (rev / conv) if conv else None
+    cac = (cost / conv) if conv else None
+    roas = (rev / cost * 100) if cost > 0 else None
+    n = lambda v: f'<span class="fv4-na">—</span>' if v is None else f'\u20a9{v:,.0f}'
+    return (
+        f'<tr class="{extra_cls}"><td class="l">{name}</td>'
+        f'<td data-v="{users:.0f}">{_v4_num(users)}</td>'
+        f'<td data-v="{ret:.0f}">{_v4_num(ret)}</td>'
+        f'<td data-v="{share:.2f}"><span class="fv4-bk-share">{share:.1f}%</span></td>'
+        f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
+        f'<td data-v="{buy_rate:.3f}">{buy_rate:.2f}%</td>'
+        f'<td data-v="{rev:.0f}">\u20a9{rev:,.0f}</td>'
+        f'<td data-v="{aov if aov else -1:.0f}">{n(aov)}</td>'
+        f'<td data-v="{cost:.0f}">\u20a9{cost:,.0f}</td>'
+        f'<td data-v="{cac if cac else -1:.0f}">{n(cac)}</td>'
+        f'<td data-v="{roas if roas else -1:.2f}">{roas_txt}</td>')
+
+
+HEAD_NEW = ["채널", "총 사용자", "신규 사용자", "신규 비율", "회원가입", "가입률",
+            "첫구매", "첫구매율", "신규 매출", "광고비", "가입 CAC", "첫구매 CAC",
+            "신규 ROAS", "판정"]
+HEAD_RET = ["채널", "총 사용자", "재방문 사용자", "재방문 비율", "재구매", "재구매율",
+            "재구매 매출", "객단가", "광고비", "재구매 CAC", "재구매 ROAS", "판정"]
 
 
 def _v4_funnel_html(stages: list, benchmarks: dict) -> str:
@@ -9108,40 +9178,36 @@ def render_ga_channel_funnel_page(
         ad_media = list(media["key"])
         agg_sp = lambda col: sum(float(spend_map.get(c, {}).get(col, 0) or 0) for c in ad_media)
         ad_imp, ad_clk, ad_cost = agg_sp("impressions"), agg_sp("clicks"), agg_sp("cost_incl_vat")
-        fx = (lambda r: r["new"]) if is_new else (lambda r: r["ret"])
 
         if is_new:
             stages = [
                 ("노출", ad_imp), ("클릭", ad_clk),
                 ("신규 방문", float(ad_row["new"]) if ad_row is not None else 0),
                 ("회원가입", float(ad_row["signup"]) if ad_row is not None else 0),
-                ("첫구매", float(ad_row["conv"]) if ad_row is not None else 0),
+                ("첫구매", float(ad_row["new_conv"]) if ad_row is not None else 0),
             ]
             bench = FUNNEL_BENCHMARK_NEW
             badge, title = "ACQUISITION", "노출에서 첫구매까지"
-            sub = "매체 API(노출·클릭·광고비) + GA4(사용자·가입·구매)만 씁니다 — 대행사 리포트와 무관합니다."
-            head = ["채널", "총 사용자", "신규 사용자", "재방문 사용자", "신규 비율", "회원가입",
-                    "GA 구매", "GA 매출", "구매 전환율", "광고비", "GA ROAS", "판정"]
+            sub = ("신규 사용자가 가입하고 첫 구매까지 오는 구간입니다. "
+                   "매체 API(노출·클릭·광고비) + GA4(사용자·가입·구매)만 씁니다.")
+            head, rowfn = HEAD_NEW, _v4_row_new
         else:
             stages = [
                 ("재노출", ad_imp), ("재클릭", ad_clk),
                 ("재방문", float(ad_row["ret"]) if ad_row is not None else 0),
-                ("재구매", float(ad_row["conv"]) if ad_row is not None else 0),
+                ("재구매", float(ad_row["ret_conv"]) if ad_row is not None else 0),
             ]
             bench = FUNNEL_BENCHMARK_RETURN
             badge, title = "RETENTION", "재노출에서 재구매까지"
-            sub = "이미 방문한 고객이 다시 사는 구간입니다. 매체 API + GA4 기준."
-            head = ["채널", "총 사용자", "재방문 사용자", "신규 사용자", "재방문 비율",
-                    "GA 구매", "GA 매출", "구매 전환율", "광고비", "GA ROAS", "판정"]
-        ncol = len(head)
+            sub = "이미 방문한 고객이 다시 사는 구간입니다. 재구매 건수·매출·ROAS를 봅니다."
+            head, rowfn = HEAD_RET, _v4_row_ret
 
-        def money_cells(cost, rev, chip=""):
-            roas = (rev / cost * 100) if cost > 0 else None
-            return (f'<td data-v="{cost:.0f}">\u20a9{cost:,.0f}</td>'
-                    f'<td data-v="{roas if roas else -1:.2f}">'
-                    f'{f"{roas:,.0f}%" if roas else "-"}</td><td>{chip}</td>')
+        def verdict_of(r, cost):
+            rev = float(r.get("new_rev" if is_new else "ret_rev", 0) or 0)
+            roas = (rev / cost * 100) if cost > 0 else 0.0
+            return _v4_verdict(roas, cost)
 
-        # ── ① 채널 대분류 (+ 전체 합계) ──
+        # ── ① 채널 대분류 ──
         brows = []
         for b in ["광고", "자연유입", "기타"]:
             s_ = buckets[buckets["key"] == b]
@@ -9149,47 +9215,37 @@ def render_ga_channel_funnel_page(
                 continue
             s_ = s_.iloc[0]
             if b == "광고":
-                extra = money_cells(ad_cost, float(s_["rev"]))
                 nm = f'<b>{b}</b><span class="fv4-bk-sub">{len(media)}개 매체</span>'
+                brows.append(rowfn(nm, s_, ad_cost, "fv4-bk-row") + "<td></td></tr>")
             else:
-                extra = '<td class="fv4-na">—</td><td class="fv4-na">—</td><td></td>'
                 nm = f'<b>{b}</b>'
-            brows.append(_v4_ga_row_html(nm, s_, is_new, extra, "fv4-bk-row"))
+                brows.append(rowfn(nm, s_, 0.0, "fv4-bk-row") + "<td></td></tr>")
         brows_sum = ""
         if not buckets.empty:
-            tot = buckets[["users", "new", "ret", "signup", "conv", "rev"]].sum()
-            brows_sum = _v4_ga_row_html(
-                "TOTAL", tot, is_new,
-                money_cells(ad_cost, float(tot["rev"])), "fv4-sum-row nosort")
+            tot = buckets[["users", "new", "ret", "signup", "new_conv", "new_rev",
+                           "ret_conv", "ret_rev", "conv", "rev"]].sum()
+            brows_sum = rowfn("TOTAL", tot, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
 
-        # ── ② 광고 매체별 (+ 광고 합계 — ①의 광고 줄과 같아야 한다) ──
+        # ── ② 광고 매체별 상세 ──
         mrows = []
         for _, m in media.iterrows():
             ch = m["key"]
             cost = float(spend_map.get(ch, {}).get("cost_incl_vat", 0) or 0)
-            roas = (m["rev"] / cost * 100) if cost > 0 else 0.0
-            label, cls = _v4_verdict(roas, cost)
-            chip = f'<span class="fv4-chip {cls}">{label}</span>'
-            mrows.append(_v4_ga_row_html(f'<span class="fv4-ind">{ch}</span>', m, is_new,
-                                         money_cells(cost, float(m["rev"]), chip)))
+            label, cls = verdict_of(m, cost)
+            mrows.append(rowfn(f'<span class="fv4-ind">{ch}</span>', m, cost)
+                         + f'<td><span class="fv4-chip {cls}">{label}</span></td></tr>')
         mrows_sum = ""
         if not media.empty:
-            mt = media[["users", "new", "ret", "signup", "conv", "rev"]].sum()
-            mrows_sum = _v4_ga_row_html(
-                "TOTAL", mt, is_new,
-                money_cells(ad_cost, float(mt["rev"])), "fv4-sum-row nosort")
+            mt = media[["users", "new", "ret", "signup", "new_conv", "new_rev",
+                        "ret_conv", "ret_rev", "conv", "rev"]].sum()
+            mrows_sum = rowfn("TOTAL", mt, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
 
-        # 표를 둘로 완전히 나눈다. 한 표 안에 구분선만 두면 정렬이 통으로 걸려서
-        # 대분류와 매체가 뒤섞인다. 각자 머리글·정렬·합계(TOTAL)를 갖게 한다.
-        def build_table(tid, head_labels, sum_row, data_rows, first_col):
+        def build_table(tid, head_labels, sum_row, data_rows):
             th = "".join(
-                f'<th class="{"l" if h == first_col else ""}">{h}'
+                f'<th class="{"l" if h == "채널" else ""}">{h}'
                 f'<span class="fv4-ar">&#8645;</span></th>' for h in head_labels)
             return (f'<table class="fv4-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
                     f'<tbody>{sum_row}{"".join(data_rows)}</tbody></table>')
-
-        tbl_a = build_table("fvtblA", head, brows_sum, brows, "채널")
-        tbl_b = build_table("fvtblB", head, mrows_sum, mrows, "채널")
 
         card = (
             FUNNEL_V4_CSS
@@ -9198,20 +9254,22 @@ def render_ga_channel_funnel_page(
             f'<div class="fv4-card-title">{title}</div><div class="fv4-card-sub">{sub}</div>'
             + _v4_funnel_html(stages, bench)
             + '<div class="fv4-sec">채널 대분류</div>'
-            + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위에 고정입니다.</div>'
-            + tbl_a
+            + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위 고정입니다. '
+              '광고비는 신규·재방문으로 나눌 수 없어 <b>전액 기준</b>이라, '
+              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.</div>'
+            + build_table("fvtblA", head, brows_sum, brows)
             + '<div class="fv4-sec">광고 매체별 상세</div>'
             + '<div class="fv4-bk-cap">위 표의 <b>광고</b> 줄을 매체로 쪼갠 것입니다 — '
               '아래 TOTAL이 위 <b>광고</b> 줄과 같아야 정상입니다.</div>'
-            + tbl_b + '</div></div>'
+            + build_table("fvtblB", head, mrows_sum, mrows) + '</div></div>'
             + """
 <script>
 (function(){
   function mk(id){
     var t=document.getElementById(id); if(!t) return;
     var ths=t.tHead.rows[0].cells, st={i:-1,asc:false};
-    function v(row,i){var c=row.cells[i],d=c.getAttribute('data-v');
-      return d!==null?parseFloat(d):c.innerText.trim();}
+    function v(row,i){var c=row.cells[i]; if(!c) return '';
+      var d=c.getAttribute('data-v'); return d!==null?parseFloat(d):c.innerText.trim();}
     for(var i=0;i<ths.length;i++){(function(i){
       ths[i].style.cursor='pointer';
       ths[i].onclick=function(){
@@ -9234,7 +9292,6 @@ def render_ga_channel_funnel_page(
         )
         st.components.v1.html(
             card, height=430 + 44 * (len(brows) + len(mrows) + 2), scrolling=True)
-
         st.caption(
             f"⚠ 표시는 해당 단계 전환율이 벤치마크 미만이라는 뜻입니다 · "
             f"위 퍼널의 노출·클릭·가입 출처: 대행사 리포트(캠페인 {'신규' if is_new else '리타겟'} 태그) · "
@@ -9246,18 +9303,21 @@ def render_ga_channel_funnel_page(
                 ch = m["key"]
                 sp = spend_map.get(ch, {})
                 cost = float(sp.get("cost_incl_vat", 0) or 0)
-                roas = (m["rev"] / cost * 100) if cost > 0 else 0.0
+                rev = float(m["new_rev"] if is_new else m["ret_rev"])
+                conv = float(m["new_conv"] if is_new else m["ret_conv"])
+                base = float(m["new"] if is_new else m["ret"])
+                roas = (rev / cost * 100) if cost > 0 else 0.0
                 label, _cls = _v4_verdict(roas, cost)
-                cpc = (cost / m["conv"]) if m["conv"] else 0
+                kind = "신규" if is_new else "재구매"
                 reason = (
-                    f"ROAS {roas:.0f}% (목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%), "
-                    f"광고비 {cost:,.0f}원, GA 매출 {m['rev']:,.0f}원, "
-                    f"사용자 {m['users']:,.0f}명 → 구매 {m['conv']:,.0f}건"
+                    f"{kind} ROAS {roas:.0f}% (목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%), "
+                    f"광고비 {cost:,.0f}원, {kind} 매출 {rev:,.0f}원, "
+                    f"{'신규' if is_new else '재방문'} {base:,.0f}명 → {kind} {conv:,.0f}건"
                 )
                 if is_new and m.get("signup", 0):
                     reason += f" · 가입 {m['signup']:,.0f}명 (가입 CAC {cost / m['signup']:,.0f}원)"
-                if m["conv"]:
-                    reason += f" · 구매 CAC {cpc:,.0f}원"
+                if conv:
+                    reason += f" · {kind} CAC {cost / conv:,.0f}원"
                 _src = str(sp.get("source", "") or "")
                 if _src:
                     reason += f" · 광고비 출처: {AD_SPEND_SOURCE_LABEL.get(_src, _src)}"
