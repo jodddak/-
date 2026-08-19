@@ -7770,6 +7770,53 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
     return out
 
 
+def _cp_ga_breakdown(ga_daily, master, start: date, end: date) -> pd.DataFrame:
+    """매체별로 '어떤 소스/매체를 합쳐서 만든 숫자인지' 펼쳐 보여준다.
+
+    GA4 화면에서 소스/매체 하나만 보고 대시보드와 비교하면 숫자가 안 맞는다.
+    대시보드는 UTM 매칭 규칙에 따라 여러 소스/매체를 한 매체로 묶기 때문이다
+    (예: 메타 = facebook/facebook_feed + meta/cpc + sns/cpc).
+    그 구성을 눈으로 확인할 수 있어야 '왜 다르지'로 시간을 안 뺏긴다.
+    """
+    cols = ["매체", "소스/매체", "구매", "매출"]
+    if ga_daily is None or ga_daily.empty or "source_medium" not in ga_daily.columns:
+        return pd.DataFrame(columns=cols)
+    g = ga_daily.copy()
+    g["report_date"] = pd.to_datetime(g["report_date"], errors="coerce").dt.date
+    g = g[(g["report_date"] >= start) & (g["report_date"] <= end)]
+    if g.empty:
+        return pd.DataFrame(columns=cols)
+    for c in ("conversions", "revenue"):
+        g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0)
+
+    def norm(s):
+        return "".join(str(s or "").lower().split())
+
+    exact, partial = {}, []
+    for _, m in master.sort_values("sort_order").iterrows():
+        for kw in str(m.get("utm_match") or "").split(","):
+            kw = norm(kw)
+            if kw:
+                exact.setdefault(kw, m["media"])
+                partial.append((len(kw), kw, m["media"]))
+    partial.sort(key=lambda x: -x[0])
+
+    def which(sm):
+        n = norm(sm)
+        if n in exact:
+            return exact[n]
+        for _, kw, media in partial:
+            if kw in n:
+                return media
+        return "(미매칭)"
+
+    agg = g.groupby("source_medium", as_index=False).agg(
+        구매=("conversions", "sum"), 매출=("revenue", "sum"))
+    agg["매체"] = agg["source_medium"].map(which)
+    agg = agg.rename(columns={"source_medium": "소스/매체"})
+    return agg[cols].sort_values(["매체", "매출"], ascending=[True, False])
+
+
 def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
     """기간 내 매체별 노출·클릭·광고비.
 
@@ -8421,6 +8468,31 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             )
 
     st.markdown(CP_CSS + _cp_recommendations(view, start, end), unsafe_allow_html=True)
+
+    with st.expander("🔎 GA 매출이 안 맞을 때 — 매체별 UTM 구성 보기"):
+        st.caption(
+            "GA4 화면에서 소스/매체 하나만 보고 비교하면 숫자가 안 맞습니다. "
+            "대시보드는 UTM 매칭 규칙대로 여러 소스/매체를 한 매체로 묶기 때문입니다. "
+            "아래에서 각 매체가 무엇으로 구성됐는지 확인하세요."
+        )
+        bd = _cp_ga_breakdown(ga_daily, mst, start, end)
+        if bd.empty:
+            st.info("이 기간에 GA 데이터가 없습니다.")
+        else:
+            st.dataframe(
+                bd, use_container_width=True, hide_index=True,
+                column_config={
+                    "구매": st.column_config.NumberColumn("GA 구매", format="%d"),
+                    "매출": st.column_config.NumberColumn("GA 매출", format="₩%d"),
+                },
+            )
+            un = bd[bd["매체"] == "(미매칭)"]
+            if not un.empty:
+                st.warning(
+                    f"어느 매체에도 안 걸린 소스/매체가 {len(un)}개 있습니다 "
+                    f"(매출 {un['매출'].sum():,.0f}원). 광고인데 여기 있으면 "
+                    "'⚙️ 매체 정의'의 UTM 매칭에 추가해주세요."
+                )
 
     with st.expander("🔄 광고비 다시 받기 (수치가 안 맞을 때)"):
         st.caption(
