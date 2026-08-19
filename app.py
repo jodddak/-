@@ -5109,6 +5109,11 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
     c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
+    st.caption(
+        "총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
+        "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 맞지 않습니다 "
+        "— 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다."
+    )
 
     day_label_order = kor_date_labels(fd["report_date"], "day")
     fd = fd.assign(일자=day_label_order)
@@ -5327,6 +5332,11 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
+    st.caption(
+        "총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
+        "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 맞지 않습니다 "
+        "— 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다."
+    )
 
     # 소스/매체별로 나뉜 데이터를 날짜 기준으로 다시 합쳐서(전체 소스/매체 합산) 일별 추이를 그린다.
     daily_trend = fd.groupby("report_date", as_index=False).agg(
@@ -5785,12 +5795,27 @@ def diagnose_ga4_setup() -> str:
     return "\n".join(L)
 
 
+def ga_inflow_source(ga_daily: pd.DataFrame, excel_inflow: pd.DataFrame) -> pd.DataFrame:
+    """GA 유입 화면들이 쓸 원본 한 벌. GA4 API로 받은 게 있으면 그걸 쓰고, 없을 때만
+    예전 엑셀 업로드분으로 내려간다. 화면마다 다른 원본을 보면 같은 기간인데 숫자가 달라져서
+    (형이 겪은 그 문제) 반드시 한 군데서 정한다."""
+    if ga_daily is not None and not ga_daily.empty:
+        try:
+            shaped = ga4_daily_to_inflow_shape(ga_daily)
+            if shaped is not None and not shaped.empty:
+                return shaped
+        except Exception:
+            pass
+    return excel_inflow if excel_inflow is not None else pd.DataFrame()
+
+
 def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     """ga_channel_daily(신규/재방문이 행으로 쪼개져 있음)를 기존 ga_channel_inflow와 같은
     모양(날짜×소스매체 1행, new_users/returning_users 컬럼)으로 바꾼다. 이렇게 해두면 기존
     집계 함수들(_ga_visits_by_channel, classify_ga_bucket 등)을 그대로 재사용할 수 있다."""
     cols = ["report_date", "source_medium", "channel", "users", "new_users",
-            "returning_users", "sessions", "signups", "conversions", "revenue",
+            "returning_users", "sessions", "new_sessions", "ret_sessions",
+            "signups", "conversions", "revenue",
             "new_signups", "new_conv", "new_rev", "ret_conv", "ret_rev"]
     if ga_daily is None or ga_daily.empty:
         return pd.DataFrame(columns=cols)
@@ -5804,6 +5829,10 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     is_ret = g["user_type"] == "재방문"
     g["new_users"] = np.where(is_new, g["users"], 0)
     g["returning_users"] = np.where(is_ret, g["users"], 0)
+    # 방문수(세션)도 신규/재방문으로 갈라둔다. 사용자는 날짜별로 더하면 같은 사람이 여러 번
+    # 세어져 GA4 보고서와 안 맞지만, 세션은 더해도 되는 지표라 보고서와 정확히 일치한다.
+    g["new_sessions"] = np.where(is_new, g["sessions"], 0)
+    g["ret_sessions"] = np.where(is_ret, g["sessions"], 0)
     g["new_signups"] = np.where(is_new, g["signups"], 0)
     g["new_conv"] = np.where(is_new, g["conversions"], 0)
     g["new_rev"] = np.where(is_new, g["revenue"], 0)
@@ -5812,13 +5841,40 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     out = g.groupby(["report_date", "source_medium"], as_index=False).agg(
         channel=("channel", "first"), users=("users", "sum"), new_users=("new_users", "sum"),
         returning_users=("returning_users", "sum"), sessions=("sessions", "sum"),
+        new_sessions=("new_sessions", "sum"), ret_sessions=("ret_sessions", "sum"),
         signups=("signups", "sum"),
         conversions=("conversions", "sum"), revenue=("revenue", "sum"),
         new_signups=("new_signups", "sum"),
         new_conv=("new_conv", "sum"), new_rev=("new_rev", "sum"),
         ret_conv=("ret_conv", "sum"), ret_rev=("ret_rev", "sum"),
     )
-    return out[cols]
+
+    # ── 화면에 세우는 '방문자'는 세션(방문수)이다 ──────────────────────────────
+    # GA4의 사용자 수는 기간 전체에서 중복을 뺀 값이라, 날짜·매체별로 쪼개 저장한 걸 더하면
+    # 같은 사람이 여러 번 세어져 GA4 보고서와 안 맞는다(더할 수 없는 지표). 게다가
+    # 총 사용자 ≠ 신규 + 재방문이라 표의 세로 계산도 안 맞는다.
+    # 세션은 더해도 되고 총 방문 = 신규 + 재방문이 정확히 성립하며, 광고 클릭 1회 = 방문 1회라
+    # 광고비와 단위도 맞는다. 사람 수는 people_* 로 남겨둔다(필요할 때 꺼내 쓸 수 있게).
+    out["people"] = out["users"]
+    out["new_people"] = out["new_users"]
+    out["ret_people"] = out["returning_users"]
+    has_sess = out["sessions"] > 0
+    out["users"] = np.where(has_sess, out["sessions"], out["users"])
+    out["new_users"] = np.where(has_sess, out["new_sessions"], out["new_users"])
+    out["returning_users"] = np.where(has_sess, out["ret_sessions"], out["returning_users"])
+    # 신규/재방문 세션이 안 잡힌 행만 사람 비율로 보정 (합계가 총 방문과 어긋나지 않게)
+    gap = has_sess & ((out["new_users"] + out["returning_users"]) <= 0) & (out["users"] > 0)
+    if bool(gap.any()):
+        sh = (out["new_people"] / out["people"]).replace([np.inf, -np.inf], np.nan).fillna(0)
+        out["new_users"] = np.where(gap, out["users"] * sh, out["new_users"])
+        out["returning_users"] = np.where(gap, out["users"] * (1 - sh), out["returning_users"])
+
+    # GA 매체별 유입 경로 화면이 쓰는 칸들. GA4 API에는 없어서 비워둔다(0이 아니라 '-'로 보이게).
+    for c in ("bounce_rate", "avg_session_duration", "pageviews"):
+        if c not in out.columns:
+            out[c] = np.nan
+    return out[cols + ["people", "new_people", "ret_people",
+                       "bounce_rate", "avg_session_duration", "pageviews"]]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -6063,7 +6119,8 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
     if g.empty:
         return empty, empty
 
-    need = ("users", "new_users", "returning_users", "signups", "conversions", "revenue",
+    need = ("users", "new_users", "returning_users",
+            "signups", "conversions", "revenue",
             "new_signups", "new_conv", "new_rev", "ret_conv", "ret_rev")
     for c in need:
         if c not in g.columns:
@@ -6081,6 +6138,10 @@ def _v4_ga_rows(ga_inflow, start: date, end: date):
         g["ret_conv"] = np.where(miss, g["conversions"] * (1 - share), g["ret_conv"])
         g["new_rev"] = np.where(miss, g["revenue"] * share, g["new_rev"])
         g["ret_rev"] = np.where(miss, g["revenue"] * (1 - share), g["ret_rev"])
+    # 화면에 세우는 '방문' 지표는 세션이다. 사용자는 날짜·매체별로 쪼개 저장한 걸 더하면
+    # 같은 사람이 중복으로 세어져 GA4 보고서와 안 맞는다(더할 수 없는 지표). 세션은 더해도
+    # 되고 광고 클릭과 단위가 같아서 클릭→방문 전환율도 계산된다.
+    # 옛 엑셀 업로드분처럼 세션이 아예 없는 데이터만 사용자로 대체한다.
     g["_bucket"] = g.apply(classify_ga_bucket, axis=1)
 
     def fold(df, key):
@@ -9187,7 +9248,7 @@ def render_ga_channel_funnel_page(
     # GA4 API로 받은 데이터가 있으면 그걸 우선 쓰고, 없으면 기존 엑셀 업로드분으로 폴백한다.
     ga_source_label = "GA4 API(자동)"
     if ga_daily is not None and not ga_daily.empty:
-        ga_channel_inflow = ga4_daily_to_inflow_shape(ga_daily)
+        ga_channel_inflow = ga_inflow_source(ga_daily, ga_channel_inflow)
     else:
         ga_source_label = "GA 엑셀 업로드(수동)"
 
@@ -9494,7 +9555,7 @@ def render_ga_channel_funnel_page(
         '<div class="fv4-wrap"><div class="fv4-kpis">'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 방문자</div>'
         f'<div class="fv4-kpi-value">{users_now:,.0f}{_v4_delta_html(users_now, users_prev)}</div>'
-        f'<div class="fv4-kpi-sub">일별 합계 · 중복 방문 포함</div></div>'
+        f'<div class="fv4-kpi-sub">신규 + 재방문</div></div>'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">신규 방문자</div>'
         f'<div class="fv4-kpi-value">{new_now:,.0f}{_v4_delta_html(new_now, new_prev)}</div>'
         f'<div class="fv4-kpi-sub">{new_ratio:.1f}%</div></div>'
@@ -9630,9 +9691,9 @@ def render_ga_channel_funnel_page(
             + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위 고정입니다. '
               '광고비는 신규·재방문으로 나눌 수 없어 <b>전액 기준</b>이라, '
               '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.<br>'
-              '<b>방문자 수는 날짜별 합계</b>라 GA4 보고서의 총 사용자보다 큽니다 — '
-              '한 사람이 사흘에 걸쳐 오면 GA는 1명, 여기서는 3명으로 셉니다. '
-              '기간 내 순수 사용자 수는 GA4 보고서에서 확인하세요.</div>'
+              '<b>총 방문자 = 신규 방문자 + 재방문자</b>로 딱 맞습니다(GA4 방문수 기준). '
+              'GA4 보고서의 <b>총 사용자</b>는 중복을 뺀 사람 수라 이보다 작고 신규+재방문과도 '
+              '안 맞는데, 그 값은 매체별로 나눌 수가 없어 쓰지 않습니다.</div>'
             + build_table("fvtblA", head, brows_sum, brows)
             + '<div class="fv4-sec">광고 매체별 상세</div>'
             + '<div class="fv4-bk-cap">위 표의 <b>광고</b> 줄을 매체로 쪼갠 것입니다 — '
@@ -10505,11 +10566,14 @@ def main():
             decisions=T("decision_log"),
         )
     elif page == "GA 매체별 유입 경로":
-        render_ga_channel_inflow_page(T("ga_channel_inflow"))
+        render_ga_channel_inflow_page(
+            ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
     elif page == "유입·매출 비교":
-        render_inflow_revenue_page(T("inflow_revenue_daily"), T("ga_channel_inflow"))
+        render_inflow_revenue_page(
+            T("inflow_revenue_daily"),
+            ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
