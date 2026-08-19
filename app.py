@@ -5109,11 +5109,16 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
     c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
-    st.caption(
-        "총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
-        "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 맞지 않습니다 "
-        "— 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다."
-    )
+    _cap = ("총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
+            "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 "
+            "맞지 않습니다 — 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다.")
+    if "unknown_sessions" in fd.columns:
+        _unk = float(pd.to_numeric(fd["unknown_sessions"], errors="coerce").fillna(0).sum())
+        if _unk > 0:
+            _cap += (f" · GA4가 신규/재방문을 판정하지 못한 방문 {_unk:,.0f}건"
+                     f"({_unk / users_sum * 100:.1f}%)은 같은 날·같은 소스의 판정된 비율대로 "
+                     "나눠 담았습니다.")
+    st.caption(_cap)
 
     day_label_order = kor_date_labels(fd["report_date"], "day")
     fd = fd.assign(일자=day_label_order)
@@ -5332,11 +5337,16 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
     c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
-    st.caption(
-        "총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
-        "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 맞지 않습니다 "
-        "— 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다."
-    )
+    _cap = ("총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
+            "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 "
+            "맞지 않습니다 — 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다.")
+    if "unknown_sessions" in fd.columns:
+        _unk = float(pd.to_numeric(fd["unknown_sessions"], errors="coerce").fillna(0).sum())
+        if _unk > 0:
+            _cap += (f" · GA4가 신규/재방문을 판정하지 못한 방문 {_unk:,.0f}건"
+                     f"({_unk / users_sum * 100:.1f}%)은 같은 날·같은 소스의 판정된 비율대로 "
+                     "나눠 담았습니다.")
+    st.caption(_cap)
 
     # 소스/매체별로 나뉜 데이터를 날짜 기준으로 다시 합쳐서(전체 소스/매체 합산) 일별 추이를 그린다.
     daily_trend = fd.groupby("report_date", as_index=False).agg(
@@ -5862,18 +5872,35 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
     out["users"] = np.where(has_sess, out["sessions"], out["users"])
     out["new_users"] = np.where(has_sess, out["new_sessions"], out["new_users"])
     out["returning_users"] = np.where(has_sess, out["ret_sessions"], out["returning_users"])
-    # 신규/재방문 세션이 안 잡힌 행만 사람 비율로 보정 (합계가 총 방문과 어긋나지 않게)
-    gap = has_sess & ((out["new_users"] + out["returning_users"]) <= 0) & (out["users"] > 0)
-    if bool(gap.any()):
-        sh = (out["new_people"] / out["people"]).replace([np.inf, -np.inf], np.nan).fillna(0)
-        out["new_users"] = np.where(gap, out["users"] * sh, out["new_users"])
-        out["returning_users"] = np.where(gap, out["users"] * (1 - sh), out["returning_users"])
+    # ── 신규/재방문이 안 붙은 '미상' 세션을 배분한다 ─────────────────────────
+    # GA4는 동의 거부·쿠키 삭제·앱↔웹 전환 같은 이유로 일부 세션에 newVsReturning을 못 붙인다.
+    # 그대로 두면 총 방문자 ≠ 신규 + 재방문이 되어 표의 세로 계산이 깨진다(형이 잡은 그 문제).
+    # 같은 날·같은 소스에서 판정된 세션의 신규:재방문 비율로 나눠 담아 합을 맞춘다.
+    # 배분 전 원래 값은 *_known 으로, 미상 규모는 unknown_sessions 로 남겨 검증할 수 있게 한다.
+    out["new_known"] = out["new_users"]
+    out["ret_known"] = out["returning_users"]
+    known = out["new_users"] + out["returning_users"]
+    out["unknown_sessions"] = (out["users"] - known).clip(lower=0)
+    resid = out["unknown_sessions"]
+    sh_known = (out["new_users"] / known).replace([np.inf, -np.inf], np.nan)
+    sh_people = (out["new_people"] / out["people"]).replace([np.inf, -np.inf], np.nan)
+    share_new = sh_known.fillna(sh_people).fillna(0.0).clip(0, 1)
+    out["new_users"] = out["new_users"] + resid * share_new
+    out["returning_users"] = out["returning_users"] + resid * (1 - share_new)
+
+    # 구매·매출도 같은 이유로 유형별 합이 전체보다 작을 수 있다. 같은 비율로 맞춰준다.
+    for whole, a, b in (("conversions", "new_conv", "ret_conv"),
+                        ("revenue", "new_rev", "ret_rev")):
+        r = (out[whole] - out[a] - out[b]).clip(lower=0)
+        out[a] = out[a] + r * share_new
+        out[b] = out[b] + r * (1 - share_new)
 
     # GA 매체별 유입 경로 화면이 쓰는 칸들. GA4 API에는 없어서 비워둔다(0이 아니라 '-'로 보이게).
     for c in ("bounce_rate", "avg_session_duration", "pageviews"):
         if c not in out.columns:
             out[c] = np.nan
     return out[cols + ["people", "new_people", "ret_people",
+                       "new_known", "ret_known", "unknown_sessions",
                        "bounce_rate", "avg_session_duration", "pageviews"]]
 
 
