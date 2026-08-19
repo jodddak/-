@@ -5994,6 +5994,7 @@ FUNNEL_V4_CSS = """
 .fv4-kpi:last-child { border-right:none; }
 .fv4-kpi-label { color:#8a8a7c; font-size:12px; margin-bottom:9px; }
 .fv4-kpi-value { color:#17170f; font-size:26px; font-weight:800; letter-spacing:-.02em; display:flex; align-items:baseline; gap:8px; }
+.fv4-kpi-value.money { font-size:21px; letter-spacing:-.03em; flex-wrap:wrap; gap:6px; }
 .fv4-kpi-delta { font-size:12px; font-weight:700; }
 .fv4-up   { color:#c0392b; }
 .fv4-down { color:#2563c9; }
@@ -9395,8 +9396,15 @@ def render_ga_channel_funnel_page(
 
     users_now, users_prev = _sum(fg, "users"), _sum(pg, "users")
     new_now, new_prev = _sum(fg, "new_users"), _sum(pg, "new_users")
+    ret_now, ret_prev = _sum(fg, "returning_users"), _sum(pg, "returning_users")
     conv_now, conv_prev = _sum(fg, "conversions"), _sum(pg, "conversions")
     rev_now, rev_prev = _sum(fg, "revenue"), _sum(pg, "revenue")
+    # 목적축별 — 신규 발굴은 가입·첫구매·신규매출, 매출 확보는 재구매·재구매매출을 본다
+    sign_now, sign_prev = _sum(fg, "new_signups"), _sum(pg, "new_signups")
+    nconv_now, nconv_prev = _sum(fg, "new_conv"), _sum(pg, "new_conv")
+    nrev_now, nrev_prev = _sum(fg, "new_rev"), _sum(pg, "new_rev")
+    rconv_now, rconv_prev = _sum(fg, "ret_conv"), _sum(pg, "ret_conv")
+    rrev_now, rrev_prev = _sum(fg, "ret_rev"), _sum(pg, "ret_rev")
 
     bucket_share = {"광고": 0.0, "자연유입": 0.0, "기타": 0.0}
     if not fg.empty:
@@ -9568,40 +9576,6 @@ def render_ga_channel_funnel_page(
             unsafe_allow_html=True,
         )
 
-    # ── KPI 스트립 ──
-    new_ratio = (new_now / users_now * 100) if users_now else 0
-    # 광고비를 못 구하면 ROAS를 억지로 계산하지 않고 '-'로 둔다(틀린 숫자로 판단하는 게 제일 위험).
-    roas_sub = (
-        f"광고 ROAS {site_roas:.0f}% · 광고비 {spend_src}"
-        if ad_spend_period > 0 else "광고 ROAS - (광고비 데이터 없음)"
-    )
-    ad_p = bucket_share["광고"] / bucket_total * 100
-    org_p = bucket_share["자연유입"] / bucket_total * 100
-    etc_p = bucket_share["기타"] / bucket_total * 100
-    st.markdown(
-        '<div class="fv4-wrap"><div class="fv4-kpis">'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 방문자</div>'
-        f'<div class="fv4-kpi-value">{users_now:,.0f}{_v4_delta_html(users_now, users_prev)}</div>'
-        f'<div class="fv4-kpi-sub">신규 + 재방문</div></div>'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">신규 방문자</div>'
-        f'<div class="fv4-kpi-value">{new_now:,.0f}{_v4_delta_html(new_now, new_prev)}</div>'
-        f'<div class="fv4-kpi-sub">{new_ratio:.1f}%</div></div>'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">GA 구매</div>'
-        f'<div class="fv4-kpi-value">{conv_now:,.0f}{_v4_delta_html(conv_now, conv_prev)}</div>'
-        f'<div class="fv4-kpi-sub">건</div></div>'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">GA 매출</div>'
-        f'<div class="fv4-kpi-value">{_v4_money_short(rev_now)}{_v4_delta_html(rev_now, rev_prev)}</div>'
-        f'<div class="fv4-kpi-sub">{roas_sub}</div></div>'
-        f'<div class="fv4-kpi"><div class="fv4-kpi-label">유입 구성</div>'
-        f'<div class="fv4-stack"><i style="width:{ad_p:.1f}%;background:#17170f"></i>'
-        f'<i style="width:{org_p:.1f}%;background:#6b5ce7"></i>'
-        f'<i style="width:{etc_p:.1f}%;background:#cfcdbf"></i></div>'
-        f'<div class="fv4-kpi-sub">광고 {ad_p:.0f}% · 자연 {org_p:.0f}% · 기타 {etc_p:.0f}%</div></div>'
-        "</div></div>",
-        unsafe_allow_html=True,
-    )
-
-    # ── 목적별 퍼널 (토글) ──
     st.markdown(
         '<div class="fv4-wrap"><div class="fv4-eyebrow">TWO FUNNELS, ONE DECISION</div>'
         '<div class="fv4-h2">목적별 퍼널 성과</div></div>',
@@ -9624,6 +9598,62 @@ def render_ga_channel_funnel_page(
     mode = st.session_state["fv4_mode"]
     is_new = mode == "신규 고객 발굴"
 
+    # ── KPI 스트립 ── 목적축(신규 발굴 / 매출 확보)에 따라 세우는 숫자가 달라진다.
+    # 두 탭이 같은 KPI를 보여주면 탭을 나눈 의미가 없다 — 신규는 '얼마나 데려왔나',
+    # 매출 확보는 '있던 사람이 얼마나 다시 샀나'가 판단 기준이다.
+    axis_users = new_now if is_new else ret_now
+    axis_users_prev = new_prev if is_new else ret_prev
+    axis_ratio = (axis_users / users_now * 100) if users_now else 0
+    axis_conv, axis_conv_prev = (nconv_now, nconv_prev) if is_new else (rconv_now, rconv_prev)
+    axis_rev, axis_rev_prev = (nrev_now, nrev_prev) if is_new else (rrev_now, rrev_prev)
+    axis_roas = (axis_rev / ad_spend_period * 100) if ad_spend_period > 0 else None
+    roas_label = "신규 ROAS" if is_new else "재구매 ROAS"
+    # 광고비를 못 구하면 ROAS를 억지로 계산하지 않고 '-'로 둔다(틀린 숫자로 판단하는 게 제일 위험).
+    roas_sub = (
+        f"광고 ROAS {site_roas:.0f}% · 광고비 {spend_src}"
+        if ad_spend_period > 0 else "광고 ROAS - (광고비 데이터 없음)"
+    )
+    # 광고비는 신규·재방문으로 나눌 수 없어 전액 기준이다. 그래서 신규 ROAS + 재구매 ROAS가
+    # 전체 ROAS가 된다 — 각각만 보면 낮아 보이는 게 정상이라 그 점을 같이 적어준다.
+    axis_roas_sub = (
+        f"{roas_label} {axis_roas:.0f}% · 전체 매출 {rev_now:,.0f}원"
+        if axis_roas is not None else f"{roas_label} - (광고비 데이터 없음)"
+    )
+    ad_p = bucket_share["광고"] / bucket_total * 100
+    org_p = bucket_share["자연유입"] / bucket_total * 100
+    etc_p = bucket_share["기타"] / bucket_total * 100
+    st.markdown(
+        '<div class="fv4-wrap"><div class="fv4-kpis">'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 방문자</div>'
+        f'<div class="fv4-kpi-value">{users_now:,.0f}{_v4_delta_html(users_now, users_prev)}</div>'
+        f'<div class="fv4-kpi-sub">신규 {new_now:,.0f} + 재방문 {ret_now:,.0f}</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">{"신규 방문자" if is_new else "재방문자"}</div>'
+        f'<div class="fv4-kpi-value">{axis_users:,.0f}{_v4_delta_html(axis_users, axis_users_prev)}</div>'
+        f'<div class="fv4-kpi-sub">전체 방문의 {axis_ratio:.1f}%</div></div>'
+        + (
+            f'<div class="fv4-kpi"><div class="fv4-kpi-label">회원가입</div>'
+            f'<div class="fv4-kpi-value">{sign_now:,.0f}{_v4_delta_html(sign_now, sign_prev)}</div>'
+            f'<div class="fv4-kpi-sub">가입률 {(sign_now / new_now * 100) if new_now else 0:.2f}% · '
+            f'첫구매 {nconv_now:,.0f}건</div></div>'
+            if is_new else
+            f'<div class="fv4-kpi"><div class="fv4-kpi-label">재구매</div>'
+            f'<div class="fv4-kpi-value">{rconv_now:,.0f}{_v4_delta_html(rconv_now, rconv_prev)}</div>'
+            f'<div class="fv4-kpi-sub">재구매율 {(rconv_now / ret_now * 100) if ret_now else 0:.2f}% · '
+            f'객단가 {(rrev_now / rconv_now) if rconv_now else 0:,.0f}원</div></div>'
+        ) +
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">{"신규 매출" if is_new else "재구매 매출"}</div>'
+        f'<div class="fv4-kpi-value money">{axis_rev:,.0f}원{_v4_delta_html(axis_rev, axis_rev_prev)}</div>'
+        f'<div class="fv4-kpi-sub">{axis_roas_sub}</div></div>'
+        f'<div class="fv4-kpi"><div class="fv4-kpi-label">유입 구성</div>'
+        f'<div class="fv4-stack"><i style="width:{ad_p:.1f}%;background:#17170f"></i>'
+        f'<i style="width:{org_p:.1f}%;background:#6b5ce7"></i>'
+        f'<i style="width:{etc_p:.1f}%;background:#cfcdbf"></i></div>'
+        f'<div class="fv4-kpi-sub">광고 {ad_p:.0f}% · 자연 {org_p:.0f}% · 기타 {etc_p:.0f}%</div></div>'
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 목적별 퍼널 (토글) ──
     # 이 화면은 대행사 리포트를 쓰지 않는다 — 매체 API(노출·클릭·광고비)와 GA4(사용자·가입·구매·매출)만
     # 본다. 둘 다 매일 자동으로 들어오므로 사람이 파일을 올리지 않아도 최신 상태가 유지된다.
     buckets, media = _v4_ga_rows(ga_channel_inflow, start, end)
@@ -9650,7 +9680,8 @@ def render_ga_channel_funnel_page(
             bench = FUNNEL_BENCHMARK_NEW
             badge, title = "ACQUISITION", "노출에서 첫구매까지"
             sub = ("신규 사용자가 가입하고 첫 구매까지 오는 구간입니다. "
-                   "매체 API(노출·클릭·광고비) + GA4(사용자·가입·구매)만 씁니다.")
+                   "노출·클릭이 광고에만 있는 숫자라 <b>이 퍼널은 광고 유입만</b> 봅니다 — "
+                   "위 KPI·아래 TOTAL(자연유입·기타 포함)보다 작은 게 정상입니다.")
             head, rowfn = HEAD_NEW, _v4_row_new
         else:
             stages = [
@@ -9660,7 +9691,9 @@ def render_ga_channel_funnel_page(
             ]
             bench = FUNNEL_BENCHMARK_RETURN
             badge, title = "RETENTION", "재노출에서 재구매까지"
-            sub = "이미 방문한 고객이 다시 사는 구간입니다. 재구매 건수·매출·ROAS를 봅니다."
+            sub = ("이미 방문한 고객이 다시 사는 구간입니다. 재구매 건수·매출·ROAS를 봅니다. "
+                   "노출·클릭이 광고에만 있는 숫자라 <b>이 퍼널은 광고 유입만</b> 봅니다 — "
+                   "위 KPI·아래 TOTAL(자연유입·기타 포함)보다 작은 게 정상입니다.")
             head, rowfn = HEAD_RET, _v4_row_ret
 
         def verdict_of(r, cost):
