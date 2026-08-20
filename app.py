@@ -6128,6 +6128,12 @@ FUNNEL_V4_CSS = """
 .fv4-chg-tag.warn { background:#FBE9E7; color:#B03A2E; }
 .fv4-chg-dot.flat { background:#C9C7BA; }
 .gc-sub { display:block; margin-top:3px; color:#8a8a7c; font-size:13px; font-weight:500; }
+.gc-img { width:112px; }
+.gc-img img { height:96px; width:96px; border-radius:8px; object-fit:cover; display:block;
+              background:#EFEEE6; }
+.gc-noimg { display:inline-block; padding:4px 8px; border-radius:6px; background:#F4F3EC;
+            color:#A9A79A; font-size:13px; }
+.gc-tbl td { vertical-align:middle; }
 .fv4-kpi-delta { font-size:13.5px; font-weight:700; }
 .fv4-up   { color:#c0392b; }
 .fv4-down { color:#2563c9; }
@@ -9440,6 +9446,214 @@ GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
 GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
 
 
+GC_IMAGE_FOLDER = "ga_creative"
+
+
+def _gc_image_keys(row) -> list:
+    """GA 소재 한 줄에서 이미지 매칭에 쓸 후보 키를 우선순위대로 만든다.
+
+    UTM 작명(타겟팅_날짜_소재명)의 뒤 두 조각을 붙이면 대행사 리포트의 소재명(날짜_소재명)과
+    같은 꼴이 된다. 그래서 리포트로 이미 올라간 이미지를 그대로 재사용할 수 있다.
+        패션관심타겟_260807_수피마티셔츠  →  260807_수피마티셔츠  →  수피마티셔츠
+    """
+    name = str(row.get("cre_name") or "").strip()
+    ymd = str(row.get("cre_date") or "").replace("-", "")
+    keys = []
+    if ymd and name:
+        keys.append(f"{ymd[2:]}_{name}")   # 260807_수피마티셔츠
+        keys.append(f"{ymd}_{name}")       # 20260807_수피마티셔츠
+    if name:
+        keys.append(name)
+    raw = str(row.get("creative") or "").strip()
+    if raw:
+        keys.append(raw)
+    return [_creative_image_key(k) for k in keys if k]
+
+
+def _gc_image_lookup(creative_perf: pd.DataFrame) -> dict:
+    """대행사 리포트로 이미 올라간 소재 이미지 URL을 {정규화 소재명: URL}로 모은다.
+    같은 소재가 여러 주에 걸쳐 있으면 최근 것을 쓴다."""
+    out = {}
+    if creative_perf is None or creative_perf.empty:
+        return out
+    c = creative_perf
+    if "image_url" not in c.columns or "creative" not in c.columns:
+        return out
+    c = c[c["image_url"].notna() & (c["image_url"].astype(str) != "")]
+    if c.empty:
+        return out
+    if "as_of_date" in c.columns:
+        c = c.sort_values("as_of_date")
+    for _, r in c.iterrows():
+        out[_creative_image_key(r["creative"])] = str(r["image_url"])
+    return out
+
+
+def upload_ga_creative_images(files) -> tuple:
+    """소재 이미지 파일을 Storage에 올리고 {정규화 소재명: URL}을 돌려준다.
+
+    파일명이 곧 소재명이다 — 260807_수피마티셔츠.jpg 처럼 두면 표의 소재와 자동으로 붙는다.
+    한글 파일명은 Storage 키로 못 쓰기 때문에, 기존 소재 이미지와 같은 방식으로
+    ASCII+해시 경로를 만들어 저장한다(같은 소재는 항상 같은 경로 → 덮어쓰기).
+    """
+    client = get_supabase_client()
+    if client is None or not files:
+        return {}, ["Supabase에 연결되어 있지 않습니다."]
+    urls, errors = {}, []
+    for f in files:
+        stem = str(getattr(f, "name", "")).rsplit(".", 1)
+        name_key = _creative_image_key(stem[0])
+        ext = (stem[1].lower() if len(stem) > 1 else "png")
+        if ext == "jpg":
+            ext = "jpeg"
+        try:
+            data = f.getvalue() if hasattr(f, "getvalue") else f.read()
+            path = f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.{ext}"
+            client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
+                path, data, {"content-type": f"image/{ext}", "upsert": "true"})
+            urls[name_key] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+        except Exception as e:
+            if len(errors) < 3:
+                errors.append(f"{getattr(f, 'name', '?')}: {e}")
+    return urls, errors
+
+
+def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
+    """소재별 성과 화면과 같은 톤의 자동 코멘트. 표본이 작은 건 판단에서 뺀다."""
+    if rows is None or rows.empty:
+        return ""
+    d = rows.copy()
+    judged = d[d["_cost"] >= FUNNEL_MIN_SPEND]
+    n_hold = len(d) - len(judged)
+    if judged.empty:
+        return (f"{label}은 아직 판단 가능한(광고비 {FUNNEL_MIN_SPEND:,.0f}원 이상) "
+                f"소재가 없습니다 — {len(d)}개 모두 표본 부족입니다.")
+    n_good = int((judged["_roas"] >= OPS_KPI_ROAS_HIGH).sum())
+    n_bad = int((judged["_roas"] < OPS_KPI_ROAS_LOW).sum())
+    n_mid = len(judged) - n_good - n_bad
+    if len(judged) == 1:
+        one = judged.iloc[0]
+        return (f"{label}은 판단 가능한 소재가 <b>{one['_name']}</b> 1개뿐이라, "
+                "우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.")
+    best = judged.loc[judged["_roas"].idxmax()]
+    worst = judged.loc[judged["_roas"].idxmin()]
+    lines = [
+        f"{label} 소재 {len(judged)}개 중 우수 {n_good}개 · 평균 수준 {n_mid}개 · 부진 {n_bad}개입니다"
+        + (f" (표본 부족 {n_hold}개는 판단 보류)." if n_hold else "."),
+        f"<b>{best['_name']}</b>가 추정 광고비 {best['_cost']:,.0f}원으로 ROAS {best['_roas']:,.0f}%를 "
+        f"기록해 가장 우수했고, <b>{worst['_name']}</b>는 추정 광고비 {worst['_cost']:,.0f}원 대비 "
+        f"ROAS {worst['_roas']:,.0f}%로 평균({avg_roas:,.0f}%) 대비 낮아 가장 부진했습니다.",
+    ]
+    if n_bad:
+        lines.append(_ops_next_action(
+            f"부진 소재({n_bad}개)는 소재 교체 또는 예산 축소를 검토하는 것을 권장합니다."))
+    return "<br>".join(lines)
+
+
+GC_IMAGE_FOLDER = "ga_creative"
+
+
+def _gc_image_keys(row) -> list:
+    """GA 소재 한 줄에서 이미지 매칭에 쓸 후보 키를 우선순위대로 만든다.
+
+    UTM 작명(타겟팅_날짜_소재명)의 뒤 두 조각을 붙이면 대행사 리포트의 소재명(날짜_소재명)과
+    같은 꼴이 된다. 그래서 리포트로 이미 올라간 이미지를 그대로 재사용할 수 있다.
+        패션관심타겟_260807_수피마티셔츠  →  260807_수피마티셔츠  →  수피마티셔츠
+    """
+    name = str(row.get("cre_name") or "").strip()
+    ymd = str(row.get("cre_date") or "").replace("-", "")
+    keys = []
+    if ymd and name:
+        keys.append(f"{ymd[2:]}_{name}")   # 260807_수피마티셔츠
+        keys.append(f"{ymd}_{name}")       # 20260807_수피마티셔츠
+    if name:
+        keys.append(name)
+    raw = str(row.get("creative") or "").strip()
+    if raw:
+        keys.append(raw)
+    return [_creative_image_key(k) for k in keys if k]
+
+
+def _gc_image_lookup(creative_perf: pd.DataFrame) -> dict:
+    """대행사 리포트로 이미 올라간 소재 이미지 URL을 {정규화 소재명: URL}로 모은다.
+    같은 소재가 여러 주에 걸쳐 있으면 최근 것을 쓴다."""
+    out = {}
+    if creative_perf is None or creative_perf.empty:
+        return out
+    c = creative_perf
+    if "image_url" not in c.columns or "creative" not in c.columns:
+        return out
+    c = c[c["image_url"].notna() & (c["image_url"].astype(str) != "")]
+    if c.empty:
+        return out
+    if "as_of_date" in c.columns:
+        c = c.sort_values("as_of_date")
+    for _, r in c.iterrows():
+        out[_creative_image_key(r["creative"])] = str(r["image_url"])
+    return out
+
+
+def upload_ga_creative_images(files) -> tuple:
+    """소재 이미지 파일을 Storage에 올리고 {정규화 소재명: URL}을 돌려준다.
+
+    파일명이 곧 소재명이다 — 260807_수피마티셔츠.jpg 처럼 두면 표의 소재와 자동으로 붙는다.
+    한글 파일명은 Storage 키로 못 쓰기 때문에, 기존 소재 이미지와 같은 방식으로
+    ASCII+해시 경로를 만들어 저장한다(같은 소재는 항상 같은 경로 → 덮어쓰기).
+    """
+    client = get_supabase_client()
+    if client is None or not files:
+        return {}, ["Supabase에 연결되어 있지 않습니다."]
+    urls, errors = {}, []
+    for f in files:
+        stem = str(getattr(f, "name", "")).rsplit(".", 1)
+        name_key = _creative_image_key(stem[0])
+        ext = (stem[1].lower() if len(stem) > 1 else "png")
+        if ext == "jpg":
+            ext = "jpeg"
+        try:
+            data = f.getvalue() if hasattr(f, "getvalue") else f.read()
+            path = f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.{ext}"
+            client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
+                path, data, {"content-type": f"image/{ext}", "upsert": "true"})
+            urls[name_key] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+        except Exception as e:
+            if len(errors) < 3:
+                errors.append(f"{getattr(f, 'name', '?')}: {e}")
+    return urls, errors
+
+
+def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
+    """소재별 성과 화면과 같은 톤의 자동 코멘트. 표본이 작은 건 판단에서 뺀다."""
+    if rows is None or rows.empty:
+        return ""
+    d = rows.copy()
+    judged = d[d["_cost"] >= FUNNEL_MIN_SPEND]
+    n_hold = len(d) - len(judged)
+    if judged.empty:
+        return (f"{label}은 아직 판단 가능한(광고비 {FUNNEL_MIN_SPEND:,.0f}원 이상) "
+                f"소재가 없습니다 — {len(d)}개 모두 표본 부족입니다.")
+    n_good = int((judged["_roas"] >= OPS_KPI_ROAS_HIGH).sum())
+    n_bad = int((judged["_roas"] < OPS_KPI_ROAS_LOW).sum())
+    n_mid = len(judged) - n_good - n_bad
+    if len(judged) == 1:
+        one = judged.iloc[0]
+        return (f"{label}은 판단 가능한 소재가 <b>{one['_name']}</b> 1개뿐이라, "
+                "우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.")
+    best = judged.loc[judged["_roas"].idxmax()]
+    worst = judged.loc[judged["_roas"].idxmin()]
+    lines = [
+        f"{label} 소재 {len(judged)}개 중 우수 {n_good}개 · 평균 수준 {n_mid}개 · 부진 {n_bad}개입니다"
+        + (f" (표본 부족 {n_hold}개는 판단 보류)." if n_hold else "."),
+        f"<b>{best['_name']}</b>가 추정 광고비 {best['_cost']:,.0f}원으로 ROAS {best['_roas']:,.0f}%를 "
+        f"기록해 가장 우수했고, <b>{worst['_name']}</b>는 추정 광고비 {worst['_cost']:,.0f}원 대비 "
+        f"ROAS {worst['_roas']:,.0f}%로 평균({avg_roas:,.0f}%) 대비 낮아 가장 부진했습니다.",
+    ]
+    if n_bad:
+        lines.append(_ops_next_action(
+            f"부진 소재({n_bad}개)는 소재 교체 또는 예산 축소를 검토하는 것을 권장합니다."))
+    return "<br>".join(lines)
+
+
 def _gc_media_picker(all_ch, off_by_default) -> list:
     """엑셀 필터처럼 체크박스로 매체를 고른다. 켜져 있는 매체 목록을 돌려준다.
 
@@ -9506,7 +9720,8 @@ def _gc_parse_content(v):
 def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
              exclude=None) -> pd.DataFrame:
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
-    cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev"]
+    cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev",
+            "cre_name", "cre_date", "creative"]
     if cre is None or cre.empty:
         return pd.DataFrame(columns=cols)
     g = cre.copy()
@@ -9552,11 +9767,13 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
 
     out = g.groupby(["key", "channel"], as_index=False).agg(
         sessions=("sessions", "sum"), new=("new", "sum"), signup=("signup", "sum"),
-        conv=("conversions", "sum"), rev=("revenue", "sum"))
+        conv=("conversions", "sum"), rev=("revenue", "sum"),
+        cre_name=("cre_name", "first"), cre_date=("cre_date", "first"),
+        creative=("creative", "first"))
     return out.sort_values("rev", ascending=False)[cols]
 
 
-def _gc_row_html(r, cost, extra_cls="") -> str:
+def _gc_row_html(r, cost, extra_cls="", img_url=None, show_img=False) -> str:
     """소재 표의 한 줄. 광고비가 소재 단위로 없어서 방문 비중으로 나눈 '추정'이다."""
     ses = float(r["sessions"] or 0)
     new = float(r["new"] or 0)
@@ -9570,9 +9787,18 @@ def _gc_row_html(r, cost, extra_cls="") -> str:
     roas_txt = f"{roas:,.0f}%" if cost > 0 else "-"
     label, cls = _v4_verdict(roas, cost)
     name = r["key"] if isinstance(r, dict) or "key" in r else ""
+    img_td = ""
+    if show_img:
+        if img_url:
+            img_td = f'<td class="gc-img"><img src="{img_url}" loading="lazy"></td>'
+        elif "nosort" in extra_cls:
+            img_td = '<td class="gc-img"></td>'          # 합계 줄엔 이미지가 없는 게 당연
+        else:
+            img_td = '<td class="gc-img"><span class="gc-noimg">이미지 없음</span></td>' 
     return (
         f'<tr class="{extra_cls}">'
         f'<td class="l">{name}</td>'
+        + img_td +
         f'<td data-v="{ses:.0f}">{_v4_num(ses)}</td>'
         f'<td data-v="{new:.0f}">{_v4_num(new)}</td>'
         f'<td data-v="{sign:.0f}">{_v4_num(sign)}</td>'
@@ -9589,7 +9815,8 @@ def _gc_row_html(r, cost, extra_cls="") -> str:
 
 
 def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
-                            utm_map: pd.DataFrame = None):
+                            utm_map: pd.DataFrame = None,
+                            creative_perf: pd.DataFrame = None):
     """GA 소재별 성과 — 대행사 리포트가 아니라 GA4의 utm_campaign/utm_content로 본다.
 
     매체 리포트(소재별 성과 탭)와 나눠둔 이유: 매체가 신고하는 전환은 매체마다 기준이 달라
@@ -9644,36 +9871,48 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
                      horizontal=True, key="gc_level")
-    # 볼 매체 고르기 — 맨즈탭처럼 소재를 별도 시트로 관리하는 매체는 처음에 꺼둔다.
-    all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
-    picked = _gc_media_picker(all_ch, [c for c in GC_DEFAULT_EXCLUDE if c in all_ch])
-    exclude = [c for c in all_ch if c not in picked]
-    rows = _gc_rows(d, start, end, level, exclude=exclude)
-    if rows.empty:
-        if not lookup:
-            st.warning(
-                "UTM 매핑이 비어 있어 광고 매체를 가려낼 수 없습니다. "
-                "사이드바에서 **UTM 리스트 파일**을 먼저 올려주세요 "
-                "(소스/매체 → 매체명 대응표)."
-            )
-        else:
-            st.info("선택한 기간에 광고 유입 데이터가 없습니다.")
-        return
 
-    # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다. 비율을 먼저 보여준다.
+    # ── 소재 이미지 ──
+    # 대행사 리포트 엑셀에 박혀 올라간 이미지를 먼저 쓴다. UTM 작명(타겟팅_날짜_소재명)의
+    # 뒤 두 조각이 리포트 소재명(날짜_소재명)과 같은 꼴이라 그대로 붙는다.
+    # 리포트에 없던 소재(GFA 신규 등)만 아래 업로더로 채우면 된다.
+    img_map = dict(_gc_image_lookup(creative_perf))
+    img_map.update(st.session_state.get("gc_img_extra", {}))
+    with st.expander("소재 이미지 추가 업로드 — 파일명을 소재명으로 (예: 260807_수피마티셔츠.jpg)"):
+        ups = st.file_uploader("이미지 여러 장 한 번에 올릴 수 있습니다",
+                               type=["png", "jpg", "jpeg", "webp"],
+                               accept_multiple_files=True, key="gc_img_up")
+        if ups and st.button("업로드하고 반영", key="gc_img_btn"):
+            urls, errs = upload_ga_creative_images(ups)
+            if urls:
+                st.session_state.setdefault("gc_img_extra", {}).update(urls)
+                st.success(f"{len(urls)}장 올렸습니다.")
+                st.rerun()
+            for e in errs:
+                st.error(e)
+        st.caption(
+            "대행사 리포트에 있던 소재는 이미 올라가 있어 다시 주실 필요 없습니다. "
+            "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다."
+        )
+
+    # ── 매체 탭 ── 캡처하신 소재별 성과 화면과 같은 구성.
+    # 맨즈탭처럼 별도 시트로 관리하는 매체는 탭 순서 맨 뒤로 보낸다(평소에 안 보게).
+    all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
+    sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE]
+    order = [c for c in all_ch if c not in sep] + sep
+    if not order:
+        st.warning(
+            "UTM 매핑이 비어 있어 광고 매체를 가려낼 수 없습니다. "
+            "사이드바에서 **UTM 리스트 파일**을 먼저 올려주세요 (소스/매체 → 매체명 대응표)."
+        ) if not lookup else st.info("선택한 기간에 광고 유입 데이터가 없습니다.")
+        return
+    tab_labels = ["TOTAL"] + order
+    tabs = st.tabs(tab_labels)
+
+    # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
-    if exclude:
-        per = per[~per["channel"].map(_v4_canon_channel).isin(set(exclude))]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
-    tot_ses = float(per["sessions"].sum())
-    unset = float(per[per["creative"] == "(미설정)"]["sessions"].sum())
-    if tot_ses > 0 and unset / tot_ses > 0.2:
-        st.warning(
-            f"소재(utm_content)가 안 붙은 방문이 {unset:,.0f} / {tot_ses:,.0f}건 "
-            f"({unset / tot_ses * 100:.0f}%)입니다. 광고 랜딩 URL에 `utm_content`를 넣어야 "
-            "소재별 비교가 됩니다 — 운영 도구 › UTM 빌더에서 만들 수 있습니다."
-        )
 
     # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
     spend = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None else pd.DataFrame()
@@ -9681,51 +9920,106 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if spend is not None and not spend.empty:
         for _, r in spend.iterrows():
             spend_by_ch[_v4_canon_channel(r["channel"])] = float(r.get("cost_incl_vat", 0) or 0)
-    ch_ses = rows.groupby("channel")["sessions"].sum().to_dict()
 
-    def cost_of(r):
-        ch = r["channel"]
-        tot = float(ch_ses.get(ch, 0) or 0)
-        if tot <= 0:
-            return 0.0
-        return spend_by_ch.get(ch, 0.0) * float(r["sessions"]) / tot
-
-    body = [_gc_row_html(r, cost_of(r)) for _, r in rows.iterrows()]
-    tot_r = rows[["sessions", "new", "signup", "conv", "rev"]].sum()
-    tot_r["key"] = "TOTAL"
-    sum_html = _gc_row_html(tot_r, sum(spend_by_ch.get(c, 0.0) for c in ch_ses),
-                            "fv4-sum-row nosort")
-
+    show_img = (level == "소재")
     head = list(GC_HEAD)
     head[0] = {"소재": "소재 (타겟팅 · 등록일)", "타겟팅": "매체 · 타겟팅",
                "캠페인": "매체 · 캠페인", "매체": "매체"}[level]
-    th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
-                 f'<span class="fv4-ar">&#8645;</span></th>'
-                 for i, h in enumerate(head))
-    table = (f'<table class="fv4-tbl" id="gctbl"><thead><tr>{th}</tr></thead>'
-             f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
+    if show_img:
+        head.insert(1, "소재")
 
-    card = (
-        FUNNEL_V4_CSS
-        + '<div class="fv4-wrap"><div class="fv4-card">'
-        f'<span class="fv4-badge-dark">{level}별</span>'
-        f'<div class="fv4-card-title">{level}별 GA 성과</div>'
-        '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
-        '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
-        '소재끼리 비교가 됩니다. <b>UTM 매핑된 광고 매체만</b> 셉니다 — '
-        '자연유입·레퍼럴·(not set)은 소재가 없어서 제외합니다.</div>'
-        '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. TOTAL은 맨 위 고정입니다.<br>'
-        '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 것입니다 — '
-        '같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
-        '<b>(규칙 외)</b>로 모아 보여주니, 그게 많으면 UTM 작명을 맞춰주세요.<br>'
-        '<b>추정 광고비</b>는 매체 광고비를 그 매체 안에서 방문 비중대로 나눈 값입니다 — '
-        'GA에는 소재별 광고비가 없습니다. <b>순위를 볼 때만</b> 쓰시고 정산에는 쓰지 마세요. '
-        f'광고비가 {FUNNEL_MIN_SPEND:,.0f}원 미만이면 표본이 작아 <b>판단 보류</b>로 둡니다.</div>'
-        + table + '</div></div>'
-        + """
+    for ti, label in enumerate(tab_labels):
+        with tabs[ti]:
+            # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
+            # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
+            keep = [c for c in order if c not in sep] if label == "TOTAL" else [label]
+            rows = _gc_rows(d, start, end, level,
+                            exclude=[c for c in all_ch if c not in keep])
+            if rows.empty:
+                st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
+                continue
+
+            ch_ses = rows.groupby("channel")["sessions"].sum().to_dict()
+
+            def cost_of(r):
+                tot = float(ch_ses.get(r["channel"], 0) or 0)
+                if tot <= 0:
+                    return 0.0
+                return spend_by_ch.get(r["channel"], 0.0) * float(r["sessions"]) / tot
+
+            rows = rows.copy()
+            rows["_cost"] = rows.apply(cost_of, axis=1)
+            rows["_roas"] = np.where(rows["_cost"] > 0, rows["rev"] / rows["_cost"] * 100, 0.0)
+            rows["_name"] = rows["cre_name"] if show_img else rows["key"]
+            tot_cost = float(rows["_cost"].sum())
+            tot_rev = float(rows["rev"].sum())
+            avg_roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0.0
+
+            # (미설정) 비중 경고 — 이 탭에 해당하는 것만
+            sub = per if label == "TOTAL" else per[
+                per["channel"].map(_v4_canon_channel) == label]
+            t_ses = float(sub["sessions"].sum())
+            unset = float(sub[sub["creative"] == "(미설정)"]["sessions"].sum())
+            if t_ses > 0 and unset / t_ses > 0.2:
+                st.warning(
+                    f"소재(utm_content)가 안 붙은 방문이 {unset:,.0f} / {t_ses:,.0f}건 "
+                    f"({unset / t_ses * 100:.0f}%)입니다. 광고 랜딩 URL에 `utm_content`를 "
+                    "넣어야 소재별 비교가 됩니다 — 운영 도구 › UTM 빌더에서 만들 수 있습니다."
+                )
+
+            st.caption(
+                f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · "
+                f"추정 광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만은 표본 부족으로 판단 보류 처리"
+            )
+            cmt = _gc_comment(rows, label if label != "TOTAL" else "전체", avg_roas)
+            if cmt:
+                st.markdown(cmt, unsafe_allow_html=True)
+
+            body = []
+            for _, r in rows.iterrows():
+                url = None
+                if show_img:
+                    for k in _gc_image_keys(r):
+                        if k in img_map:
+                            url = img_map[k]
+                            break
+                body.append(_gc_row_html(r, float(r["_cost"]), img_url=url, show_img=show_img))
+            tot_r = rows[["sessions", "new", "signup", "conv", "rev"]].sum()
+            tot_r["key"] = "TOTAL"
+            tot_r["cre_name"] = "TOTAL"
+            sum_html = _gc_row_html(tot_r, tot_cost, "fv4-sum-row nosort", show_img=show_img)
+
+            tid = f"gctbl{ti}"
+            th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
+                         f'<span class="fv4-ar">&#8645;</span></th>'
+                         for i, h in enumerate(head))
+            table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
+                     f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
+
+            card = (
+                FUNNEL_V4_CSS
+                + '<div class="fv4-wrap"><div class="fv4-card">'
+                f'<span class="fv4-badge-dark">{level}별</span>'
+                f'<div class="fv4-card-title">{label} · {level}별 GA 성과</div>'
+                + (f'<div class="fv4-card-sub">{" · ".join(sep)}은 별도 관리라 TOTAL에서 '
+                   f'빠져 있습니다 — 각자 탭에서 보세요.</div>'
+                   if label == "TOTAL" and sep else "")
+                + '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
+                '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
+                '소재끼리 비교가 됩니다. <b>UTM 매핑된 광고 매체만</b> 셉니다 — '
+                '자연유입·레퍼럴·(not set)은 소재가 없어서 제외합니다.</div>'
+                '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. TOTAL은 맨 위 고정입니다.<br>'
+                '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 '
+                '것입니다 — 같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
+                '<b>(규칙 외)</b>로 모아 보여주니, 그게 많으면 UTM 작명을 맞춰주세요.<br>'
+                '<b>추정 광고비</b>는 매체 광고비를 그 매체 안에서 방문 비중대로 나눈 값입니다 — '
+                'GA에는 소재별 광고비가 없습니다. <b>순위를 볼 때만</b> 쓰시고 정산에는 쓰지 '
+                f'마세요. 광고비가 {FUNNEL_MIN_SPEND:,.0f}원 미만이면 <b>판단 보류</b>로 둡니다.</div>'
+                + table + '</div></div>'
+                + """
 <script>
 (function(){
-  var t=document.getElementById('gctbl'); if(!t) return;
+  var t=document.getElementById('__TID__'); if(!t) return;
   var ths=t.tHead.rows[0].cells, st={i:-1,asc:false};
   function v(row,i){var c=row.cells[i]; if(!c) return '';
     var d=c.getAttribute('data-v'); return d!==null?parseFloat(d):c.innerText.trim();}
@@ -9743,9 +10037,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
       fixed.concat(mov).forEach(function(r){tb.appendChild(r);});
     };})(i);}
 })();
-</script>"""
-    )
-    st.components.v1.html(card, height=min(1400, 420 + 40 * len(body)), scrolling=True)
+</script>""".replace("__TID__", tid)
+            )
+            row_h = 116 if show_img else 44
+            st.components.v1.html(card, height=min(2200, 460 + row_h * len(body)),
+                                  scrolling=True)
 
 
 def render_ga_channel_funnel_page(
@@ -11160,7 +11456,8 @@ def main():
         )
     elif page == "GA 소재별 성과":
         render_ga_creative_page(T("ga_creative_daily"), ad_spend=T("ad_spend_daily"),
-                                utm_map=T("utm_channel_map"))
+                                utm_map=T("utm_channel_map"),
+                                creative_perf=T("creative_performance"))
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(
             ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
