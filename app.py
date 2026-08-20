@@ -9434,6 +9434,11 @@ GC_HEAD = ["구분", "방문", "신규 방문", "회원가입", "가입률",
 # (6자리 YYMMDD 또는 8자리 YYYYMMDD)을 기준으로 앞=타겟팅, 뒤=소재로 가른다.
 GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
 
+# 소재별 화면에서 기본으로 빼는 매체.
+# 맨즈탭은 소재 운영·정산을 별도 시트로 관리해서, 여기 섞이면 오히려 헷갈린다.
+# 화면의 '제외할 매체'에서 언제든 넣었다 뺐다 할 수 있다.
+GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
+
 
 def _gc_parse_content(v):
     """utm_content → (타겟팅, 등록일, 소재명). 규칙에 안 맞으면 통째로 소재명으로 둔다."""
@@ -9462,7 +9467,8 @@ def _gc_parse_content(v):
     return target or "(미설정)", ymd, name or "(미설정)"
 
 
-def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str) -> pd.DataFrame:
+def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
+             exclude=None) -> pd.DataFrame:
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
     cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev"]
     if cre is None or cre.empty:
@@ -9481,6 +9487,10 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str) -> pd.DataFr
     if g.empty:
         return pd.DataFrame(columns=cols)
     g["channel"] = g["channel"].map(_v4_canon_channel)
+    if exclude:
+        g = g[~g["channel"].isin(set(exclude))]
+        if g.empty:
+            return pd.DataFrame(columns=cols)
     is_new = g["user_type"] == "신규"
     g["new"] = np.where(is_new, g["sessions"], 0.0)
     # 회원가입은 신규 유입의 성과로 본다 (재방문자의 가입은 사실상 없다)
@@ -9598,7 +9608,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
                      horizontal=True, key="gc_level")
-    rows = _gc_rows(d, start, end, level)
+    # 제외할 매체 — 맨즈탭처럼 소재를 별도 시트로 관리하는 매체는 기본으로 빼둔다.
+    all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
+    default_ex = [c for c in GC_DEFAULT_EXCLUDE if c in all_ch]
+    exclude = st.multiselect(
+        "제외할 매체", all_ch, default=default_ex, key="gc_exclude",
+        help="여기 담긴 매체는 표에서 빠집니다. 맨즈탭은 별도 시트로 관리하셔서 기본 제외입니다.",
+    )
+    rows = _gc_rows(d, start, end, level, exclude=exclude)
     if rows.empty:
         if not lookup:
             st.warning(
@@ -9613,6 +9630,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다. 비율을 먼저 보여준다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
+    if exclude:
+        per = per[~per["channel"].map(_v4_canon_channel).isin(set(exclude))]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
     tot_ses = float(per["sessions"].sum())
     unset = float(per[per["creative"] == "(미설정)"]["sessions"].sum())
