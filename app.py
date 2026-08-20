@@ -9608,13 +9608,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
                      horizontal=True, key="gc_level")
-    # 제외할 매체 — 맨즈탭처럼 소재를 별도 시트로 관리하는 매체는 기본으로 빼둔다.
+    # 볼 매체 고르기.
+    # 맨즈탭은 소재 운영·정산을 별도 시트로 관리해서 평소에는 빼두는데, 가끔 맨즈탭만 따로
+    # 봐야 할 때가 있다. 매번 나머지를 다 빼는 건 번거로우니 셋 중에 고르게 한다.
     all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
-    default_ex = [c for c in GC_DEFAULT_EXCLUDE if c in all_ch]
-    exclude = st.multiselect(
-        "제외할 매체", all_ch, default=default_ex, key="gc_exclude",
-        help="여기 담긴 매체는 표에서 빠집니다. 맨즈탭은 별도 시트로 관리하셔서 기본 제외입니다.",
-    )
+    sep_ch = [c for c in GC_DEFAULT_EXCLUDE if c in all_ch]      # 따로 보는 매체
+    sep_label = " · ".join(sep_ch) if sep_ch else "별도 관리 매체"
+    scope = st.radio(
+        "보기 대상",
+        [f"{sep_label} 제외", f"{sep_label}만", "직접 고르기"],
+        horizontal=True, key="gc_scope",
+        help=f"{sep_label}은 소재를 별도 시트로 관리하셔서 평소에는 빼둡니다.",
+    ) if sep_ch else "직접 고르기"
+
+    if scope.endswith("만"):
+        exclude = [c for c in all_ch if c not in sep_ch]
+    elif scope.endswith("제외"):
+        exclude = list(sep_ch)
+    else:
+        exclude = st.multiselect(
+            "제외할 매체", all_ch, default=[], key="gc_exclude",
+            help="여기 담긴 매체가 표에서 빠집니다.",
+        )
     rows = _gc_rows(d, start, end, level, exclude=exclude)
     if rows.empty:
         if not lookup:
