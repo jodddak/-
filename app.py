@@ -9474,9 +9474,13 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str) -> pd.DataFr
         return pd.DataFrame(columns=cols)
     for c in ("sessions", "conversions", "revenue", "signups"):
         g[c] = pd.to_numeric(g.get(c), errors="coerce").fillna(0).astype(float)
-    g["channel"] = g.apply(
-        lambda r: _v4_canon_channel(r["channel"]) if pd.notna(r.get("channel"))
-        else _v4_canon_channel(r["source_medium"]), axis=1)
+    # 채널 퍼널·채널 성과와 같은 기준으로 광고 매체만 남긴다.
+    # UTM 매핑(utm_channel_map)에 있는 소스/매체 = 우리가 돈 내고 돌리는 광고다.
+    # 매핑이 안 된 건 organic·referral·direct·(not set)이라 소재 성과로 볼 게 없다.
+    g = g[g.apply(classify_ga_bucket, axis=1) == "광고"]
+    if g.empty:
+        return pd.DataFrame(columns=cols)
+    g["channel"] = g["channel"].map(_v4_canon_channel)
     is_new = g["user_type"] == "신규"
     g["new"] = np.where(is_new, g["sessions"], 0.0)
     # 회원가입은 신규 유입의 성과로 본다 (재방문자의 가입은 사실상 없다)
@@ -9578,6 +9582,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if d.empty:
         st.info("날짜를 읽을 수 있는 행이 없습니다.")
         return
+
+    # 매체 판정은 저장된 channel을 믿지 않고 지금의 UTM 매핑으로 다시 입힌다.
+    # 동기화할 때 매핑이 비어 있었거나 그 뒤에 매핑을 고쳤을 수 있어서, 화면 기준으로 맞춘다.
+    lookup = (build_utm_channel_lookup(utm_map)
+              if utm_map is not None and not utm_map.empty else {})
+    if lookup:
+        d["channel"] = d["source_medium"].map(
+            lambda sm: lookup.get(str(sm).strip().lower()))
+    elif "channel" not in d.columns:
+        d["channel"] = None
     with c1:
         start, end = period_filter(d["report_date"].min(), d["report_date"].max(),
                                    key="ga_creative", default_preset="이번달")
@@ -9586,11 +9600,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                      horizontal=True, key="gc_level")
     rows = _gc_rows(d, start, end, level)
     if rows.empty:
-        st.info("선택한 기간에 데이터가 없습니다.")
+        if not lookup:
+            st.warning(
+                "UTM 매핑이 비어 있어 광고 매체를 가려낼 수 없습니다. "
+                "사이드바에서 **UTM 리스트 파일**을 먼저 올려주세요 "
+                "(소스/매체 → 매체명 대응표)."
+            )
+        else:
+            st.info("선택한 기간에 광고 유입 데이터가 없습니다.")
         return
 
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다. 비율을 먼저 보여준다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
+    per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
     tot_ses = float(per["sessions"].sum())
     unset = float(per[per["creative"] == "(미설정)"]["sessions"].sum())
@@ -9638,7 +9660,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         f'<div class="fv4-card-title">{level}별 GA 성과</div>'
         '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
         '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
-        '소재끼리 비교가 됩니다.</div>'
+        '소재끼리 비교가 됩니다. <b>UTM 매핑된 광고 매체만</b> 셉니다 — '
+        '자연유입·레퍼럴·(not set)은 소재가 없어서 제외합니다.</div>'
         '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. TOTAL은 맨 위 고정입니다.<br>'
         '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 것입니다 — '
         '같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
