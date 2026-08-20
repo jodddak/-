@@ -9440,6 +9440,42 @@ GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
 GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
 
 
+def _gc_media_picker(all_ch, off_by_default) -> list:
+    """엑셀 필터처럼 체크박스로 매체를 고른다. 켜져 있는 매체 목록을 돌려준다.
+
+    라디오 3개(제외/만보기/직접)로 나눠뒀더니 '맨즈탭만' 같은 특수 케이스마다 버튼이 하나씩
+    늘어나는 구조였다. 체크박스 목록이면 어떤 조합이든 클릭 몇 번으로 끝나서 하나로 합친다.
+    (모두 선택)은 자식 체크박스를 한꺼번에 켜고 끈다.
+    """
+    ss = st.session_state
+    for c in all_ch:
+        ss.setdefault(f"gc_ch_{c}", c not in off_by_default)
+    ss.setdefault("gc_ch_all", all(ss[f"gc_ch_{c}"] for c in all_ch))
+
+    def _toggle_all():
+        for c in all_ch:
+            ss[f"gc_ch_{c}"] = ss["gc_ch_all"]
+
+    on = [c for c in all_ch if ss.get(f"gc_ch_{c}", True)]
+    if len(on) == len(all_ch):
+        cap = f"전체 {len(all_ch)}개"
+    elif len(on) == 1:
+        cap = on[0]
+    else:
+        off = [c for c in all_ch if c not in on]
+        cap = (f"{len(on)}개 선택 · {', '.join(off)} 제외"
+               if len(off) <= 3 else f"{len(on)} / {len(all_ch)}개 선택")
+
+    with st.expander(f"매체 선택 — {cap}", expanded=False):
+        st.checkbox("(모두 선택)", key="gc_ch_all", on_change=_toggle_all)
+        st.markdown("<hr style='margin:6px 0 10px'>", unsafe_allow_html=True)
+        cols = st.columns(3)
+        for i, c in enumerate(all_ch):
+            with cols[i % 3]:
+                st.checkbox(c, key=f"gc_ch_{c}")
+    return [c for c in all_ch if ss.get(f"gc_ch_{c}", True)]
+
+
 def _gc_parse_content(v):
     """utm_content → (타겟팅, 등록일, 소재명). 규칙에 안 맞으면 통째로 소재명으로 둔다."""
     raw = str(v or "").strip()
@@ -9608,28 +9644,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
                      horizontal=True, key="gc_level")
-    # 볼 매체 고르기.
-    # 맨즈탭은 소재 운영·정산을 별도 시트로 관리해서 평소에는 빼두는데, 가끔 맨즈탭만 따로
-    # 봐야 할 때가 있다. 매번 나머지를 다 빼는 건 번거로우니 셋 중에 고르게 한다.
+    # 볼 매체 고르기 — 맨즈탭처럼 소재를 별도 시트로 관리하는 매체는 처음에 꺼둔다.
     all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
-    sep_ch = [c for c in GC_DEFAULT_EXCLUDE if c in all_ch]      # 따로 보는 매체
-    sep_label = " · ".join(sep_ch) if sep_ch else "별도 관리 매체"
-    scope = st.radio(
-        "보기 대상",
-        [f"{sep_label} 제외", f"{sep_label}만", "직접 고르기"],
-        horizontal=True, key="gc_scope",
-        help=f"{sep_label}은 소재를 별도 시트로 관리하셔서 평소에는 빼둡니다.",
-    ) if sep_ch else "직접 고르기"
-
-    if scope.endswith("만"):
-        exclude = [c for c in all_ch if c not in sep_ch]
-    elif scope.endswith("제외"):
-        exclude = list(sep_ch)
-    else:
-        exclude = st.multiselect(
-            "제외할 매체", all_ch, default=[], key="gc_exclude",
-            help="여기 담긴 매체가 표에서 빠집니다.",
-        )
+    picked = _gc_media_picker(all_ch, [c for c in GC_DEFAULT_EXCLUDE if c in all_ch])
+    exclude = [c for c in all_ch if c not in picked]
     rows = _gc_rows(d, start, end, level, exclude=exclude)
     if rows.empty:
         if not lookup:
