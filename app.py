@@ -721,11 +721,22 @@ def _local_store():
 LOAD_PAGE_SIZE = 1000
 LOAD_MAX_WORKERS = 8
 
+# 화면이 받아올 최대 과거 기간(일). 날짜별로 잘게 쌓이는 테이블만 상한을 둔다.
+# Supabase에는 그대로 남고 '받아오는 범위'만 줄이는 것이라, 늘리고 싶으면 숫자만 바꾸면 된다.
+#   ga_creative_daily: 날짜×소스×캠페인×소재×신규재방문 5겹이라 하루 수백~수천 행씩 늘어난다.
+#     1년이면 7만 행(로딩 1.6초), 2년이면 14만 행(3.0초)이 되므로 1년에서 끊는다.
+#     작년 같은 시즌 소재와 비교할 수 있게 6개월이 아니라 1년으로 잡았다.
+LOAD_MAX_DAYS = {
+    "ga_creative_daily": 365,
+}
 
-def _load_page(client, table_name, page):
+
+def _load_page(client, table_name, page, since=None):
     lo = page * LOAD_PAGE_SIZE
-    resp = (client.table(table_name).select("*")
-            .range(lo, lo + LOAD_PAGE_SIZE - 1).execute())
+    q = client.table(table_name).select("*")
+    if since:
+        q = q.gte("report_date", since)
+    resp = q.range(lo, lo + LOAD_PAGE_SIZE - 1).execute()
     return page, (resp.data or [])
 
 
@@ -743,9 +754,15 @@ def load_table(name: str) -> pd.DataFrame:
         return _local_store().get(name, pd.DataFrame()).copy()
 
     table_name = TABLES[name]
+    max_days = LOAD_MAX_DAYS.get(name)
+    since = (date.today() - timedelta(days=max_days)).isoformat() if max_days else None
+
+    def _q():
+        q = client.table(table_name).select("*", count="exact")
+        return q.gte("report_date", since) if since else q
+
     try:
-        first = (client.table(table_name).select("*", count="exact")
-                 .range(0, LOAD_PAGE_SIZE - 1).execute())
+        first = _q().range(0, LOAD_PAGE_SIZE - 1).execute()
     except Exception as e:
         # 테이블이 아직 Supabase에 없는 경우(예: 신규 테이블 미생성) 등 API 에러가 나면
         # 앱 전체가 죽지 않도록 빈 데이터로 취급하고 안내만 띄운다.
@@ -769,7 +786,7 @@ def load_table(name: str) -> pd.DataFrame:
             got = {}
             with ThreadPoolExecutor(max_workers=LOAD_MAX_WORKERS) as ex:
                 for page, chunk in ex.map(
-                        lambda pg: _load_page(client, table_name, pg), range(1, n_pages)):
+                        lambda pg: _load_page(client, table_name, pg, since), range(1, n_pages)):
                     got[page] = chunk
             for pg in range(1, n_pages):
                 rows.extend(got.get(pg, []))
@@ -780,7 +797,7 @@ def load_table(name: str) -> pd.DataFrame:
     page = 1
     while True:
         try:
-            _, chunk = _load_page(client, table_name, page)
+            _, chunk = _load_page(client, table_name, page, since)
         except Exception:
             break
         rows.extend(chunk)
