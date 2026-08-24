@@ -716,31 +716,77 @@ def _local_store():
 
 # 데이터는 하루 단위로 들어오는데 캐시 수명이 60초면, 조작할 때마다 사실상 매번 다시 읽는다.
 # 15분으로 늘리고, 즉시 갱신이 필요할 땐 화면의 '지금 동기화'가 캐시를 비우게 해둔다.
+# 한 번에 받아올 수 있는 행 수. Supabase(PostgREST)가 응답당 1000행으로 잘라서 주므로
+# 그보다 크게 잡아도 소용이 없다. 대신 페이지를 '동시에' 받아서 왕복 대기를 겹친다.
+LOAD_PAGE_SIZE = 1000
+LOAD_MAX_WORKERS = 8
+
+
+def _load_page(client, table_name, page):
+    lo = page * LOAD_PAGE_SIZE
+    resp = (client.table(table_name).select("*")
+            .range(lo, lo + LOAD_PAGE_SIZE - 1).execute())
+    return page, (resp.data or [])
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def load_table(name: str) -> pd.DataFrame:
+    """Supabase에서 테이블 한 벌을 받아온다.
+
+    예전에는 1000행씩 '순서대로' 받았다. ga_creative_daily처럼 3만 행이 넘는 테이블은
+    왕복이 36번이라, 한 번에 0.2초만 걸려도 7초를 앉아서 기다리는 구조였다.
+    이제는 첫 페이지에서 전체 행 수를 같이 받아 남은 페이지를 동시에 요청한다
+    (36번 순차 → 8개씩 병렬). 동시 요청이 막히거나 실패하면 예전 방식으로 되돌아간다.
+    """
     client = get_supabase_client()
     if client is None:
         return _local_store().get(name, pd.DataFrame()).copy()
 
-    rows, page, page_size = [], 0, 1000
+    table_name = TABLES[name]
     try:
-        while True:
-            resp = (
-                client.table(TABLES[name])
-                .select("*")
-                .range(page * page_size, page * page_size + page_size - 1)
-                .execute()
-            )
-            chunk = resp.data or []
-            rows.extend(chunk)
-            if len(chunk) < page_size:
-                break
-            page += 1
+        first = (client.table(table_name).select("*", count="exact")
+                 .range(0, LOAD_PAGE_SIZE - 1).execute())
     except Exception as e:
-        # 테이블이 아직 Supabase에 없는 경우(예: creative_performance 신규 테이블 미생성) 등
-        # API 에러가 나면 앱 전체가 죽지 않도록 빈 데이터로 취급하고 안내만 띄운다.
-        st.sidebar.warning(f"'{TABLES.get(name, name)}' 테이블 조회 실패 — 해당 테이블이 Supabase에 없을 수 있습니다. ({e})")
+        # 테이블이 아직 Supabase에 없는 경우(예: 신규 테이블 미생성) 등 API 에러가 나면
+        # 앱 전체가 죽지 않도록 빈 데이터로 취급하고 안내만 띄운다.
+        st.sidebar.warning(
+            f"'{table_name}' 테이블 조회 실패 — 해당 테이블이 Supabase에 없을 수 있습니다. ({e})")
         return pd.DataFrame()
+
+    rows = list(first.data or [])
+    total = getattr(first, "count", None)
+    if len(rows) < LOAD_PAGE_SIZE:
+        return pd.DataFrame(rows)
+
+    if total:
+        n_pages = (int(total) + LOAD_PAGE_SIZE - 1) // LOAD_PAGE_SIZE
+    else:
+        n_pages = None       # count를 못 받으면 순차 방식으로
+
+    if n_pages and n_pages > 1:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            got = {}
+            with ThreadPoolExecutor(max_workers=LOAD_MAX_WORKERS) as ex:
+                for page, chunk in ex.map(
+                        lambda pg: _load_page(client, table_name, pg), range(1, n_pages)):
+                    got[page] = chunk
+            for pg in range(1, n_pages):
+                rows.extend(got.get(pg, []))
+            return pd.DataFrame(rows)
+        except Exception:
+            rows = list(first.data or [])   # 병렬이 막히면 아래 순차 방식으로 다시
+
+    page = 1
+    while True:
+        try:
+            _, chunk = _load_page(client, table_name, page)
+        except Exception:
+            break
+        rows.extend(chunk)
+        if len(chunk) < LOAD_PAGE_SIZE:
+            break
+        page += 1
     return pd.DataFrame(rows)
 
 
@@ -9935,13 +9981,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if show_img:
         head.insert(1, "소재")
 
+    # 탭마다 _gc_rows를 다시 돌리면 같은 계산을 매체 수만큼 반복하게 된다(3만 행이면 탭당
+    # 0.15초씩). 한 번만 접어두고 탭에서는 매체로 걸러 쓴다.
+    rows_all = _gc_rows(d, start, end, level, exclude=hidden)
+
     for ti, label in enumerate(tab_labels):
         with tabs[ti]:
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
             keep = [c for c in order if c not in sep] if label == "TOTAL" else [label]
-            rows = _gc_rows(d, start, end, level,
-                            exclude=[c for c in all_ch if c not in keep])
+            rows = rows_all[rows_all["channel"].isin(keep)]
             if rows.empty:
                 st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
