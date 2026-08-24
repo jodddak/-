@@ -9445,6 +9445,10 @@ GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
 # 화면의 '제외할 매체'에서 언제든 넣었다 뺐다 할 수 있다.
 GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
 
+# 지금은 운영하지 않는 매체. 탭 자체를 안 만든다 — 옛날 데이터만 남아 있어서 탭이 있으면
+# 오히려 헷갈린다. 다시 집행을 시작하면(선택 기간에 광고비가 잡히면) 자동으로 다시 나온다.
+GC_HIDE_IF_IDLE = ["(DA) ADN", "카카오", "네이버 트렌드픽"]
+
 
 GC_IMAGE_FOLDER = "ga_creative"
 
@@ -9895,9 +9899,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다."
         )
 
+    # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
+    # (탭 구성보다 먼저 구해둔다 — '지금 집행 중인가'로 숨김 여부를 판단해야 해서.)
+    spend = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None else pd.DataFrame()
+    spend_by_ch = {}
+    if spend is not None and not spend.empty:
+        for _, r in spend.iterrows():
+            spend_by_ch[_v4_canon_channel(r["channel"])] = float(r.get("cost_incl_vat", 0) or 0)
+
     # ── 매체 탭 ── 캡처하신 소재별 성과 화면과 같은 구성.
     # 맨즈탭처럼 별도 시트로 관리하는 매체는 탭 순서 맨 뒤로 보낸다(평소에 안 보게).
     all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
+    hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(c, 0) <= 0]
+    all_ch = [c for c in all_ch if c not in hidden]
     sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE]
     order = [c for c in all_ch if c not in sep] + sep
     if not order:
@@ -9913,13 +9927,6 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
-
-    # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
-    spend = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None else pd.DataFrame()
-    spend_by_ch = {}
-    if spend is not None and not spend.empty:
-        for _, r in spend.iterrows():
-            spend_by_ch[_v4_canon_channel(r["channel"])] = float(r.get("cost_incl_vat", 0) or 0)
 
     show_img = (level == "소재")
     head = list(GC_HEAD)
