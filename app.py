@@ -662,6 +662,7 @@ TABLES = {
     "media_master": "media_master",
     "ad_contract": "ad_contract",
     "ga_creative_daily": "ga_creative_daily",
+    "kakao_channel_message": "kakao_channel_message",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -3756,6 +3757,52 @@ def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
     return out[out[["cost_incl_vat", "impressions", "clicks"]].sum(axis=1) > 0]
 
 
+def parse_kakao_channel_message_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
+    """카카오 비즈니스 파트너센터 > 인사이트 > 메시지 > '엑셀로 다운받기'로 받은
+    MessageStat_YYYYMMDD_YYYYMMDD.xls 전용 파서.
+
+    이 데이터는 카카오모먼트(유료 광고) 광고비 API와는 완전히 별개다 — 카카오톡 채널
+    친구들에게 보내는 소식/쿠폰 메시지의 발송수·클릭수이며, 카카오는 이 통계에 대한
+    공식 API를 제공하지 않아(2026-08 기준 카카오 개발자 커뮤니티 확인) 엑셀 다운로드가
+    유일한 경로다. 시트명은 보통 '메시지 통계'이고 헤더는 1행
+    (발송시작일 / 메시지 내용 / 발송수 / 전체 클릭수)이다.
+
+    이 메시지 링크에는 UTM이 안 붙어있어 메시지 단위로 GA를 1:1 매칭할 수는 없지만,
+    media_master의 '카카오톡 플친' 행(utm_match="kakao_msg/email,kakaotalk/display")이
+    이미 GA 소스/매체를 이 채널로 잡고 있으므로, 채널 단위 GA 유입·매출은
+    '채널 성과' 페이지의 카카오톡 플친 항목에서 그대로 확인 가능하다."""
+    target_sheet = next((s for s in xls.sheet_names if "메시지" in str(s)), xls.sheet_names[0])
+    try:
+        df = pd.read_excel(xls, sheet_name=target_sheet)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+
+    cols = {str(c).strip(): c for c in df.columns}
+    c_date = cols.get("발송시작일")
+    c_msg = cols.get("메시지 내용")
+    c_send = cols.get("발송수")
+    c_click = next((cols[c] for c in cols if "클릭" in c), None)
+    if c_date is None or c_send is None:
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["sent_at"] = pd.to_datetime(df[c_date], errors="coerce")
+    out["message"] = df[c_msg].astype(str).str.strip() if c_msg else ""
+    out["sends"] = pd.to_numeric(df[c_send], errors="coerce").fillna(0).astype(int)
+    out["clicks"] = (
+        pd.to_numeric(df[c_click], errors="coerce").fillna(0).astype(int) if c_click else 0
+    )
+    out = out.dropna(subset=["sent_at"])
+    if out.empty:
+        return out
+    out["report_date"] = out["sent_at"].dt.date
+    out["sent_at"] = out["sent_at"].astype(str)
+    out["ctr"] = np.where(out["sends"] > 0, out["clicks"] / out["sends"] * 100, 0.0)
+    return out[["sent_at", "report_date", "message", "sends", "clicks", "ctr"]].reset_index(drop=True)
+
+
 def detect_upload_kind(file) -> str:
     """올린 엑셀이 네 종류 중 무엇인지 판단한다.
 
@@ -3773,6 +3820,8 @@ def detect_upload_kind(file) -> str:
         return "mix"
     if "예산" in flat and "믹스" not in flat:
         return "budget"
+    if "messagestat" in flat:
+        return "kakao_msg"
 
     try:
         file.seek(0)
@@ -3800,6 +3849,7 @@ def detect_upload_kind(file) -> str:
         ("budget", lambda: parse_channel_budget_sheet(xls)),
         ("ga", lambda: parse_inflow_revenue_sheet(xls)),
         ("ga", lambda: parse_utm_channel_map(xls)),
+        ("kakao_msg", lambda: parse_kakao_channel_message_sheet(xls)),
     ):
         try:
             if not fn().empty:
@@ -3828,6 +3878,7 @@ def render_upload_panel():
         "budget": "③ 연간 예산 (◆26년 월별 예산 정리)",
         "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
         "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
+        "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat 엑셀)",
     }
     kind = None
     if up_file is not None:
@@ -3844,6 +3895,7 @@ def render_upload_panel():
     budget_file = up_file if kind == "budget" else None
     mix_file = up_file if kind == "mix" else None
     mr_file = up_file if kind == "media_report" else None
+    kko_msg_file = up_file if kind == "kakao_msg" else None
 
     if file is not None:
         today = date.today()
@@ -4106,6 +4158,34 @@ def render_upload_panel():
                                "report_date,channel,source", mr_file.name)
                 st.cache_data.clear()
                 st.sidebar.success(f"저장 완료! {n}행")
+                st.rerun()
+
+    if kko_msg_file is not None:
+        st.sidebar.caption(
+            "카카오 비즈니스 파트너센터 > 인사이트 > 메시지 > '엑셀로 다운받기'로 받은 파일입니다. "
+            "카카오모먼트(유료 광고)와는 별개로, 카카오톡 채널 메시지의 발송수·클릭수를 저장합니다."
+        )
+        try:
+            kko_xls = pd.ExcelFile(kko_msg_file)
+            kko_msg_df = parse_kakao_channel_message_sheet(kko_xls)
+        except Exception as e:
+            kko_msg_df = pd.DataFrame()
+            st.sidebar.warning(f"읽지 못했습니다: {e}")
+        if kko_msg_df.empty:
+            st.sidebar.warning(
+                "인식 가능한 데이터를 찾지 못했습니다 — '메시지 통계' 시트에 발송시작일/메시지 내용/"
+                "발송수/전체 클릭수 컬럼이 있는 파일인지 확인해주세요."
+            )
+        else:
+            st.sidebar.write(
+                f"📨 메시지 {len(kko_msg_df)}건 인식 "
+                f"({kko_msg_df['report_date'].min()} ~ {kko_msg_df['report_date'].max()}) · "
+                f"발송 합계 {kko_msg_df['sends'].sum():,.0f} · 클릭 합계 {kko_msg_df['clicks'].sum():,.0f}"
+            )
+            if st.sidebar.button("💾 카카오톡 채널 메시지 저장하기", type="primary", key="kko_msg_save_btn"):
+                n = save_table("kakao_channel_message", kko_msg_df, "sent_at", kko_msg_file.name)
+                st.cache_data.clear()
+                st.sidebar.success(f"저장 완료! {n}건 — '채널 성과' 페이지에서 확인하세요.")
                 st.rerun()
 
     st.sidebar.markdown("---")
@@ -8651,6 +8731,42 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                                "report_date,channel,source", "정액 계약 일할")
                 st.success(f"계약 {len(e)}건 → 일별 {n}행 저장했습니다.")
                 st.cache_data.clear()
+
+    # ── 카카오톡 채널 메시지 (발송·클릭) ───────────────────
+    # 카카오모먼트(유료 광고)와는 완전히 별개 데이터. 메시지 링크에 UTM이 없어 메시지 단위로
+    # GA를 1:1 매칭할 수는 없지만, 이 채널의 GA 유입·매출 자체는 media_master의 '카카오톡 플친'
+    # 행(utm_match="kakao_msg/email,kakaotalk/display")이 이미 잡고 있어서, 아래 매체별 표의
+    # '카카오톡 플친' 줄에서 그대로 확인할 수 있다 — 그래서 여기서는 발송수·클릭수만 보여준다.
+    kko_msg_all = load_table("kakao_channel_message")
+    with st.expander("📨 카카오톡 채널 메시지 발송 성과 (별도 엑셀 업로드)"):
+        st.caption(
+            "카카오 비즈니스 파트너센터 > 인사이트 > 메시지 > '엑셀로 다운받기'로 받은 파일을 "
+            "사이드바 '⚙️ 데이터 관리'에서 업로드하면 여기 쌓입니다. 카카오모먼트 광고비와는 "
+            "무관합니다. 메시지 링크에 UTM이 없어 이 표만으로는 GA 매칭이 안 되지만, 이 채널의 "
+            "GA 유입·매출은 아래 매체별 표의 '카카오톡 플친' 줄에서 이미 확인할 수 있습니다."
+        )
+        if kko_msg_all is None or kko_msg_all.empty:
+            st.info("아직 업로드된 메시지 데이터가 없습니다.")
+        else:
+            kmg = kko_msg_all.copy()
+            kmg["report_date"] = pd.to_datetime(kmg["report_date"], errors="coerce").dt.date
+            kmg = kmg[(kmg["report_date"] >= start) & (kmg["report_date"] <= end)].sort_values(
+                "report_date", ascending=False)
+            if kmg.empty:
+                st.info(f"{start} ~ {end} 기간에 발송된 메시지가 없습니다.")
+            else:
+                tot_send, tot_click = kmg["sends"].sum(), kmg["clicks"].sum()
+                tot_ctr = (tot_click / tot_send * 100) if tot_send > 0 else 0.0
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("발송 건수(메시지 수)", f"{len(kmg):,}건")
+                mc2.metric("총 발송수", f"{tot_send:,.0f}")
+                mc3.metric("평균 클릭률", f"{tot_ctr:.2f}%")
+                show = kmg[["report_date", "message", "sends", "clicks", "ctr"]].rename(columns={
+                    "report_date": "발송일", "message": "메시지 내용",
+                    "sends": "발송수", "clicks": "클릭수", "ctr": "클릭률(%)",
+                })
+                show["클릭률(%)"] = show["클릭률(%)"].round(2)
+                st.dataframe(show, use_container_width=True, hide_index=True)
 
     # ── 집계 ─────────────────────────────────────────────
     spend = _cp_spend_by_channel(ad_spend, start, end)
