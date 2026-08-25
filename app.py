@@ -9444,7 +9444,7 @@ def diagnose_ad_spend_setup() -> str:
         if miss:
             ng(f"2-3. 크리테오: 빠진 항목 {', '.join(miss)}")
         else:
-            info(f"크리테오 API 버전: {cr.get('api_version', CRITEO_DEFAULT_VERSION)}")
+            info(f"크리테오 API 버전: {cr.get('api_version', CRITEO_VERSION_CANDIDATES[0])}")
             try:
                 df = fetch_criteo_spend(test_start, test_end)
                 if df.empty:
