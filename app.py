@@ -7143,7 +7143,7 @@ def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
 #   · 요청 제한: 광고계정당 5초에 1회 → 호출 사이에 텀을 둔다.
 #   · 비즈니스 토큰은 만료되므로 refresh_token으로 갱신해서 쓴다.
 KAKAO_REPORT_URL = "https://apis.moment.kakao.com/openapi/v4/adAccounts/report"
-KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
+KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/business/token"
 KAKAO_MAX_RANGE_DAYS = 31
 KAKAO_RATE_LIMIT_SEC = 5.5
 
@@ -7666,7 +7666,7 @@ def sync_ad_spend(existing: pd.DataFrame):
     return total, saved, errors
 
 
-KAKAO_AUTH_URL = "https://kauth.kakao.com/oauth/authorize"
+KAKAO_AUTH_URL = "https://kauth.kakao.com/oauth/business/authorize"
 KAKAO_MOMENT_SCOPE = "moment_management"
 
 
