@@ -7680,8 +7680,9 @@ def render_kakao_token_helper():
 
     cfg = _secrets_section("kakao_moment") or {}
     st.caption(
-        "카카오 개발자센터의 REST API 키로 refresh token을 받습니다. "
-        "카카오모먼트 API 권한(moment_management)이 부여된 뒤에 해야 정상 발급됩니다."
+        "카카오 개발자센터의 REST API 키로 비즈니스 토큰(access_token)을 받습니다. "
+        "카카오모먼트 API 권한(moment_management)이 부여된 뒤에 해야 정상 발급됩니다. "
+        "비즈니스 토큰은 refresh_token이 없어 만료되면 이 화면에서 다시 발급받아야 합니다."
     )
 
     code = None
@@ -7717,7 +7718,7 @@ def render_kakao_token_helper():
         st.success("카카오 인증 코드가 확인됐습니다.")
         if not (rk and cb):
             st.error("REST API 키와 Redirect URI가 있어야 교환할 수 있습니다.")
-        elif st.button("② refresh token 발급", key="kko_token_btn", type="primary"):
+        elif st.button("② 비즈니스 토큰 발급", key="kko_token_btn", type="primary"):
             import requests
             data = {
                 "grant_type": "authorization_code",
@@ -7730,7 +7731,10 @@ def render_kakao_token_helper():
             except Exception as e:
                 st.error(f"요청 실패: {e}")
                 return
-            if not j.get("refresh_token"):
+            # 카카오 비즈니스 토큰 API(/oauth/business/token)는 refresh_token을 아예 내려주지
+            # 않는다(공식 문서에 access_token/token_type/scope 3개만 응답 명시) — 매번 새로
+            # 인가 코드를 받아 재발급하는 구조라, access_token 유무로만 성공을 판단한다.
+            if not j.get("access_token"):
                 st.error("발급 실패: " + str(j.get("error_description") or j.get("error") or j)[:300])
             else:
                 st.success("발급 완료 — 아래를 Secrets의 [kakao_moment]에 반영하세요.")
@@ -7739,11 +7743,15 @@ def render_kakao_token_helper():
                     lines.append(f'client_secret = "{csec}"')
                 lines += [
                     f'callback_url = "{cb}"',
-                    f'refresh_token = "{j["refresh_token"]}"',
+                    f'access_token = "{j["access_token"]}"',
                     f'ad_account_id = "{str(cfg.get("ad_account_id", "카카오모먼트 광고계정 ID"))}"',
                 ]
                 st.code("\n".join(lines), language="toml")
-                st.caption("⚠️ 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요.")
+                st.caption(
+                    "⚠️ 실제 비밀값이 들어 있습니다. 복사만 하고 캡처는 피해주세요. "
+                    "비즈니스 토큰은 refresh_token으로 자동 갱신되지 않으니, 만료돼서 광고비 조회가 "
+                    "실패하면 이 패널에서 ①·②를 다시 눌러 access_token만 새로 받아 교체하면 됩니다."
+                )
         if st.button("처음부터 다시", key="kko_reset_btn"):
             try:
                 st.query_params.clear()
