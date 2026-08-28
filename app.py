@@ -4797,9 +4797,10 @@ def render_creative_performance(creatives: pd.DataFrame):
 # 사이드바 그룹 네비게이션 (신규 — st.tabs() 대체)
 # ──────────────────────────────────────────────────────────────
 NAV_GROUPS = {
-    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "GA 소재별 성과", "예산 관리",
-                    "GA 매체별 유입 경로", "GA4 라이브 리포트", "유입·매출 비교"],
-    "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과", "소재별 성과", "예산 현황"],
+    "GA 유입 리포트": ["채널 퍼널 리포트", "채널 성과", "소재별 성과", "예산 관리",
+                    "자사몰/GA 매출 분석", "GA 매체별 유입 경로"],
+    "성과 리포트": ["종합 대시보드", "매체별 성과", "타겟팅별 성과",
+                 "소재별 성과 (대행사)", "예산 현황"],
     "운영 코멘트": ["운영 코멘트"],
     "운영 도구": ["UTM 빌더", "소재 로그"],
     "가이드": ["가이드"],
@@ -11914,7 +11915,7 @@ def main():
     elif page == "타겟팅별 성과":
         render_targeting_performance_page(T("channel_audience_snapshot"),
                                           creatives_fallback=T("creative_performance"))
-    elif page == "소재별 성과":
+    elif page == "소재별 성과 (대행사)":
         render_creative_performance(T("creative_performance"))
     elif page == "예산 현황":
         render_budget_page(monthly, T("channel_budget"))
@@ -11944,16 +11945,21 @@ def main():
             budget=T("channel_budget"), master=T("media_master"),
             decisions=T("decision_log"),
         )
-    elif page == "GA 소재별 성과":
+    elif page == "소재별 성과":
         render_ga_creative_page(T("ga_creative_daily"), ad_spend=T("ad_spend_daily"),
                                 utm_map=T("utm_channel_map"),
                                 creative_perf=T("creative_performance"))
+    # GA 매체별 유입 경로는 'UTM 매핑이 안 된 소스/매체'까지 그대로 보여주는 유일한 화면이다.
+    # 다른 화면은 전부 매핑된 광고 매체만 세기 때문에, 새 매체를 붙였는데 대시보드에 안 잡힐 때
+    # 원인을 찾을 데가 여기밖에 없어서 남겨둔다.
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(
             ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
+    # GA4 라이브 리포트는 메뉴에서 뺐다(GA4 화면을 그대로 다시 보는 거라 대시보드에서 볼 이유가
+    # 없다). 코드는 남겨두니 필요하면 NAV_GROUPS에 이름만 넣으면 살아난다.
     elif page == "GA4 라이브 리포트":
         render_ga4_page()
-    elif page == "유입·매출 비교":
+    elif page == "자사몰/GA 매출 분석":
         render_inflow_revenue_page(
             T("inflow_revenue_daily"),
             ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
