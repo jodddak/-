@@ -3757,50 +3757,88 @@ def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
     return out[out[["cost_incl_vat", "impressions", "clicks"]].sum(axis=1) > 0]
 
 
-def parse_kakao_channel_message_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
-    """카카오 비즈니스 파트너센터 > 인사이트 > 메시지 > '엑셀로 다운받기'로 받은
-    MessageStat_YYYYMMDD_YYYYMMDD.xls 전용 파서.
+KKO_MSG_COLS = ["sent_at", "report_date", "message", "sends", "clicks", "ctr"]
 
-    이 데이터는 카카오모먼트(유료 광고) 광고비 API와는 완전히 별개다 — 카카오톡 채널
-    친구들에게 보내는 소식/쿠폰 메시지의 발송수·클릭수이며, 카카오는 이 통계에 대한
-    공식 API를 제공하지 않아(2026-08 기준 카카오 개발자 커뮤니티 확인) 엑셀 다운로드가
-    유일한 경로다. 시트명은 보통 '메시지 통계'이고 헤더는 1행
-    (발송시작일 / 메시지 내용 / 발송수 / 전체 클릭수)이다.
+# 카카오 파일의 헤더 표기가 조금씩 달라서(발송수/발송 수, 클릭수/전체 클릭수 등) 후보를 둔다.
+KKO_MSG_HEADERS = {
+    "sent_at": ("발송시작일시", "발송일시", "발송시작", "발송일"),
+    "message": ("메시지", "메시지내용", "내용", "제목"),
+    "sends":   ("발송수", "발송건수", "발송"),
+    "clicks":  ("전체클릭수", "클릭수", "클릭"),
+}
 
-    이 메시지 링크에는 UTM이 안 붙어있어 메시지 단위로 GA를 1:1 매칭할 수는 없지만,
-    media_master의 '카카오톡 플친' 행(utm_match="kakao_msg/email,kakaotalk/display")이
-    이미 GA 소스/매체를 이 채널로 잡고 있으므로, 채널 단위 GA 유입·매출은
-    '채널 성과' 페이지의 카카오톡 플친 항목에서 그대로 확인 가능하다."""
-    target_sheet = next((s for s in xls.sheet_names if "메시지" in str(s)), xls.sheet_names[0])
+
+def _kko_pick(cols, keys):
+    """헤더 목록에서 후보 이름과 가장 잘 맞는 컬럼을 고른다(공백·괄호 무시)."""
+    flat = {re.sub(r"[\s()]+", "", str(c)): c for c in cols}
+    for k in keys:
+        if k in flat:
+            return flat[k]
+    for k in keys:                       # 부분 일치까지 허용
+        for f, orig in flat.items():
+            if k in f:
+                return orig
+    return None
+
+
+def parse_kakao_channel_message_sheet(file) -> pd.DataFrame:
+    """카카오 비즈니스 파트너센터 [인사이트 > 메시지] 다운로드 파일을 읽는다.
+
+    파일명은 보통 MessageStat_YYYYMMDD_YYYYMMDD.xls 이고 '메시지 통계' 시트에 표가 있다.
+    카카오는 이 통계에 공식 API가 없어(2026-08 확인) 엑셀 다운로드가 유일한 경로다.
+    머리글이 몇 줄 아래에 있을 수 있어서 헤더 행을 찾아 들어간다.
+    """
     try:
-        df = pd.read_excel(xls, sheet_name=target_sheet)
+        file.seek(0)
+        xls = pd.ExcelFile(file)
     except Exception:
-        return pd.DataFrame()
-    if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=KKO_MSG_COLS)
 
-    cols = {str(c).strip(): c for c in df.columns}
-    c_date = cols.get("발송시작일")
-    c_msg = cols.get("메시지 내용")
-    c_send = cols.get("발송수")
-    c_click = next((cols[c] for c in cols if "클릭" in c), None)
-    if c_date is None or c_send is None:
-        return pd.DataFrame()
+    sheet = next((sh for sh in xls.sheet_names if "메시지" in str(sh)), xls.sheet_names[0])
+    try:
+        raw = xls.parse(sheet, header=None, dtype=str)
+    except Exception:
+        return pd.DataFrame(columns=KKO_MSG_COLS)
+    if raw.empty:
+        return pd.DataFrame(columns=KKO_MSG_COLS)
+
+    # 헤더 행 찾기: '발송'과 '클릭'이 같은 줄에 있는 첫 행
+    hdr = None
+    for i in range(min(len(raw), 30)):
+        line = " ".join(str(v) for v in raw.iloc[i].tolist() if pd.notna(v))
+        if "발송" in line and "클릭" in line:
+            hdr = i
+            break
+    if hdr is None:
+        return pd.DataFrame(columns=KKO_MSG_COLS)
+
+    df = raw.iloc[hdr + 1:].copy()
+    df.columns = [str(v).strip() if pd.notna(v) else "" for v in raw.iloc[hdr]]
+    cmap = {k: _kko_pick(df.columns, v) for k, v in KKO_MSG_HEADERS.items()}
+    if not cmap["sent_at"] or not cmap["sends"]:
+        return pd.DataFrame(columns=KKO_MSG_COLS)
 
     out = pd.DataFrame()
-    out["sent_at"] = pd.to_datetime(df[c_date], errors="coerce")
-    out["message"] = df[c_msg].astype(str).str.strip() if c_msg else ""
-    out["sends"] = pd.to_numeric(df[c_send], errors="coerce").fillna(0).astype(int)
-    out["clicks"] = (
-        pd.to_numeric(df[c_click], errors="coerce").fillna(0).astype(int) if c_click else 0
-    )
-    out = out.dropna(subset=["sent_at"])
+    out["sent_at"] = df[cmap["sent_at"]].astype(str).str.strip()
+    out["message"] = (df[cmap["message"]].astype(str).str.strip()
+                      if cmap["message"] else "")
+    for k in ("sends", "clicks"):
+        col = cmap[k]
+        out[k] = (pd.to_numeric(df[col].astype(str).str.replace(r"[^0-9.-]", "", regex=True),
+                                errors="coerce").fillna(0)
+                  if col else 0)
+
+    out = out[out["sent_at"].notna() & (out["sent_at"] != "") & (out["sent_at"].str.lower() != "nan")]
+    dt = pd.to_datetime(out["sent_at"], errors="coerce")
+    out = out[dt.notna()]
     if out.empty:
-        return out
-    out["report_date"] = out["sent_at"].dt.date
-    out["sent_at"] = out["sent_at"].astype(str)
+        return pd.DataFrame(columns=KKO_MSG_COLS)
+    out["report_date"] = dt[dt.notna()].dt.date
+    # 합계/소계 행은 발송일시가 날짜로 안 읽혀 위에서 이미 걸러진다.
     out["ctr"] = np.where(out["sends"] > 0, out["clicks"] / out["sends"] * 100, 0.0)
-    return out[["sent_at", "report_date", "message", "sends", "clicks", "ctr"]].reset_index(drop=True)
+    out["sends"] = out["sends"].astype(int)
+    out["clicks"] = out["clicks"].astype(int)
+    return out[KKO_MSG_COLS].reset_index(drop=True)
 
 
 def detect_upload_kind(file) -> str:
@@ -3816,12 +3854,12 @@ def detect_upload_kind(file) -> str:
         return "weekly"
     if any(k in flat for k in ("맨즈탭", "맨즈텝", "소재별", "일일성과", "result.csv")):
         return "media_report"
+    if "messagestat" in flat or ("카카오" in flat and "메시지" in flat):
+        return "kakao_msg"
     if "채널믹스" in flat:
         return "mix"
     if "예산" in flat and "믹스" not in flat:
         return "budget"
-    if "messagestat" in flat:
-        return "kakao_msg"
 
     try:
         file.seek(0)
@@ -3845,11 +3883,11 @@ def detect_upload_kind(file) -> str:
         pass
 
     for kind, fn in (
+        ("kakao_msg", lambda: parse_kakao_channel_message_sheet(file)),
         ("mix", lambda: parse_channel_mix_sheet(xls, source_name=name)),
         ("budget", lambda: parse_channel_budget_sheet(xls)),
         ("ga", lambda: parse_inflow_revenue_sheet(xls)),
         ("ga", lambda: parse_utm_channel_map(xls)),
-        ("kakao_msg", lambda: parse_kakao_channel_message_sheet(xls)),
     ):
         try:
             if not fn().empty:
@@ -3878,7 +3916,7 @@ def render_upload_panel():
         "budget": "③ 연간 예산 (◆26년 월별 예산 정리)",
         "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
         "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
-        "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat 엑셀)",
+        "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat)",
     }
     kind = None
     if up_file is not None:
@@ -3895,7 +3933,27 @@ def render_upload_panel():
     budget_file = up_file if kind == "budget" else None
     mix_file = up_file if kind == "mix" else None
     mr_file = up_file if kind == "media_report" else None
-    kko_msg_file = up_file if kind == "kakao_msg" else None
+    kko_file = up_file if kind == "kakao_msg" else None
+
+    if kko_file is not None:
+        with st.sidebar.status("카카오 메시지 파일 분석 중...", expanded=True) as status:
+            kko_df = parse_kakao_channel_message_sheet(kko_file)
+            if kko_df.empty:
+                status.update(label="인식 실패", state="error")
+                st.write("'메시지 통계' 시트에서 발송/클릭 표를 못 찾았습니다.")
+            else:
+                st.write(f"📨 메시지 {len(kko_df)}건")
+                st.write(f"발송 합계 {kko_df['sends'].sum():,.0f} · "
+                         f"클릭 합계 {kko_df['clicks'].sum():,.0f}")
+                status.update(label="분석 완료", state="complete")
+        if not kko_df.empty:
+            st.sidebar.dataframe(kko_df.head(8), use_container_width=True, hide_index=True)
+            if st.sidebar.button("💾 카카오톡 채널 메시지 저장하기", type="primary",
+                                 key="kko_msg_save"):
+                n = save_table("kakao_channel_message", kko_df, "sent_at", kko_file.name)
+                st.cache_data.clear()
+                st.sidebar.success(f"저장 완료! {n}행")
+                st.rerun()
 
     if file is not None:
         today = date.today()
@@ -4158,34 +4216,6 @@ def render_upload_panel():
                                "report_date,channel,source", mr_file.name)
                 st.cache_data.clear()
                 st.sidebar.success(f"저장 완료! {n}행")
-                st.rerun()
-
-    if kko_msg_file is not None:
-        st.sidebar.caption(
-            "카카오 비즈니스 파트너센터 > 인사이트 > 메시지 > '엑셀로 다운받기'로 받은 파일입니다. "
-            "카카오모먼트(유료 광고)와는 별개로, 카카오톡 채널 메시지의 발송수·클릭수를 저장합니다."
-        )
-        try:
-            kko_xls = pd.ExcelFile(kko_msg_file)
-            kko_msg_df = parse_kakao_channel_message_sheet(kko_xls)
-        except Exception as e:
-            kko_msg_df = pd.DataFrame()
-            st.sidebar.warning(f"읽지 못했습니다: {e}")
-        if kko_msg_df.empty:
-            st.sidebar.warning(
-                "인식 가능한 데이터를 찾지 못했습니다 — '메시지 통계' 시트에 발송시작일/메시지 내용/"
-                "발송수/전체 클릭수 컬럼이 있는 파일인지 확인해주세요."
-            )
-        else:
-            st.sidebar.write(
-                f"📨 메시지 {len(kko_msg_df)}건 인식 "
-                f"({kko_msg_df['report_date'].min()} ~ {kko_msg_df['report_date'].max()}) · "
-                f"발송 합계 {kko_msg_df['sends'].sum():,.0f} · 클릭 합계 {kko_msg_df['clicks'].sum():,.0f}"
-            )
-            if st.sidebar.button("💾 카카오톡 채널 메시지 저장하기", type="primary", key="kko_msg_save_btn"):
-                n = save_table("kakao_channel_message", kko_msg_df, "sent_at", kko_msg_file.name)
-                st.cache_data.clear()
-                st.sidebar.success(f"저장 완료! {n}건 — '채널 성과' 페이지에서 확인하세요.")
                 st.rerun()
 
     st.sidebar.markdown("---")
@@ -5638,6 +5668,29 @@ GA4_DIMENSIONS = ["date", "sessionSourceMedium", "newVsReturning"]
 # 곱으로 불어나므로(날짜×소스×캠페인×소재×신규재방문) 채널용과 테이블을 나눠 저장한다.
 GA4_CREATIVE_DIMENSIONS = ["date", "sessionSourceMedium", "sessionCampaignName",
                            "sessionManualAdContent", "newVsReturning"]
+
+# 회원가입 이벤트 이름. 회사마다 다르고(STCO는 '회원가입_신규') 바뀌기도 해서 Secrets로
+# 덮어쓸 수 있게 두되, 기본값에 후보를 여러 개 넣어 하나만 맞아도 잡히게 한다.
+# 쉼표로 여러 개를 적으면 전부 합산한다.
+GA4_SIGNUP_EVENT_DEFAULT = "회원가입_신규,sign_up"
+# 이벤트가 아예 없을 때를 대비한 대체 측정: 가입 완료 페이지 조회수.
+GA4_SIGNUP_PAGE_DEFAULT = "/Join/Finish"
+
+
+def _ga4_signup_events() -> list:
+    raw = str(_secrets_get("GA4_SIGNUP_EVENT", GA4_SIGNUP_EVENT_DEFAULT))
+    return [e.strip() for e in raw.split(",") if e.strip()]
+
+
+def _ga4_signup_filter():
+    """회원가입 이벤트 필터. 후보가 여러 개면 InList로 한 번에 건다."""
+    from google.analytics.data_v1beta.types import Filter, FilterExpression
+    evs = _ga4_signup_events()
+    if len(evs) == 1:
+        return FilterExpression(filter=Filter(
+            field_name="eventName", string_filter=Filter.StringFilter(value=evs[0])))
+    return FilterExpression(filter=Filter(
+        field_name="eventName", in_list_filter=Filter.InListFilter(values=evs)))
 GA4_METRICS = ["totalUsers", "sessions", "transactions", "purchaseRevenue"]
 GA4_LOOKBACK_DAYS = 30      # 최초 연동 시 끌어올 기간
 GA4_RESYNC_TAIL_DAYS = 3    # GA는 하루이틀 뒤 값이 보정되므로 최근 며칠은 매번 다시 받아 덮어쓴다
@@ -5726,7 +5779,6 @@ def fetch_ga4_channel_daily(start: date, end: date, channel_map: dict = None) ->
     signup_rows = []
     try:
         from google.analytics.data_v1beta.types import Filter, FilterExpression
-        ev = str(_secrets_get("GA4_SIGNUP_EVENT", "sign_up")).strip()
         offset = 0
         while True:
             req = RunReportRequest(
@@ -5734,9 +5786,7 @@ def fetch_ga4_channel_daily(start: date, end: date, channel_map: dict = None) ->
                 date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
                 dimensions=[Dimension(name=d) for d in GA4_DIMENSIONS],
                 metrics=[Metric(name="eventCount")],
-                dimension_filter=FilterExpression(
-                    filter=Filter(field_name="eventName",
-                                  string_filter=Filter.StringFilter(value=ev))),
+                dimension_filter=_ga4_signup_filter(),
                 limit=page_size, offset=offset,
             )
             resp = client.run_report(req)
@@ -5824,14 +5874,8 @@ def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -
     signup_rows = []
     try:
         from google.analytics.data_v1beta.types import Filter, FilterExpression
-        ev = str(_secrets_get("GA4_SIGNUP_EVENT", "sign_up")).strip()
-        signup_rows = _run(
-            ["eventCount"],
-            dim_filter=FilterExpression(
-                filter=Filter(field_name="eventName",
-                              string_filter=Filter.StringFilter(value=ev))),
-            out_key="signups",
-        )
+        signup_rows = _run(["eventCount"], dim_filter=_ga4_signup_filter(),
+                           out_key="signups")
     except Exception:
         signup_rows = []
 
@@ -5862,6 +5906,113 @@ def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -
     else:
         out["channel"] = None
     return out.reset_index(drop=True)
+
+
+def ga4_signup_candidates(start: date, end: date) -> tuple:
+    """회원가입을 무엇으로 셀지 화면에서 직접 대조할 수 있게, 후보를 전부 뽑아온다.
+
+    (① 이름에 가입/sign/join/member가 든 이벤트 목록, ② 가입완료 페이지 조회수, 에러)
+    GA4 보고서 숫자와 눈으로 맞춰보고 Secrets의 GA4_SIGNUP_EVENT를 정하면 된다.
+    """
+    client, err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return pd.DataFrame(), pd.DataFrame(), (err or "GA4 속성 ID가 없습니다.")
+
+    from google.analytics.data_v1beta.types import (
+        DateRange, Dimension, Filter, FilterExpression, Metric, RunReportRequest,
+    )
+    dr = [DateRange(start_date=str(start), end_date=str(end))]
+
+    events = pd.DataFrame()
+    try:
+        resp = client.run_report(RunReportRequest(
+            property=f"properties/{prop}", date_ranges=dr,
+            dimensions=[Dimension(name="eventName")],
+            metrics=[Metric(name="eventCount")], limit=300))
+        rows = [{"이벤트명": r.dimension_values[0].value,
+                 "이벤트 수": float(r.metric_values[0].value)} for r in resp.rows]
+        e = pd.DataFrame(rows)
+        if not e.empty:
+            pat = e["이벤트명"].str.contains("가입|sign|join|member|regist", case=False, na=False)
+            events = e[pat].sort_values("이벤트 수", ascending=False)
+    except Exception as ex:
+        return pd.DataFrame(), pd.DataFrame(), f"이벤트 목록 조회 실패: {ex}"
+
+    pages = pd.DataFrame()
+    try:
+        path = str(_secrets_get("GA4_SIGNUP_PAGE", GA4_SIGNUP_PAGE_DEFAULT)).strip()
+        resp = client.run_report(RunReportRequest(
+            property=f"properties/{prop}", date_ranges=dr,
+            dimensions=[Dimension(name="pagePath")],
+            metrics=[Metric(name="screenPageViews"), Metric(name="sessions")],
+            dimension_filter=FilterExpression(filter=Filter(
+                field_name="pagePath",
+                string_filter=Filter.StringFilter(
+                    value=path, match_type=Filter.StringFilter.MatchType.CONTAINS,
+                    case_sensitive=False))),
+            limit=50))
+        pages = pd.DataFrame([{
+            "페이지": r.dimension_values[0].value,
+            "조회수": float(r.metric_values[0].value),
+            "세션수": float(r.metric_values[1].value)} for r in resp.rows])
+    except Exception as ex:
+        return events, pd.DataFrame(), f"가입 완료 페이지 조회 실패: {ex}"
+
+    return events, pages, None
+
+
+def render_ga4_signup_check(start: date, end: date):
+    """회원가입 집계 진단 패널. 대시보드 숫자와 GA4 보고서를 바로 맞춰볼 수 있게 한다."""
+    with st.expander("회원가입 이벤트 확인 — GA4 보고서와 숫자가 다를 때", expanded=False):
+        st.caption(
+            f"현재 세는 이벤트: **{' / '.join(_ga4_signup_events())}** · "
+            f"기간 {start} ~ {end}"
+        )
+        if not st.button("GA4에서 후보 불러오기", key="ga4_signup_check"):
+            st.caption(
+                "누르면 이름에 '가입/sign/join/member'가 들어간 이벤트를 전부 뽑아옵니다. "
+                "GA4 보고서 숫자와 맞는 걸 고른 뒤 Secrets의 `GA4_SIGNUP_EVENT`에 적어주세요."
+            )
+            return
+        with st.spinner("GA4 조회 중..."):
+            events, pages, err = ga4_signup_candidates(start, end)
+        if err:
+            st.error(err)
+            return
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**① 가입 관련 이벤트**")
+            if events.empty:
+                st.warning("가입 관련 이벤트를 못 찾았습니다. 아래 페이지 조회수로 세야 합니다.")
+            else:
+                st.dataframe(events, use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown("**② 가입 완료 페이지 조회수**")
+            if pages.empty:
+                st.warning("가입 완료 페이지 조회가 0건입니다. 경로를 확인해주세요.")
+            else:
+                st.dataframe(pages, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"합계 조회수 {pages['조회수'].sum():,.0f} · 세션 {pages['세션수'].sum():,.0f}"
+                )
+        # 두 숫자가 비슷하면 그 이벤트가 가입 완료를 제대로 잡고 있다는 뜻이다.
+        if not events.empty and not pages.empty:
+            pv = float(pages["조회수"].sum())
+            best = events.iloc[0]
+            gap = abs(float(best["이벤트 수"]) - pv) / pv * 100 if pv else 0
+            if gap <= 15:
+                st.success(
+                    f"**{best['이벤트명']}** {best['이벤트 수']:,.0f}건 vs "
+                    f"가입 완료 페이지 {pv:,.0f}건 — 차이 {gap:.0f}%로 잘 맞습니다. "
+                    "이 이벤트를 쓰시면 됩니다."
+                )
+            else:
+                st.warning(
+                    f"**{best['이벤트명']}** {best['이벤트 수']:,.0f}건인데 "
+                    f"가입 완료 페이지는 {pv:,.0f}건입니다 (차이 {gap:.0f}%). "
+                    "이벤트가 일부 경로에서만 터지고 있을 수 있으니 대행사에 확인해주세요."
+                )
 
 
 def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_full: bool = False):
@@ -8689,6 +8840,39 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         start, end = end, start
 
     # ── 정액(보장형) 계약 광고비 ─────────────────────────
+    # ── 카카오톡 채널 메시지 ──
+    # 카카오모먼트(유료 광고)와는 별개다. 채널 친구에게 보내는 소식·쿠폰 메시지의 발송·클릭인데,
+    # 카카오가 이 통계에 API를 안 열어둬서(2026-08 확인) 파트너센터 엑셀로만 받을 수 있다.
+    # 이 메시지 링크엔 UTM이 없어 메시지 단위 GA 매칭은 안 되지만, 채널 자체의 유입·매출은
+    # media_master의 '카카오톡 플친' 행이 이미 잡고 있어 아래 표에 들어온다.
+    _kko = load_table("kakao_channel_message")
+    if _kko is not None and not _kko.empty:
+        with st.expander("📨 카카오톡 채널 메시지 발송 성과", expanded=False):
+            k = _kko.copy()
+            k["report_date"] = pd.to_datetime(k["report_date"], errors="coerce").dt.date
+            k = k[(k["report_date"] >= start) & (k["report_date"] <= end)]
+            if k.empty:
+                st.info("선택한 기간에 발송한 메시지가 없습니다.")
+            else:
+                for c in ("sends", "clicks"):
+                    k[c] = pd.to_numeric(k[c], errors="coerce").fillna(0)
+                sends, clicks = float(k["sends"].sum()), float(k["clicks"].sum())
+                c1, c2, c3 = st.columns(3)
+                c1.metric("발송수 합계", f"{sends:,.0f}")
+                c2.metric("클릭수 합계", f"{clicks:,.0f}")
+                c3.metric("클릭률", f"{(clicks / sends * 100) if sends else 0:.2f} %")
+                view = k.sort_values("sent_at", ascending=False)[
+                    ["sent_at", "message", "sends", "clicks", "ctr"]].copy()
+                view["ctr"] = view["ctr"].map(lambda v: f"{float(v or 0):.2f}%")
+                view.columns = ["발송일시", "메시지", "발송수", "클릭수", "클릭률"]
+                st.dataframe(view, use_container_width=True, hide_index=True)
+                st.caption(
+                    "카카오는 이 통계에 API를 제공하지 않아, 파트너센터 [인사이트 > 메시지]에서 "
+                    "받은 엑셀을 사이드바에 올리면 채워집니다. 메시지 링크에 UTM이 없어 "
+                    "메시지별 매출은 붙지 않습니다 — 채널 전체 유입·매출은 아래 "
+                    "'카카오톡 플친' 줄에서 보세요."
+                )
+
     # 브랜드검색은 30일 단위로 선지불하고 연장하는 상품이라 '일별 집행액'이 없다.
     # 계약 기간과 총액을 넣어두면 일할로 나눠 매일의 광고비를 만든다.
     with st.expander("📄 정액 계약 광고비 (브랜드검색 등) — 갱신할 때마다 한 줄 추가"):
@@ -8731,42 +8915,6 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                                "report_date,channel,source", "정액 계약 일할")
                 st.success(f"계약 {len(e)}건 → 일별 {n}행 저장했습니다.")
                 st.cache_data.clear()
-
-    # ── 카카오톡 채널 메시지 (발송·클릭) ───────────────────
-    # 카카오모먼트(유료 광고)와는 완전히 별개 데이터. 메시지 링크에 UTM이 없어 메시지 단위로
-    # GA를 1:1 매칭할 수는 없지만, 이 채널의 GA 유입·매출 자체는 media_master의 '카카오톡 플친'
-    # 행(utm_match="kakao_msg/email,kakaotalk/display")이 이미 잡고 있어서, 아래 매체별 표의
-    # '카카오톡 플친' 줄에서 그대로 확인할 수 있다 — 그래서 여기서는 발송수·클릭수만 보여준다.
-    kko_msg_all = load_table("kakao_channel_message")
-    with st.expander("📨 카카오톡 채널 메시지 발송 성과 (별도 엑셀 업로드)"):
-        st.caption(
-            "카카오 비즈니스 파트너센터 > 인사이트 > 메시지 > '엑셀로 다운받기'로 받은 파일을 "
-            "사이드바 '⚙️ 데이터 관리'에서 업로드하면 여기 쌓입니다. 카카오모먼트 광고비와는 "
-            "무관합니다. 메시지 링크에 UTM이 없어 이 표만으로는 GA 매칭이 안 되지만, 이 채널의 "
-            "GA 유입·매출은 아래 매체별 표의 '카카오톡 플친' 줄에서 이미 확인할 수 있습니다."
-        )
-        if kko_msg_all is None or kko_msg_all.empty:
-            st.info("아직 업로드된 메시지 데이터가 없습니다.")
-        else:
-            kmg = kko_msg_all.copy()
-            kmg["report_date"] = pd.to_datetime(kmg["report_date"], errors="coerce").dt.date
-            kmg = kmg[(kmg["report_date"] >= start) & (kmg["report_date"] <= end)].sort_values(
-                "report_date", ascending=False)
-            if kmg.empty:
-                st.info(f"{start} ~ {end} 기간에 발송된 메시지가 없습니다.")
-            else:
-                tot_send, tot_click = kmg["sends"].sum(), kmg["clicks"].sum()
-                tot_ctr = (tot_click / tot_send * 100) if tot_send > 0 else 0.0
-                mc1, mc2, mc3 = st.columns(3)
-                mc1.metric("발송 건수(메시지 수)", f"{len(kmg):,}건")
-                mc2.metric("총 발송수", f"{tot_send:,.0f}")
-                mc3.metric("평균 클릭률", f"{tot_ctr:.2f}%")
-                show = kmg[["report_date", "message", "sends", "clicks", "ctr"]].rename(columns={
-                    "report_date": "발송일", "message": "메시지 내용",
-                    "sends": "발송수", "clicks": "클릭수", "ctr": "클릭률(%)",
-                })
-                show["클릭률(%)"] = show["클릭률(%)"].round(2)
-                st.dataframe(show, use_container_width=True, hide_index=True)
 
     # ── 집계 ─────────────────────────────────────────────
     spend = _cp_spend_by_channel(ad_spend, start, end)
@@ -10572,6 +10720,8 @@ def render_ga_channel_funnel_page(
         f'<div class="fv4-signals">{sig_html}</div></div></div>',
         unsafe_allow_html=True,
     )
+
+    render_ga4_signup_check(start, end)
 
     # ── 어제 대비 달라진 것 ── 스냅샷이 아니라 '변화'를 먼저 보여준다.
     daily_ch = _loop_daily_by_channel(gci)
