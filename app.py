@@ -3781,6 +3781,98 @@ def _kko_pick(cols, keys):
     return None
 
 
+KKO_CASH_COLS = ["report_date", "channel", "impressions", "clicks", "cost_incl_vat", "source"]
+
+
+def parse_kakao_cash_file(file) -> pd.DataFrame:
+    """카카오 비즈월렛 [캐시관리 > 캐시 사용현황] 다운로드 파일에서 실제 발송비를 뽑는다.
+
+    카카오톡 채널 메시지는 '캐시'를 미리 충전해두고 발송할 때마다 깎이는 구조다.
+    충전액은 그냥 돈을 넣어둔 것이라 광고비가 아니고, 실제로 쓴 돈은 '캐시 사용_유상캐시'다.
+    (무상캐시는 프로모션으로 받은 것이라 실제 지출이 아니므로 뺀다.)
+    일반 소진 / 계약 소진 두 갈래로 나뉘어 나오는데 둘 다 실제 발송에 쓴 돈이라 합친다.
+
+    파일은 UTF-16 탭 구분이라 일반 CSV 리더로는 안 열린다(형이 준 파일로 확인).
+    """
+    try:
+        file.seek(0)
+        raw = file.read()
+    except Exception:
+        return pd.DataFrame(columns=KKO_CASH_COLS)
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "ignore")
+
+    text = None
+    for enc in ("utf-16", "utf-8-sig", "cp949", "euc-kr", "utf-8"):
+        try:
+            t = raw.decode(enc)
+            if "거래일시" in t:
+                text = t
+                break
+        except Exception:
+            continue
+    if text is None:
+        return pd.DataFrame(columns=KKO_CASH_COLS)
+
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    sep = "\t" if "\t" in lines[0] else ","
+    rows = [[c.strip().strip('"') for c in ln.split(sep)] for ln in lines]
+    header = rows[0]
+    body = [r for r in rows[1:] if len(r) == len(header)]
+    if not body:
+        return pd.DataFrame(columns=KKO_CASH_COLS)
+    df = pd.DataFrame(body, columns=header)
+
+    date_col = next((c for c in df.columns if "거래일" in c), None)
+    use_cols = [c for c in df.columns if c.startswith("캐시 사용") and "유상" in c]
+    if not date_col or not use_cols:
+        return pd.DataFrame(columns=KKO_CASH_COLS)
+
+    for c in use_cols:
+        df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False),
+                              errors="coerce").fillna(0)
+    d = pd.to_datetime(df[date_col], errors="coerce")
+    out = pd.DataFrame({"report_date": d.dt.date, "cost_incl_vat": df[use_cols].sum(axis=1)})
+    out = out.dropna(subset=["report_date"])
+    out = out[out["cost_incl_vat"] > 0]
+    if out.empty:
+        return pd.DataFrame(columns=KKO_CASH_COLS)
+    out = out.groupby("report_date", as_index=False)["cost_incl_vat"].sum()
+    # media_master의 '카카오톡 플친' 행이 spend_channel='카카오'로 잡고 있어 이름을 맞춘다.
+    out["channel"] = "카카오"
+    out["impressions"] = 0
+    out["clicks"] = 0
+    out["source"] = "kakao_cash"
+    return out[KKO_CASH_COLS]
+
+
+def kakao_messages_to_daily(msgs: pd.DataFrame) -> pd.DataFrame:
+    """카카오톡 채널 메시지를 '채널 성과' 표가 읽는 일별 지표 행으로 바꾼다.
+
+    발송수 → 노출, 클릭수 → 클릭으로 놓는다. 메시지는 친구에게 도달한 만큼이 노출이고,
+    그 뒤 행동이 클릭이라 광고의 노출·클릭과 같은 자리다.
+    광고비는 0으로 둔다 — 채널 메시지는 발송 비용이 따로 청구되지 않아서, 억지로 넣으면
+    ROAS가 왜곡된다. 예산은 '카카오톡 플친' 예산 라인이 따로 잡고 있다.
+    """
+    cols = ["report_date", "channel", "impressions", "clicks", "cost_incl_vat", "source"]
+    if msgs is None or msgs.empty:
+        return pd.DataFrame(columns=cols)
+    m = msgs.copy()
+    m["report_date"] = pd.to_datetime(m["report_date"], errors="coerce").dt.date
+    m = m.dropna(subset=["report_date"])
+    if m.empty:
+        return pd.DataFrame(columns=cols)
+    for c in ("sends", "clicks"):
+        m[c] = pd.to_numeric(m.get(c), errors="coerce").fillna(0)
+    g = m.groupby("report_date", as_index=False).agg(
+        impressions=("sends", "sum"), clicks=("clicks", "sum"))
+    # media_master의 '카카오톡 플친' 행이 spend_channel='카카오'로 잡고 있어 이름을 맞춘다.
+    g["channel"] = "카카오"
+    g["cost_incl_vat"] = 0.0
+    g["source"] = "kakao_msg"
+    return g[cols]
+
+
 def parse_kakao_channel_message_sheet(file) -> pd.DataFrame:
     """카카오 비즈니스 파트너센터 [인사이트 > 메시지] 다운로드 파일을 읽는다.
 
@@ -3854,6 +3946,8 @@ def detect_upload_kind(file) -> str:
         return "weekly"
     if any(k in flat for k in ("맨즈탭", "맨즈텝", "소재별", "일일성과", "result.csv")):
         return "media_report"
+    if "캐시사용현황" in flat or "비즈월렛" in flat:
+        return "kakao_cash"
     if "messagestat" in flat or ("카카오" in flat and "메시지" in flat):
         return "kakao_msg"
     if "채널믹스" in flat:
@@ -3917,6 +4011,7 @@ def render_upload_panel():
         "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
         "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
         "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat)",
+        "kakao_cash": "⑦ 카카오 비즈월렛 캐시 사용현황",
     }
     kind = None
     if up_file is not None:
@@ -3934,6 +4029,37 @@ def render_upload_panel():
     mix_file = up_file if kind == "mix" else None
     mr_file = up_file if kind == "media_report" else None
     kko_file = up_file if kind == "kakao_msg" else None
+    kcash_file = up_file if kind == "kakao_cash" else None
+
+    if kcash_file is not None:
+        with st.sidebar.status("카카오 캐시 파일 분석 중...", expanded=True) as status:
+            kc = parse_kakao_cash_file(kcash_file)
+            if kc.empty:
+                status.update(label="인식 실패", state="error")
+                st.write("'캐시 사용_유상캐시' 열을 못 찾았습니다.")
+            else:
+                st.write(f"💳 사용 내역 {len(kc)}일")
+                st.write(f"기간 {kc['report_date'].min()} ~ {kc['report_date'].max()}")
+                st.write(f"유상캐시 사용 합계 {kc['cost_incl_vat'].sum():,.0f}원")
+                status.update(label="분석 완료", state="complete")
+        if not kc.empty:
+            _mk = kc.copy()
+            _mk["월"] = pd.to_datetime(_mk["report_date"]).dt.strftime("%Y-%m")
+            st.sidebar.dataframe(
+                _mk.groupby("월", as_index=False)["cost_incl_vat"].sum()
+                   .rename(columns={"cost_incl_vat": "사용액"}),
+                use_container_width=True, hide_index=True)
+            st.sidebar.caption(
+                "충전액이 아니라 **실제 쓴 돈(유상캐시 사용)**만 광고비로 넣습니다. "
+                "무상캐시는 프로모션이라 지출이 아니어서 제외합니다."
+            )
+            if st.sidebar.button("💾 카카오 캐시 사용액 저장하기", type="primary",
+                                 key="kko_cash_save"):
+                n = save_table("ad_spend_daily", kc,
+                               "report_date,channel,source", kcash_file.name)
+                st.cache_data.clear()
+                st.sidebar.success(f"저장 완료! {n}행")
+                st.rerun()
 
     if kko_file is not None:
         with st.sidebar.status("카카오 메시지 파일 분석 중...", expanded=True) as status:
@@ -3951,8 +4077,12 @@ def render_upload_panel():
             if st.sidebar.button("💾 카카오톡 채널 메시지 저장하기", type="primary",
                                  key="kko_msg_save"):
                 n = save_table("kakao_channel_message", kko_df, "sent_at", kko_file.name)
+                # 채널 성과 표의 '카카오톡 플친' 줄에 노출·클릭이 뜨도록 지표 행도 같이 남긴다.
+                daily = kakao_messages_to_daily(kko_df)
+                n2 = save_table("ad_spend_daily", daily,
+                                "report_date,channel,source", kko_file.name)
                 st.cache_data.clear()
-                st.sidebar.success(f"저장 완료! {n}행")
+                st.sidebar.success(f"저장 완료! 메시지 {n}행 · 일별 지표 {n2}행")
                 st.rerun()
 
     if file is not None:
@@ -6340,7 +6470,7 @@ FUNNEL_CANON_RULES = [
     ("네이버 GFA", ["gfa"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
-    ("카카오", ["카카오", "kakao", "플친"]),
+    ("카카오톡 플친", ["카카오", "kakao", "플친"]),
     ("모비온", ["모비온", "mobon"]),
     ("크리테오", ["크리테오", "criteo"]),
     ("AEDI", ["aedi", "에디"]),
@@ -7042,6 +7172,8 @@ AD_SPEND_SOURCE_LABEL = {
     "manual": "직접 입력(실집행)",
     "agency_weekly": "대행사 주간(일할)",
     "budget_prorate": "예산 일할",
+    "kakao_msg": "카카오 메시지(발송·클릭)",
+    "kakao_cash": "카카오 캐시 사용액",
 }
 # '신규 매체'는 시기별로 실제 매체가 달랐다(사용자 확인):
 #   26년 4월      = 네이버 트렌드픽 모바일
@@ -8444,6 +8576,7 @@ def _cp_spend_by_channel(ad_spend: pd.DataFrame, start: date, end: date) -> pd.D
         cost_incl_vat=("cost_incl_vat", "sum"))
     prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0,
             "criteo_api": 0, "naver_gfa_api": 0,
+            "kakao_msg": 0, "kakao_cash": 0,
             "contract": 1, "manual": 2, "agency_weekly": 3, "budget_prorate": 4}
     g["_p"] = g["source"].map(prio).fillna(9)
     g = g.sort_values("_p")
@@ -9589,6 +9722,7 @@ def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame
     # 직접 입력은 광고 관리자 화면에서 눈으로 확인한 '실집행액'이라 대행사 주간·예산 일할보다 정확하다.
     # 다만 API가 붙은 매체는 사람이 손댈 필요 없이 API가 이기게 둔다.
     prio = {"meta_api": 0, "google_ads_api": 0, "naver_api": 0, "kakao_api": 0, "criteo_api": 0, "naver_gfa_api": 0,
+            "kakao_msg": 0, "kakao_cash": 0,
             "contract": 1, "manual": 2, "agency_weekly": 3, "budget_prorate": 4}
     # 빈 DataFrame을 concat하면 pandas가 향후 동작 변경 경고를 내므로 값이 있는 것만 합친다.
     parts = [d for d in (api_df, weekly_df, budget_df) if d is not None and not d.empty]
@@ -9782,7 +9916,7 @@ GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
 
 # 지금은 운영하지 않는 매체. 탭 자체를 안 만든다 — 옛날 데이터만 남아 있어서 탭이 있으면
 # 오히려 헷갈린다. 다시 집행을 시작하면(선택 기간에 광고비가 잡히면) 자동으로 다시 나온다.
-GC_HIDE_IF_IDLE = ["(DA) ADN", "카카오", "네이버 트렌드픽"]
+GC_HIDE_IF_IDLE = ["(DA) ADN", "카카오톡 플친", "네이버 트렌드픽"]
 
 
 GC_IMAGE_FOLDER = "ga_creative"
@@ -10834,7 +10968,16 @@ def render_ga_channel_funnel_page(
     buckets, media = _v4_ga_rows(ga_channel_inflow, start, end)
     spend_now = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None \
         else pd.DataFrame(columns=["channel", "impressions", "clicks", "cost_incl_vat", "source"])
-    spend_map = {r["channel"]: r for _, r in spend_now.iterrows()}
+    # 표의 매체명은 대표명(_v4_canon_channel)이고 광고비 행의 channel은 원본 이름이라,
+    # 키를 안 맞추면 이름이 다른 매체의 광고비가 통째로 빠진다(카카오 → 카카오톡 플친).
+    spend_map = {}
+    for _, r in spend_now.iterrows():
+        k = _v4_canon_channel(r["channel"])
+        if k in spend_map:      # 원본이 여러 개라도 대표명 하나로 합친다
+            for c in ("impressions", "clicks", "cost_incl_vat"):
+                spend_map[k][c] = float(spend_map[k].get(c, 0) or 0) + float(r.get(c, 0) or 0)
+        else:
+            spend_map[k] = r.to_dict()
 
     if media.empty and buckets.empty:
         st.info("선택한 기간에 GA4 유입 데이터가 없습니다. 상단 '🔄 지금 동기화'를 눌러주세요.")
