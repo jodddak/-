@@ -6229,6 +6229,45 @@ def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_ful
     return n, start, end, None
 
 
+def backfill_ga4_range(kind: str, channel_map: dict, start: date, end: date):
+    """지정한 기간을 통째로 다시 받아 채운다(과거 보정용).
+
+    평소 동기화는 '저장된 마지막 날짜 이후'만 받는다. 최초 연동 때 30일치만 끌어왔으면
+    그 이전은 영원히 빈칸으로 남는데, 화면의 날짜 선택기는 그걸 알려주지 않아서
+    '1~8월'로 잡아도 8월치만 나오는 착시가 생긴다(형이 겪은 그 문제).
+    이 함수는 기간을 직접 받아 그 구간을 다시 채운다.
+
+    GA4는 한 번에 넓은 기간을 요청하면 응답이 너무 커지므로 달 단위로 끊어서 받는다.
+    """
+    client, err = get_ga4_client()
+    if client is None:
+        return 0, err
+    if start > end:
+        return 0, "시작일이 종료일보다 뒤입니다."
+    fetch = fetch_ga4_creative_daily if kind == "creative" else fetch_ga4_channel_daily
+    table = "ga_creative_daily" if kind == "creative" else "ga_channel_daily"
+    key = ("report_date,source_medium,campaign,creative,user_type" if kind == "creative"
+           else "report_date,source_medium,user_type")
+
+    total, cur = 0, start
+    prog = st.progress(0.0, text="GA4에서 과거 데이터를 받는 중...")
+    span = max((end - start).days, 1)
+    while cur <= end:
+        nxt = min((cur.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1), end)
+        try:
+            df = fetch(cur, nxt, channel_map)
+        except Exception as e:
+            prog.empty()
+            return total, f"{cur:%Y-%m} 조회 실패: {e}"
+        if df is not None and not df.empty:
+            total += save_table(table, df, key, "GA4 과거 보정")
+        prog.progress(min((nxt - start).days / span, 1.0),
+                      text=f"{cur:%Y-%m} 완료 · 누적 {total:,}행")
+        cur = nxt + timedelta(days=1)
+    prog.empty()
+    return total, None
+
+
 def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full: bool = False):
     """저장된 마지막 날짜 이후(+최근 며칠 보정분)만 GA4에서 받아 upsert한다.
     (받은 행수, 시작일, 종료일, 에러메시지) 를 돌려준다."""
@@ -10654,6 +10693,36 @@ def render_ga_channel_funnel_page(
             st.session_state.pop("fv4_synced", None)
             st.cache_data.clear()
             st.rerun()
+
+    # 최초 연동 때 30일치만 받아와서 그 이전이 비어 있는 경우가 있다. 날짜 선택기는 비어 있는
+    # 기간도 그냥 고를 수 있게 해줘서, 숫자가 작게 나오는 걸 '성과가 나빴다'로 오해하기 쉽다.
+    # 그래서 '지금 저장된 첫 날짜'를 항상 보여주고, 그 이전을 채울 수단을 같이 둔다.
+    with st.expander("📥 과거 GA 데이터 채우기 — 예전 기간이 비어 보일 때", expanded=False):
+        _first = None
+        if ga_channel_inflow is not None and not ga_channel_inflow.empty:
+            _first = pd.to_datetime(ga_channel_inflow["report_date"]).min().date()
+        st.caption(
+            f"지금 저장된 GA 데이터: **{_first} ~ {ga_last_date}**"
+            if _first else "저장된 GA 데이터가 없습니다."
+        )
+        st.caption(
+            "이 시작일보다 앞선 기간을 골라도 화면에는 빈칸이 더해질 뿐입니다 — "
+            "아래에서 그 구간을 받아와야 채워집니다. 달 단위로 끊어서 받아오며, "
+            "1년치는 몇 분 걸릴 수 있습니다."
+        )
+        bc1, bc2, bc3 = st.columns([2, 2, 1])
+        _bs = bc1.date_input("받아올 시작일", value=date(date.today().year, 1, 1),
+                             key="fv4_bf_start")
+        _be = bc2.date_input("받아올 종료일", value=(_first - timedelta(days=1)) if _first
+                             else date.today() - timedelta(days=1), key="fv4_bf_end")
+        if bc3.button("받아오기", key="fv4_bf_btn", type="primary"):
+            n, e = backfill_ga4_range("channel", lookup, _bs, _be)
+            if e:
+                st.error(e)
+            else:
+                st.success(f"{n:,}행 채웠습니다.")
+                st.cache_data.clear()
+                st.rerun()
     if sync_err:
         st.warning(
             f"GA4 자동 연동이 아직 안 됐습니다 — {sync_err} "
