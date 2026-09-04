@@ -2732,6 +2732,44 @@ def get_visible_sheets(wb) -> set:
     return {name for name in wb.sheetnames if wb[name].sheet_state == "visible"}
 
 
+# 파일명에서 날짜를 뽑을 때 쓰는 패턴. 앞에서부터 먼저 걸리는 걸 쓴다.
+#   STCO_주간보고서_260804.xlsx        → 2026-08-04
+#   STCO_주간보고서_20260804.xlsx      → 2026-08-04
+#   STCO_주간보고서_260804-260810.xlsx → 2026-08-10 (기간이면 마지막 날 = 기준일)
+#   STCO_주간보고서_2026-08-04 (1).xlsx → 2026-08-04
+REPORT_DATE_PATTERNS = [
+    re.compile(r"(20\d{2})[._\-]?(\d{2})[._\-]?(\d{2})"),   # 20260804 / 2026-08-04
+    re.compile(r"(?<!\d)(\d{2})[._\-]?(\d{2})[._\-]?(\d{2})(?!\d)"),  # 260804
+]
+
+
+def report_date_from_name(name: str):
+    """파일명에서 리포트 기준일을 뽑는다. 못 찾으면 None.
+
+    타겟팅별·소재별 성과는 '당월 누적' 스냅샷이라 파일 안에 날짜가 없다. 그래서 저장할 때
+    도장을 찍어야 하는데, 올린 날(today)로 찍으면 과거 리포트를 나중에 올렸을 때 전부 오늘
+    데이터가 되어버린다(형이 8월 이전을 못 보던 이유). 파일명의 날짜를 우선 쓴다.
+    """
+    base = str(name or "")
+    base = re.sub(r"\.[A-Za-z0-9]+$", "", base)          # 확장자 제거
+    base = re.sub(r"\(\s*\d+\s*\)\s*$", "", base)       # 끝의 "(1)" 같은 중복 표기 제거
+    found = []
+    for pat in REPORT_DATE_PATTERNS:
+        for m in pat.finditer(base):
+            y, mm, dd = m.groups()
+            y = int(y) if len(y) == 4 else 2000 + int(y)
+            try:
+                found.append(date(y, int(mm), int(dd)))
+            except ValueError:
+                continue
+        if found:
+            break
+    if not found:
+        return None
+    # 기간(0804-0810)으로 적힌 경우 마지막 날이 그 리포트의 기준일이다
+    return max(found)
+
+
 def parse_workbook(file, today: date):
     xls = pd.ExcelFile(file)
     try:
@@ -4086,7 +4124,18 @@ def render_upload_panel():
                 st.rerun()
 
     if file is not None:
-        today = date.today()
+        # 스냅샷(타겟팅별·소재별)에 찍을 기준일. 파일명에서 뽑고, 없으면 오늘로 둔다.
+        # 과거 리포트를 나중에 올려도 그 시점 데이터로 들어가게 하려는 것.
+        _auto = report_date_from_name(getattr(file, "name", ""))
+        today = st.sidebar.date_input(
+            "리포트 기준일", value=_auto or date.today(), key="wk_asof",
+            help="타겟팅별·소재별 성과가 이 날짜로 저장됩니다. 파일명에서 자동으로 읽고, "
+                 "다르면 직접 고치세요.",
+        )
+        st.sidebar.caption(
+            f"파일명에서 {_auto} 로 읽었습니다." if _auto
+            else "파일명에 날짜가 없어 오늘로 잡았습니다 — 과거 리포트면 위에서 고쳐주세요."
+        )
         with st.sidebar.status("파일 분석 중...", expanded=True) as status:
             result = parse_workbook(file, today)
             st.write(f"📅 월별 통합데이터: {len(result['monthly'])}개월")
