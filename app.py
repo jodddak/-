@@ -4725,9 +4725,14 @@ def _render_creative_table(fc: pd.DataFrame, channel_name: str = None):
     display_cols = ["channel", "creative"]
     if has_image:
         # render_html_table은 셀 값을 그대로 <td>에 넣으므로 <img> 태그 문자열이 실제 썸네일로 렌더링된다.
+        # loading="lazy"가 중요한 이유: 매체 탭이 5~7개인데 st.tabs는 안 보이는 탭까지 전부 미리
+        # 그린다. 지연 로딩이 없으면 화면을 열 때마다 소재 이미지 100장 넘게(수십 MB) 한꺼번에
+        # 받아오느라 느려진다. 지연 로딩을 걸면 실제로 눈에 보이는 것만 받는다.
         agg["creative_image"] = agg["image_url"].map(
             lambda u: (
-                f'<img src="{u}" style="height:140px;width:140px;border-radius:8px;object-fit:cover;">'
+                f'<img src="{u}" loading="lazy" decoding="async" width="140" height="140" '
+                f'style="height:140px;width:140px;border-radius:8px;object-fit:cover;'
+                f'background:#EFEEE6;">'
                 if isinstance(u, str) and u else ""
             )
         )
