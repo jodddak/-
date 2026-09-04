@@ -3025,15 +3025,36 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
     if preset == "전체":
         start, end = min_d, max_d
     elif preset == "직접선택":
-        narrow_col, _spacer = st.columns([3, 9])
+        # '확인'을 눌러야 적용된다. 달력에서 시작일만 찍은 순간에도 Streamlit은 화면을 다시
+        # 그리는데, 그때 date_input이 날짜 1개짜리를 돌려줘서 기간이 전체로 튀었다가 되돌아온다.
+        # 무거운 표가 그 사이에 두 번 그려지고 숫자도 잠깐 엉뚱하게 보인다.
+        # 그래서 고르는 값(초안)과 적용된 값을 나눠 두고, 확인을 눌렀을 때만 반영한다.
+        applied_key = f"{key}_applied"
+        applied = st.session_state.get(applied_key) or (min_d, max_d)
+        applied = (max(applied[0], min_d), min(applied[1], max_d))
+
+        narrow_col, btn_col, _spacer = st.columns([3, 1, 8])
         with narrow_col:
-            date_range = st.date_input(
-                "기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual",
+            draft = st.date_input(
+                "기간 직접 선택", value=applied, min_value=min_d, max_value=max_d,
+                key=f"{key}_manual",
             )
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            start, end = date_range
-        else:
-            start, end = min_d, max_d
+        with btn_col:
+            # 라벨 한 줄만큼 내려야 입력칸과 버튼 높이가 맞는다
+            st.markdown("<div style='height:30px'></div>", unsafe_allow_html=True)
+            confirmed = st.button("확인", key=f"{key}_apply", type="primary",
+                                  use_container_width=True)
+
+        picked = draft if (isinstance(draft, tuple) and len(draft) == 2) else None
+        if confirmed and picked:
+            st.session_state[applied_key] = picked
+            applied = picked
+        start, end = applied
+
+        if picked and picked != applied:
+            st.caption("고른 기간이 아직 반영되지 않았습니다 — **확인**을 눌러주세요.")
+        elif not picked:
+            st.caption("종료일까지 고른 뒤 **확인**을 눌러주세요.")
     else:
         start, end = _preset_to_range(preset, min_d, max_d)
 
