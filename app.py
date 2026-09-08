@@ -10407,13 +10407,25 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     elif level == "타겟팅":
         g["key"] = g["channel"] + " · " + g["target"]
     else:
-        # 소재명은 같은데 타겟팅이 다르면 성과가 다르다 — 둘을 붙여야 한 줄이 한 소재가 된다
+        # 소재명은 같은데 타겟팅이 다르면 성과가 다르다 — 둘을 붙여야 한 줄이 한 소재가 된다.
+        #
+        # 묶는 기준은 '보이는 이름'이 아니라 정규화한 매칭키다. GA4는 같은 소재를 퍼센트
+        # 인코딩된 값과 한글 값으로 따로 주기도 하고, 공백이 붙은 변형도 생긴다. 그대로 두면
+        # 화면에 똑같은 줄이 두 개 나오고, 둘 다 같은 매체 소재에 붙어 광고비가 두 번 더해진다
+        # (형이 잡은 그 문제 — 수피마티셔츠 127,384원이 두 줄에 각각).
         g["key"] = (g["cre_name"] + '<span class="gc-sub">'
                     + g["channel"] + " · " + g["target"]
                     + np.where(g["cre_date"] != "", " · " + g["cre_date"], "")
                     + "</span>")
+        _mk = (g["cre_date"].str.replace("-", "", regex=False).str[2:] + "_"
+               + g["target"] + "_" + g["cre_name"])
+        g["_gkey"] = [_creative_image_key(v) for v in _mk]
 
-    out = g.groupby(["key", "channel"], as_index=False).agg(
+    if "_gkey" not in g.columns:
+        g["_gkey"] = g["key"]
+
+    out = g.groupby(["_gkey", "channel"], as_index=False).agg(
+        key=("key", "first"),
         sessions=("sessions", "sum"), new=("new", "sum"), signup=("signup", "sum"),
         conv=("conversions", "sum"), rev=("revenue", "sum"),
         cre_name=("cre_name", "first"), cre_date=("cre_date", "first"),
