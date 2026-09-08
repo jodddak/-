@@ -3014,6 +3014,30 @@ def _preset_to_range(name: str, min_d: date, max_d: date):
     return s, e
 
 
+def _preset_raw_range(name: str):
+    """데이터 범위로 자르기 전, 프리셋이 원래 가리키는 기간. '전체'/직접선택은 None."""
+    today = date.today()
+    table = {
+        "오늘": (today, today),
+        "어제": (today - timedelta(days=1), today - timedelta(days=1)),
+        "이번주": (today - timedelta(days=today.weekday()), today),
+        "최근 7일(오늘 포함)": (today - timedelta(days=6), today),
+        "최근 7일(오늘 제외)": (today - timedelta(days=7), today - timedelta(days=1)),
+        "이번달": (today.replace(day=1), today),
+        "최근 30일(오늘 포함)": (today - timedelta(days=29), today),
+        "최근 30일(오늘 제외)": (today - timedelta(days=30), today - timedelta(days=1)),
+    }
+    if name in table:
+        return table[name]
+    if name == "지난주":
+        mon = today - timedelta(days=today.weekday()) - timedelta(days=7)
+        return mon, mon + timedelta(days=6)
+    if name == "지난달":
+        last = today.replace(day=1) - timedelta(days=1)
+        return last.replace(day=1), last
+    return None
+
+
 DATE_PERIOD_OPTIONS_FULL = DATE_PRESETS_FULL + ["전체", "직접선택"]
 DATE_PERIOD_OPTIONS = DATE_PRESETS_SHORT + ["직접선택"]
 
@@ -3059,6 +3083,16 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
             st.caption("종료일까지 고른 뒤 **확인**을 눌러주세요.")
     else:
         start, end = _preset_to_range(preset, min_d, max_d)
+        # 프리셋이 가리키는 기간에 데이터가 아예 없으면, 지금까지는 조용히 '데이터 마지막 날'
+        # 하루로 찌부러져서 '이번달인데 8/19 하루'처럼 보였다. 왜 그런지 화면에서 알려준다.
+        _raw = _preset_raw_range(preset)
+        if _raw and (_raw[1] < min_d or _raw[0] > max_d):
+            st.warning(
+                f"**{preset}**({_raw[0]:%Y-%m-%d}~{_raw[1]:%Y-%m-%d})에는 저장된 데이터가 "
+                f"없습니다. 지금 데이터는 **{min_d:%Y-%m-%d} ~ {max_d:%Y-%m-%d}**까지라, "
+                f"아래 표는 {start:%Y-%m-%d}~{end:%Y-%m-%d} 기준입니다. "
+                "최신 데이터를 받으려면 동기화를 눌러주세요."
+            )
 
     # 지금 어느 기간을 보고 있는지는 화면에서 가장 자주 확인하는 정보다.
     # 기본 caption은 너무 작아서 전용 스타일로 크게 뽑는다.
@@ -10034,8 +10068,11 @@ def diagnose_ad_spend_setup() -> str:
 # ──────────────────────────────────────────────────────────────
 # GA 소재별 성과 — utm_campaign / utm_content 단위
 # ──────────────────────────────────────────────────────────────
-GC_HEAD = ["구분", "방문", "신규 방문", "회원가입", "가입률",
-           "구매", "구매율", "매출", "객단가", "추정 광고비", "추정 ROAS", "판정"]
+# 매체 리포트(노출·클릭·광고비)와 GA(방문·구매·매출)를 한 줄에 놓는다.
+# 광고비가 매체 실제 청구액이라 소재별 ROAS를 제대로 볼 수 있다.
+# 전환은 GA 기준 하나만 쓴다 — 매체 신고 전환은 매체마다 기준이 달라 서로 못 더한다.
+GC_HEAD = ["구분", "노출", "클릭", "CTR", "광고비(VAT+)",
+           "GA 방문", "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
 
 # utm_content 작명 규칙: 그룹명(타겟팅명)_날짜_소재이름
 #   예) 패션관심타겟_260807_수피마티셔츠
@@ -10311,10 +10348,14 @@ def _gc_parse_content(v):
             pass
     parts = raw.split("_")
     idx = next((i for i, t in enumerate(parts) if GC_DATE_TOKEN.match(t)), None)
-    if idx is None or idx == 0 or idx == len(parts) - 1:
-        # 날짜가 없거나 맨 앞/맨 뒤면 규칙 밖이다 — 억지로 쪼개면 엉뚱한 타겟팅이 생긴다
+    if idx is None or idx == len(parts) - 1:
+        # 날짜가 아예 없거나 맨 뒤면 규칙 밖이다 — 억지로 쪼개면 엉뚱한 타겟팅이 생긴다
         return "(규칙 외)", "", raw
-    target = "_".join(parts[:idx])
+    # 매체마다 작명이 다르다.
+    #   GFA    타겟팅_날짜_소재명   (패션관심타겟_260807_수피마티셔츠)
+    #   P-MAX  날짜_소재명          (260902_파비오울수트)  ← 타겟팅 칸이 없다
+    # 날짜가 맨 앞이면 타겟팅을 안 쓰는 매체로 보고 '(타겟팅 없음)'으로 둔다.
+    target = "_".join(parts[:idx]) if idx > 0 else "(타겟팅 없음)"
     ymd = parts[idx]
     name = "_".join(parts[idx + 1:])
     if len(ymd) == 6:
@@ -10380,41 +10421,79 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     return out.sort_values("rev", ascending=False)[cols]
 
 
-def _gc_row_html(r, cost, extra_cls="", img_url=None, show_img=False) -> str:
-    """소재 표의 한 줄. 광고비가 소재 단위로 없어서 방문 비중으로 나눈 '추정'이다."""
+def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dict:
+    """대행사 리포트의 소재별 실적을 {정규화 소재명: 지표}로 접는다.
+
+    같은 달에 여러 번 업로드하면 '당월 누적'이 여러 벌 쌓이므로, 소재별로 가장 최근
+    스냅샷 하나만 쓴다(소재별 성과 화면과 같은 규칙 — 그냥 더하면 몇 배로 부풀려진다).
+    """
+    out = {}
+    if creative_perf is None or creative_perf.empty:
+        return out
+    c = creative_perf.copy()
+    if "as_of_date" not in c.columns or "creative" not in c.columns:
+        return out
+    c["as_of_date"] = pd.to_datetime(c["as_of_date"], errors="coerce").dt.date
+    c = c[(c["as_of_date"] >= start) & (c["as_of_date"] <= end)]
+    if c.empty:
+        return out
+    c = c.sort_values("as_of_date").drop_duplicates(subset=["channel", "creative"], keep="last")
+    for col in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue"):
+        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+    for _, r in c.iterrows():
+        k = _creative_image_key(r["creative"])
+        cur = out.setdefault(k, {"impressions": 0.0, "clicks": 0.0, "cost": 0.0,
+                                 "media_conv": 0.0, "channel": r.get("channel"),
+                                 "name": str(r["creative"])})
+        cur["impressions"] += float(r["impressions"])
+        cur["clicks"] += float(r["clicks"])
+        cur["cost"] += float(r["cost_incl_vat"])
+        cur["media_conv"] += float(r["conversions"])
+    return out
+
+
+def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
+    """소재 한 줄. media는 _gc_media_by_key에서 찾은 매체 실적(없으면 None)."""
     ses = float(r["sessions"] or 0)
-    new = float(r["new"] or 0)
-    sign = float(r["signup"] or 0)
     conv = float(r["conv"] or 0)
     rev = float(r["rev"] or 0)
-    s_rate = (sign / new * 100) if new else 0.0
-    b_rate = (conv / ses * 100) if ses else 0.0
+    imp = float((media or {}).get("impressions", 0) or 0)
+    clk = float((media or {}).get("clicks", 0) or 0)
+    cost = float((media or {}).get("cost", 0) or 0)
+
+    ctr = (clk / imp * 100) if imp else 0.0
     aov = (rev / conv) if conv else 0.0
     roas = (rev / cost * 100) if cost > 0 else 0.0
     roas_txt = f"{roas:,.0f}%" if cost > 0 else "-"
     label, cls = _v4_verdict(roas, cost)
-    name = r["key"] if isinstance(r, dict) or "key" in r else ""
+    if cost <= 0:
+        label, cls = "광고비 없음", "hold"
+
+    name = r["key"] if not isinstance(r, dict) else r.get("key", "")
     img_td = ""
     if show_img:
         if img_url:
-            img_td = f'<td class="gc-img"><img src="{img_url}" loading="lazy"></td>'
+            img_td = f'<td class="gc-img"><img src="{img_url}" loading="lazy" decoding="async" width="140" height="140"></td>'
         elif "nosort" in extra_cls:
-            img_td = '<td class="gc-img"></td>'          # 합계 줄엔 이미지가 없는 게 당연
+            img_td = '<td class="gc-img"></td>'
         else:
-            img_td = '<td class="gc-img"><span class="gc-noimg">이미지 없음</span></td>' 
+            img_td = '<td class="gc-img"><span class="gc-noimg">이미지 없음</span></td>'
+
+    def dash(v, fmt):
+        return format(v, fmt) if v else "-"
+
     return (
         f'<tr class="{extra_cls}">'
         f'<td class="l">{name}</td>'
         + img_td +
+        f'<td data-v="{imp:.0f}">{dash(imp, ",.0f")}</td>'
+        f'<td data-v="{clk:.0f}">{dash(clk, ",.0f")}</td>'
+        f'<td data-v="{ctr:.3f}">{f"{ctr:.2f}%" if imp else "-"}</td>'
+        f'<td data-v="{cost:.0f}">{(f"{cost:,.0f}원" if cost else "-")}</td>'
         f'<td data-v="{ses:.0f}">{_v4_num(ses)}</td>'
-        f'<td data-v="{new:.0f}">{_v4_num(new)}</td>'
-        f'<td data-v="{sign:.0f}">{_v4_num(sign)}</td>'
-        f'<td data-v="{s_rate:.3f}">{s_rate:.2f}%</td>'
         f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
-        f'<td data-v="{b_rate:.3f}">{b_rate:.2f}%</td>'
         f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
-        f'<td data-v="{aov:.0f}">{_v4_num(aov, "원")}</td>'
-        f'<td data-v="{cost:.0f}">{_v4_num(cost, "원")}</td>'
+        f'<td data-v="{aov:.0f}">{dash(aov, ",.0f")}{"원" if aov else ""}</td>'
         f'<td data-v="{roas:.2f}">{roas_txt}</td>'
         f'<td><span class="fv4-chip {cls}">{label}</span></td>'
         f'</tr>'
@@ -10531,6 +10610,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
 
+    # 매체 리포트의 소재별 실적(노출·클릭·광고비·매체 전환)을 소재명 키로 접어둔다.
+    media_map = _gc_media_by_key(creative_perf, start, end)
     show_img = (level == "소재")
     head = list(GC_HEAD)
     head[0] = {"소재": "소재 (타겟팅 · 등록일)", "타겟팅": "매체 · 타겟팅",
@@ -10547,24 +10628,33 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
             keep = [c for c in order if c not in sep] if label == "TOTAL" else [label]
+            ch_keep = keep
             rows = rows_all[rows_all["channel"].isin(keep)]
             if rows.empty:
                 st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
 
-            ch_ses = rows.groupby("channel")["sessions"].sum().to_dict()
-
-            def cost_of(r):
-                tot = float(ch_ses.get(r["channel"], 0) or 0)
-                if tot <= 0:
-                    return 0.0
-                return spend_by_ch.get(r["channel"], 0.0) * float(r["sessions"]) / tot
-
             rows = rows.copy()
-            rows["_cost"] = rows.apply(cost_of, axis=1)
+
+            def media_of(r):
+                """소재 한 줄에 붙일 매체 실적. UTM의 날짜+소재명이 대행사 리포트의
+                소재명(날짜_소재명)과 같은 꼴이라 그 키로 찾는다."""
+                if level != "소재":
+                    return None
+                for k in _gc_image_keys(r):
+                    if k in media_map:
+                        return media_map[k]
+                return None
+
+            rows["_media"] = rows.apply(media_of, axis=1)
+            rows["_cost"] = rows["_media"].map(lambda m: float((m or {}).get("cost", 0) or 0))
+            # 매체·캠페인·타겟팅 단위로 볼 때는 소재별 매칭이 무의미하므로 매체 광고비를 그대로 쓴다
+            if level != "소재":
+                rows["_cost"] = rows["channel"].map(lambda c: spend_by_ch.get(c, 0.0))
             rows["_roas"] = np.where(rows["_cost"] > 0, rows["rev"] / rows["_cost"] * 100, 0.0)
             rows["_name"] = rows["cre_name"] if show_img else rows["key"]
-            tot_cost = float(rows["_cost"].sum())
+            tot_cost = (float(rows["_cost"].sum()) if level == "소재"
+                        else sum(spend_by_ch.get(c, 0.0) for c in ch_keep))
             tot_rev = float(rows["rev"].sum())
             avg_roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0.0
 
@@ -10596,11 +10686,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         if k in img_map:
                             url = img_map[k]
                             break
-                body.append(_gc_row_html(r, float(r["_cost"]), img_url=url, show_img=show_img))
-            tot_r = rows[["sessions", "new", "signup", "conv", "rev"]].sum()
+                body.append(_gc_row_html(r, r["_media"], img_url=url, show_img=show_img))
+            tot_r = rows[["sessions", "conv", "rev"]].sum()
             tot_r["key"] = "TOTAL"
-            tot_r["cre_name"] = "TOTAL"
-            sum_html = _gc_row_html(tot_r, tot_cost, "fv4-sum-row nosort", show_img=show_img)
+            tot_media = {
+                "impressions": sum(float((m or {}).get("impressions", 0) or 0) for m in rows["_media"]),
+                "clicks": sum(float((m or {}).get("clicks", 0) or 0) for m in rows["_media"]),
+                "cost": tot_cost,
+            }
+            sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
 
             tid = f"gctbl{ti}"
             th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
@@ -10625,9 +10719,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 '
                 '것입니다 — 같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
                 '<b>(규칙 외)</b>로 모아 보여주니, 그게 많으면 UTM 작명을 맞춰주세요.<br>'
-                '<b>추정 광고비</b>는 매체 광고비를 그 매체 안에서 방문 비중대로 나눈 값입니다 — '
-                'GA에는 소재별 광고비가 없습니다. <b>순위를 볼 때만</b> 쓰시고 정산에는 쓰지 '
-                f'마세요. 광고비가 {FUNNEL_MIN_SPEND:,.0f}원 미만이면 <b>판단 보류</b>로 둡니다.</div>'
+                '<b>노출·클릭·광고비</b>는 대행사 매체 리포트의 실제 집행값이고, '
+                '<b>방문·구매·매출</b>은 GA4 값입니다. UTM의 <code>날짜_소재명</code>이 매체 '
+                '리포트의 소재명과 같은 꼴이라 그 키로 붙입니다. '
+                '전환은 GA 기준 하나만 씁니다 — 매체 신고 전환은 매체마다 기준이 달라 '
+                '서로 못 더합니다. ROAS는 <b>GA 매출 ÷ 매체 광고비</b>입니다.<br>'
+                '광고비가 안 붙은 소재는 <b>광고비 없음</b>으로 둡니다 — 매체 리포트에 없거나 '
+                '소재명이 UTM과 달라 못 찾은 경우라, 그게 많으면 작명을 맞춰주세요. '
+                f'광고비가 {FUNNEL_MIN_SPEND:,.0f}원 미만이면 <b>판단 보류</b>입니다.</div>'
                 + table + '</div></div>'
                 + """
 <script>
