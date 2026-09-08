@@ -21,6 +21,7 @@ import io
 import json
 import re
 import urllib.parse
+from functools import lru_cache
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -716,7 +717,8 @@ def _local_store():
 
 
 # 데이터는 하루 단위로 들어오는데 캐시 수명이 60초면, 조작할 때마다 사실상 매번 다시 읽는다.
-# 15분으로 늘리고, 즉시 갱신이 필요할 땐 화면의 '지금 동기화'가 캐시를 비우게 해둔다.
+# 60분으로 잡았다. 데이터는 하루 단위로 들어오고, 동기화·업로드·저장 버튼이 전부
+# st.cache_data.clear()를 부르기 때문에 새 데이터가 늦게 보일 일은 없다.
 # 한 번에 받아올 수 있는 행 수. Supabase(PostgREST)가 응답당 1000행으로 잘라서 주므로
 # 그보다 크게 잡아도 소용이 없다. 대신 페이지를 '동시에' 받아서 왕복 대기를 겹친다.
 LOAD_PAGE_SIZE = 1000
@@ -741,7 +743,7 @@ def _load_page(client, table_name, page, since=None):
     return page, (resp.data or [])
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_table(name: str) -> pd.DataFrame:
     """Supabase에서 테이블 한 벌을 받아온다.
 
@@ -6469,7 +6471,7 @@ def diagnose_ga4_setup() -> str:
     return "\n".join(L)
 
 
-def ga_inflow_source(ga_daily: pd.DataFrame, excel_inflow: pd.DataFrame) -> pd.DataFrame:
+def ga_inflow_source(ga_daily: pd.DataFrame, excel_inflow) -> pd.DataFrame:
     """GA 유입 화면들이 쓸 원본 한 벌. GA4 API로 받은 게 있으면 그걸 쓰고, 없을 때만
     예전 엑셀 업로드분으로 내려간다. 화면마다 다른 원본을 보면 같은 기간인데 숫자가 달라져서
     (형이 겪은 그 문제) 반드시 한 군데서 정한다."""
@@ -6480,6 +6482,10 @@ def ga_inflow_source(ga_daily: pd.DataFrame, excel_inflow: pd.DataFrame) -> pd.D
                 return shaped
         except Exception:
             pass
+    # 엑셀 폴백은 GA4 API가 비었을 때만 쓴다. 그런데 인자로 미리 받아버리면 안 쓸 표까지
+    # 매번 DB에서 끌어오게 된다(8천 행이면 0.3초). 그래서 '읽어오는 함수'를 받아 여기서만 부른다.
+    if callable(excel_inflow):
+        excel_inflow = excel_inflow()
     return excel_inflow if excel_inflow is not None else pd.DataFrame()
 
 
@@ -6748,7 +6754,20 @@ FUNNEL_V4_CSS = """
 """
 
 
+@lru_cache(maxsize=4096)
+def _v4_canon_channel_cached(name: str) -> str:
+    return _v4_canon_channel_impl(name)
+
+
 def _v4_canon_channel(name) -> str:
+    """행마다 불리는 함수라 같은 이름을 수만 번 다시 계산하게 된다(8개월치에서 1.7만 회).
+    매체명 종류는 수십 개뿐이므로 결과를 기억해두고 재사용한다."""
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return _v4_canon_channel_impl(name)
+    return _v4_canon_channel_cached(str(name))
+
+
+def _v4_canon_channel_impl(name) -> str:
     """어떤 소스에서 온 채널명이든 대표 채널명 하나로 모은다(계획 예산 ↔ 실제 집행 매칭용)."""
     raw = str(name).strip()
     low = raw.lower()
@@ -10640,7 +10659,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
 def render_ga_channel_funnel_page(
     audience: pd.DataFrame,
-    ga_channel_inflow: pd.DataFrame,
+    ga_channel_inflow,          # DataFrame 또는 필요할 때 읽어오는 함수
     inflow_revenue: pd.DataFrame,
     channels_weekly: pd.DataFrame,
     channel_mix: pd.DataFrame,
@@ -10686,6 +10705,10 @@ def render_ga_channel_funnel_page(
         ga_channel_inflow = ga_inflow_source(ga_daily, ga_channel_inflow)
     else:
         ga_source_label = "GA 엑셀 업로드(수동)"
+        if callable(ga_channel_inflow):
+            ga_channel_inflow = ga_channel_inflow()
+    if ga_channel_inflow is None:
+        ga_channel_inflow = pd.DataFrame()
 
     last_sync = None
     if ga_daily is not None and not ga_daily.empty and "uploaded_at" in ga_daily.columns:
@@ -12072,7 +12095,7 @@ def main():
         )
     elif page == "채널 퍼널 리포트":
         render_ga_channel_funnel_page(
-            T("channel_audience_snapshot"), T("ga_channel_inflow"),
+            T("channel_audience_snapshot"), (lambda: T("ga_channel_inflow")),
             T("inflow_revenue_daily"), T("channel_weekly"), T("channel_mix_budget"),
             ga_daily=T("ga_channel_daily"), utm_map=T("utm_channel_map"),
             decisions=T("decision_log"), ad_spend=T("ad_spend_daily"),
@@ -12098,7 +12121,7 @@ def main():
     # 원인을 찾을 데가 여기밖에 없어서 남겨둔다.
     elif page == "GA 매체별 유입 경로":
         render_ga_channel_inflow_page(
-            ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
+            ga_inflow_source(T("ga_channel_daily"), lambda: T("ga_channel_inflow")))
     # GA4 라이브 리포트는 메뉴에서 뺐다(GA4 화면을 그대로 다시 보는 거라 대시보드에서 볼 이유가
     # 없다). 코드는 남겨두니 필요하면 NAV_GROUPS에 이름만 넣으면 살아난다.
     elif page == "GA4 라이브 리포트":
@@ -12106,7 +12129,7 @@ def main():
     elif page == "자사몰/GA 매출 분석":
         render_inflow_revenue_page(
             T("inflow_revenue_daily"),
-            ga_inflow_source(T("ga_channel_daily"), T("ga_channel_inflow")))
+            ga_inflow_source(T("ga_channel_daily"), lambda: T("ga_channel_inflow")))
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
