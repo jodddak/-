@@ -10960,8 +10960,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 소재별 실적은 '매체 API 우선, 없으면 대행사 리포트' 순으로 본다.
     # API는 매일 들어와서 신규 소재가 바로 잡히고, 리포트는 주 단위라 일주일씩 밀린다.
     # GFA는 네이버가 API를 안 열어줘서 리포트만 있으므로 폴백이 반드시 필요하다.
-    media_map = _gc_media_by_key(creative_perf, start, end)      # 리포트 (폴백)
-    media_map.update(_gc_api_by_key(ad_creative, start, end))    # API (우선)
+    _report_map = _gc_media_by_key(creative_perf, start, end)     # 대행사 리포트
+    _api_map = _gc_api_by_key(ad_creative, start, end)            # 매체 API
+
+    # 매체 단위로 하나만 쓴다 — API가 있는 매체는 리포트를 아예 안 본다.
+    #
+    # 둘을 소재명으로만 합치면, 리포트에만 있고 API엔 이름이 조금 다른 소재가 남아서
+    # 그 매체 광고비가 실제보다 커진다(형이 잡은 메타 84만원 → 104만원).
+    # 게다가 리포트는 '당월 누적' 스냅샷이라 기간 개념도 API와 달라서 섞으면 안 된다.
+    # GFA처럼 API가 없는 매체만 리포트로 채운다.
+    _api_channels = {ch for ch, _ in _api_map}
+    media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
+    media_map.update(_api_map)
 
     # ── 소재명 별칭 ──
     # UTM에 박힌 옛 이름을 지금 쓰는 이름으로 바꿔 보여준다.
@@ -10995,6 +11005,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             save_table("creative_alias", _e[CREATIVE_ALIAS_COLS], "utm_name", "소재명 별칭")
             st.cache_data.clear()
             st.rerun()
+    if _api_channels:
+        _rep_only = sorted({ch for ch, _ in _report_map} - _api_channels)
+        st.caption(
+            "노출·클릭·광고비 출처 — **매체 API**: " + ", ".join(sorted(_api_channels))
+            + ((" · **대행사 리포트**: " + ", ".join(_rep_only)) if _rep_only else "")
+            + " (API가 있는 매체는 리포트를 쓰지 않습니다)"
+        )
     show_img = (level == "소재")
     head = list(GC_HEAD)
     head[0] = {"소재": "소재 (날짜_소재명)", "타겟팅": "매체 · 타겟팅",
