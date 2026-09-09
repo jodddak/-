@@ -6723,6 +6723,7 @@ FUNNEL_V4_CSS = """
 .gc-noimg { display:inline-block; padding:4px 8px; border-radius:6px; background:#F4F3EC;
             color:#A9A79A; font-size:13px; }
 .gc-tbl td { vertical-align:middle; }
+.gc-unmatched td { background:#FBF6EC; color:#7A6A45; }
 .fv4-kpi-delta { font-size:13.5px; font-weight:700; }
 .fv4-up   { color:#c0392b; }
 .fv4-down { color:#2563c9; }
@@ -10706,7 +10707,7 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     return out
 
 
-def _gc_attach_media(rows: pd.DataFrame, media_map: dict) -> list:
+def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> list:
     """소재 줄마다 매체 실적을 붙이되, 한 소재가 여러 줄로 쪼개졌으면 나눠 담는다.
 
     매체는 소재 하나로 실적을 주는데, GA는 같은 소재를 타겟팅별로 쪼개서 준다
@@ -10724,6 +10725,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict) -> list:
             groups.setdefault(id(m), []).append(i)
 
     out = list(hits)
+    matched_ids.update(id(m) for m in hits if m)
     ses = pd.to_numeric(rows["sessions"], errors="coerce").fillna(0).tolist()
     for idxs in groups.values():
         if len(idxs) < 2:
@@ -11059,7 +11061,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             rows = rows.copy()
 
-            rows["_media"] = (_gc_attach_media(rows, media_map)
+            _matched = set()
+            rows["_media"] = (_gc_attach_media(rows, media_map, _matched)
                               if level == "소재" else None)
             rows["_cost"] = rows["_media"].map(lambda m: float((m or {}).get("cost", 0) or 0))
             # 매체·캠페인·타겟팅 단위로 볼 때는 소재별 매칭이 무의미하므로 매체 광고비를 그대로 쓴다
@@ -11101,11 +11104,36 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             url = img_map[k]
                             break
                 body.append(_gc_row_html(r, r["_media"], img_url=url, show_img=show_img))
+            # 매체에는 있는데 GA에서 못 찾은 소재를 한 줄로 모은다.
+            #
+            # 이 표는 'GA 줄이 있어야' 나오는 구조라, 매체 실적만 있고 GA 유입이 안 잡힌
+            # 소재는 통째로 빠졌다. 그래서 합계가 광고 관리자보다 10%쯤 적게 나왔다.
+            # 빠뜨리지 말고 따로 세워두면 합계가 매체 값과 맞고, UTM이 안 붙은 소재가
+            # 얼마나 되는지도 바로 보인다.
+            leftovers = [v for k, v in media_map.items()
+                         if k[0] in ch_keep and id(v) not in _matched]
+            if level == "소재" and leftovers:
+                _lo = {
+                    "impressions": sum(float(m.get("impressions", 0) or 0) for m in leftovers),
+                    "clicks": sum(float(m.get("clicks", 0) or 0) for m in leftovers),
+                    "cost": sum(float(m.get("cost", 0) or 0) for m in leftovers),
+                    "media_conv": 0.0,
+                }
+                _lo_row = pd.Series({
+                    "key": (f'<b>(GA 매칭 안 됨)</b><span class="gc-sub">'
+                            f'매체 소재 {len(leftovers)}개 · UTM이 안 붙었거나 이름이 다릅니다</span>'),
+                    "sessions": 0.0, "conv": 0.0, "rev": 0.0,
+                })
+                body.append(_gc_row_html(_lo_row, _lo, "gc-unmatched", show_img=show_img))
+                tot_cost += _lo["cost"]
+
             tot_r = rows[["sessions", "conv", "rev"]].sum()
             tot_r["key"] = "TOTAL"
             tot_media = {
-                "impressions": sum(float((m or {}).get("impressions", 0) or 0) for m in rows["_media"]),
-                "clicks": sum(float((m or {}).get("clicks", 0) or 0) for m in rows["_media"]),
+                "impressions": sum(float((m or {}).get("impressions", 0) or 0) for m in rows["_media"])
+                               + (_lo["impressions"] if level == "소재" and leftovers else 0),
+                "clicks": sum(float((m or {}).get("clicks", 0) or 0) for m in rows["_media"])
+                          + (_lo["clicks"] if level == "소재" and leftovers else 0),
                 "cost": tot_cost,
             }
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
