@@ -666,6 +666,7 @@ TABLES = {
     "ga_creative_daily": "ga_creative_daily",
     "kakao_channel_message": "kakao_channel_message",
     "creative_alias": "creative_alias",
+    "ad_creative_daily": "ad_creative_daily",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -8162,6 +8163,278 @@ def render_gfa_token_helper():
     )
 
 
+# ══════════════════════════════════════════════════════════════
+# 소재 단위 실적 (매체 API 직결)
+#
+# 여태 소재별 노출·클릭·광고비는 대행사 주간 리포트에서 가져왔다. 그래서 신규 소재가
+# 일주일씩 밀렸다(9/2에 시작한 소재가 화면엔 '광고비 없음'). 매체 API는 소재 단위 실적을
+# 바로 주므로 직접 받아온다.
+#
+# GFA만 예외다 — 네이버가 GFA OpenAPI를 공식 파트너사에만 열어둬서 API가 없다. GFA는
+# 계속 리포트 업로드로 채우고, 화면은 'API 우선, 없으면 리포트' 순으로 본다.
+#
+# 소재명은 매체가 준 이름을 그대로 쓴다. UTM의 날짜_소재명과 같은 꼴이라(260902_말라네울수트)
+# GA 쪽과 그 키로 붙는다.
+# ══════════════════════════════════════════════════════════════
+AD_CREATIVE_COLS = ["report_date", "channel", "creative", "impressions", "clicks",
+                    "cost_incl_vat", "conversions", "revenue", "source"]
+
+
+def _empty_creative():
+    return pd.DataFrame(columns=AD_CREATIVE_COLS)
+
+
+def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
+    """메타 광고(ad) 단위 일별 실적. 광고 이름이 곧 소재명이다."""
+    cfg = _secrets_section("meta_ads")
+    if not cfg or not cfg.get("access_token") or not cfg.get("ad_account_id"):
+        return _empty_creative()
+    import requests
+
+    acct = str(cfg["ad_account_id"]).strip()
+    if not acct.startswith("act_"):
+        acct = f"act_{acct}"
+    ver = str(cfg.get("api_version", "v21.0")).strip()
+    url = f"https://graph.facebook.com/{ver}/{acct}/insights"
+    params = {
+        "fields": "ad_name,spend,impressions,clicks,actions,action_values",
+        "level": "ad",                     # ← 계정이 아니라 광고 단위
+        "time_increment": 1,
+        "time_range": json.dumps({"since": str(start), "until": str(end)}),
+        "access_token": cfg["access_token"],
+        "limit": 500,
+    }
+    rows = []
+    while url:
+        resp = requests.get(url, params=params, timeout=90)
+        payload = resp.json()
+        if "error" in payload:
+            raise RuntimeError(payload["error"].get("message", str(payload["error"])))
+        for d in payload.get("data", []):
+            rows.append({
+                "report_date": d.get("date_start"), "channel": "메타",
+                "creative": str(d.get("ad_name") or "").strip(),
+                "impressions": float(d.get("impressions") or 0),
+                "clicks": _meta_link_clicks(d),
+                # 메타 spend는 VAT 별도라 다른 매체와 단위를 맞추려면 1.1을 곱한다
+                "cost_incl_vat": float(d.get("spend") or 0) * 1.1,
+                "conversions": _meta_action_value(d, "actions", "purchase"),
+                "revenue": _meta_action_value(d, "action_values", "purchase"),
+                "source": "meta_api",
+            })
+        nxt = (payload.get("paging") or {}).get("next")
+        url, params = (nxt, None) if nxt else (None, None)
+    return _creative_frame(rows)
+
+
+def _meta_action_value(row: dict, field: str, action_type: str) -> float:
+    """actions/action_values에서 특정 전환 유형 값을 꺼낸다.
+    구매 전환은 계정 설정에 따라 이름이 조금씩 달라서 'purchase'가 들어간 것을 모두 더한다."""
+    total = 0.0
+    for a in (row.get(field) or []):
+        t = str(a.get("action_type") or "")
+        if action_type in t:
+            try:
+                total += float(a.get("value") or 0)
+            except Exception:
+                continue
+    return total
+
+
+def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
+    """구글 P-MAX 애셋 그룹 단위 일별 실적. 애셋 그룹 이름이 소재명이다.
+    (P-MAX는 개별 소재 단위 지표를 안 주고 애셋 그룹까지만 준다.)"""
+    cfg = _secrets_section("google_ads")
+    need = ["developer_token", "client_id", "client_secret", "refresh_token", "customer_id"]
+    if not cfg or any(not cfg.get(k) for k in need):
+        return _empty_creative()
+    import requests
+
+    tok = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={"client_id": cfg["client_id"], "client_secret": cfg["client_secret"],
+              "refresh_token": cfg["refresh_token"], "grant_type": "refresh_token"},
+        timeout=60).json()
+    if "access_token" not in tok:
+        raise RuntimeError(f"구글 토큰 발급 실패: {tok.get('error_description') or tok}")
+
+    cid = str(cfg["customer_id"]).replace("-", "").strip()
+    headers = {"Authorization": f"Bearer {tok['access_token']}",
+               "developer-token": str(cfg["developer_token"]).strip(),
+               "Content-Type": "application/json"}
+    if cfg.get("login_customer_id"):
+        headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
+
+    query = (
+        "SELECT segments.date, asset_group.name, metrics.cost_micros, metrics.impressions, "
+        "metrics.clicks, metrics.conversions, metrics.conversions_value "
+        "FROM asset_group "
+        f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
+    )
+    candidates = []
+    if cfg.get("api_version"):
+        candidates.append(str(cfg["api_version"]).strip())
+    candidates += [f"v{n}" for n in range(GOOGLE_ADS_VER_MAX, GOOGLE_ADS_VER_MIN - 1, -1)]
+
+    rows, last_err = [], None
+    for ver in candidates:
+        r = requests.post(
+            f"https://googleads.googleapis.com/{ver}/customers/{cid}/googleAds:searchStream",
+            headers=headers, json={"query": query}, timeout=90)
+        if r.status_code == 404:
+            continue
+        if r.status_code >= 400:
+            last_err = f"({r.status_code}, {ver}) {r.text[:250]}"
+            continue
+        for batch in (r.json() or []):
+            for res in batch.get("results", []):
+                m = res.get("metrics", {})
+                rows.append({
+                    "report_date": res.get("segments", {}).get("date"),
+                    "channel": "구글",
+                    "creative": str((res.get("assetGroup") or {}).get("name") or "").strip(),
+                    "impressions": float(m.get("impressions") or 0),
+                    "clicks": float(m.get("clicks") or 0),
+                    # 구글 비용은 VAT 별도(마이크로 단위)
+                    "cost_incl_vat": float(m.get("costMicros") or 0) / 1_000_000 * 1.1,
+                    "conversions": float(m.get("conversions") or 0),
+                    "revenue": float(m.get("conversionsValue") or 0),
+                    "source": "google_ads_api",
+                })
+        break
+    else:
+        raise RuntimeError(f"구글 애셋그룹 조회 실패: {last_err}")
+    return _creative_frame(rows)
+
+
+def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
+    """크리테오 크리에이티브(광고) 단위 일별 실적."""
+    cfg = _secrets_section("criteo")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return _empty_creative()
+    import requests
+
+    token = _criteo_token(cfg)
+    candidates = []
+    if cfg.get("api_version"):
+        candidates.append(str(cfg["api_version"]).strip())
+    candidates += CRITEO_VERSION_CANDIDATES
+    adv = str(cfg.get("advertiser_id", "") or "").strip()
+
+    payload, last_err = None, None
+    for ver in candidates:
+        adv_ids = adv or _criteo_advertiser_ids(token, ver)
+        body = {
+            "advertiserIds": adv_ids,
+            "dimensions": ["Day", "Adset"],   # 크리테오는 소재 묶음이 Adset 단위로 나온다
+            "metrics": ["AdvertiserCost", "Displays", "Clicks", "Sales", "Revenue"],
+            "currency": str(cfg.get("currency", "KRW")).strip(),
+            "startDate": str(start), "endDate": str(end), "format": "json",
+        }
+        r = requests.post(f"{CRITEO_BASE}/{ver}/statistics/report",
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/json"},
+                          json=body, timeout=90)
+        if r.status_code == 404:
+            continue
+        if r.status_code >= 400:
+            last_err = f"({r.status_code}, {ver}) {r.text[:250]}"
+            continue
+        try:
+            payload = r.json()
+        except Exception:
+            last_err = f"({ver}) 응답 해석 실패"
+            continue
+        break
+    if payload is None:
+        raise RuntimeError(f"크리테오 소재 조회 실패: {last_err}")
+
+    rows = []
+    for d in (payload.get("Rows") or payload.get("rows") or []):
+        rows.append({
+            "report_date": d.get("Day") or d.get("day"),
+            "channel": "크리테오",
+            "creative": str(d.get("Adset") or d.get("adset") or "").strip(),
+            "impressions": float(d.get("Displays") or d.get("displays") or 0),
+            "clicks": float(d.get("Clicks") or d.get("clicks") or 0),
+            # 크리테오 청구액은 VAT 포함으로 들어온다(기존 광고비 페처와 동일 기준)
+            "cost_incl_vat": float(d.get("AdvertiserCost") or d.get("advertiserCost") or 0),
+            "conversions": float(d.get("Sales") or d.get("sales") or 0),
+            "revenue": float(d.get("Revenue") or d.get("revenue") or 0),
+            "source": "criteo_api",
+        })
+    return _creative_frame(rows)
+
+
+def _creative_frame(rows: list) -> pd.DataFrame:
+    """소재 실적 행 목록을 표준 모양으로 정리한다."""
+    if not rows:
+        return _empty_creative()
+    out = pd.DataFrame(rows)
+    out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
+    out = out.dropna(subset=["report_date"])
+    out = out[out["creative"].astype(str).str.strip() != ""]
+    if out.empty:
+        return _empty_creative()
+    for c in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue"):
+        out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0)
+    # 같은 날 같은 소재가 여러 캠페인에 걸쳐 있으면 합산한다
+    out = out.groupby(["report_date", "channel", "creative", "source"],
+                      as_index=False)[["impressions", "clicks", "cost_incl_vat",
+                                       "conversions", "revenue"]].sum()
+    return out[AD_CREATIVE_COLS]
+
+
+# GFA는 API가 없어 빠져 있다(리포트 업로드로 채운다).
+AD_CREATIVE_FETCHERS = [
+    ("메타", fetch_meta_creative),
+    ("구글", fetch_google_creative),
+    ("크리테오", fetch_criteo_creative),
+]
+
+
+def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
+                     progress=None, start: date = None, end: date = None):
+    """소재 단위 실적을 매체에서 받아 ad_creative_daily에 upsert한다."""
+    today = date.today()
+    if end is None:
+        end = today - timedelta(days=1)
+    if start is None:
+        if existing is None or existing.empty or "report_date" not in existing.columns:
+            start = end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
+        else:
+            last = pd.to_datetime(existing["report_date"]).max().date()
+            start = min(last - timedelta(days=AD_SPEND_RESYNC_TAIL_DAYS - 1), end)
+    if start > end:
+        return 0, {}, {}
+
+    saved, errors, total = {}, {}, 0
+    for label, fn in AD_CREATIVE_FETCHERS:
+        if only and label not in only:
+            continue
+        if progress:
+            progress(f"⏳ {label} 소재 실적 받는 중...")
+        try:
+            df = (fn(start, end) if unlimited
+                  else _run_bounded(lambda f=fn: f(start, end), SYNC_PER_SOURCE_SEC))
+        except Exception as e:
+            errors[label] = str(e)[:250]
+            if progress:
+                progress(f"⚠️ {label} 실패 — {str(e)[:80]}")
+            continue
+        if df is None or df.empty:
+            if progress:
+                progress(f"· {label} 0행")
+            continue
+        n = save_table("ad_creative_daily", df,
+                       "report_date,channel,creative,source", f"{label} 소재 API")
+        saved[label] = n
+        total += n
+        if progress:
+            progress(f"✅ {label} {n:,}행")
+    return total, saved, errors
+
+
 AD_SPEND_FETCHERS = [
     ("메타", fetch_meta_spend),
     ("구글", fetch_google_ads_spend),
@@ -10148,18 +10421,37 @@ def _gc_image_keys(row) -> list:
     같은 꼴이 된다. 그래서 리포트로 이미 올라간 이미지를 그대로 재사용할 수 있다.
         패션관심타겟_260807_수피마티셔츠  →  260807_수피마티셔츠  →  수피마티셔츠
     """
-    name = str(row.get("cre_name") or "").strip()
     ymd = str(row.get("cre_date") or "").replace("-", "")
-    keys = []
-    if ymd and name:
-        keys.append(f"{ymd[2:]}_{name}")   # 260807_수피마티셔츠
-        keys.append(f"{ymd}_{name}")       # 20260807_수피마티셔츠
-    if name:
-        keys.append(name)
     raw = str(row.get("creative") or "").strip()
+
+    # 별칭(cre_label)을 먼저 시도한다.
+    #
+    # 소재 이름을 바꾸면 매체는 새 이름(260807_데님셔츠)을 주는데 GA는 UTM에 박힌 옛 이름
+    # (수피마티셔츠)을 계속 준다. 이름이 다르면 매칭이 안 돼 광고비가 안 붙는다.
+    # 별칭을 '보여주는 이름'으로만 쓰면 그 연결이 끊긴 채 남으므로, 매칭 키로도 같이 쓴다.
+    # 별칭 한 줄로 이름 표시와 광고비 연결이 한꺼번에 해결된다.
+    names = []
+    for n in (row.get("cre_label"), row.get("cre_name")):
+        n = str(n or "").strip()
+        if n and n not in names:
+            names.append(n)
+
+    keys = []
+    for name in names:
+        if ymd:
+            keys.append(f"{ymd[2:]}_{name}")
+            keys.append(f"{ymd}_{name}")
+        keys.append(name)
     if raw:
         keys.append(raw)
-    return [_creative_image_key(k) for k in keys if k]
+
+    seen, out = set(), []
+    for k in keys:
+        kk = _creative_image_key(k)
+        if kk and kk not in seen:
+            seen.add(kk)
+            out.append(kk)
+    return out
 
 
 def _gc_image_lookup(creative_perf: pd.DataFrame) -> dict:
@@ -10240,146 +10532,6 @@ def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
         lines.append(_ops_next_action(
             f"부진 소재({n_bad}개)는 소재 교체 또는 예산 축소를 검토하는 것을 권장합니다."))
     return "<br>".join(lines)
-
-
-GC_IMAGE_FOLDER = "ga_creative"
-
-
-def _gc_image_keys(row) -> list:
-    """GA 소재 한 줄에서 이미지 매칭에 쓸 후보 키를 우선순위대로 만든다.
-
-    UTM 작명(타겟팅_날짜_소재명)의 뒤 두 조각을 붙이면 대행사 리포트의 소재명(날짜_소재명)과
-    같은 꼴이 된다. 그래서 리포트로 이미 올라간 이미지를 그대로 재사용할 수 있다.
-        패션관심타겟_260807_수피마티셔츠  →  260807_수피마티셔츠  →  수피마티셔츠
-    """
-    name = str(row.get("cre_name") or "").strip()
-    ymd = str(row.get("cre_date") or "").replace("-", "")
-    keys = []
-    if ymd and name:
-        keys.append(f"{ymd[2:]}_{name}")   # 260807_수피마티셔츠
-        keys.append(f"{ymd}_{name}")       # 20260807_수피마티셔츠
-    if name:
-        keys.append(name)
-    raw = str(row.get("creative") or "").strip()
-    if raw:
-        keys.append(raw)
-    return [_creative_image_key(k) for k in keys if k]
-
-
-def _gc_image_lookup(creative_perf: pd.DataFrame) -> dict:
-    """대행사 리포트로 이미 올라간 소재 이미지 URL을 {정규화 소재명: URL}로 모은다.
-    같은 소재가 여러 주에 걸쳐 있으면 최근 것을 쓴다."""
-    out = {}
-    if creative_perf is None or creative_perf.empty:
-        return out
-    c = creative_perf
-    if "image_url" not in c.columns or "creative" not in c.columns:
-        return out
-    c = c[c["image_url"].notna() & (c["image_url"].astype(str) != "")]
-    if c.empty:
-        return out
-    if "as_of_date" in c.columns:
-        c = c.sort_values("as_of_date")
-    for _, r in c.iterrows():
-        out[_creative_image_key(r["creative"])] = str(r["image_url"])
-    return out
-
-
-def upload_ga_creative_images(files) -> tuple:
-    """소재 이미지 파일을 Storage에 올리고 {정규화 소재명: URL}을 돌려준다.
-
-    파일명이 곧 소재명이다 — 260807_수피마티셔츠.jpg 처럼 두면 표의 소재와 자동으로 붙는다.
-    한글 파일명은 Storage 키로 못 쓰기 때문에, 기존 소재 이미지와 같은 방식으로
-    ASCII+해시 경로를 만들어 저장한다(같은 소재는 항상 같은 경로 → 덮어쓰기).
-    """
-    client = get_supabase_client()
-    if client is None or not files:
-        return {}, ["Supabase에 연결되어 있지 않습니다."]
-    urls, errors = {}, []
-    for f in files:
-        stem = str(getattr(f, "name", "")).rsplit(".", 1)
-        name_key = _creative_image_key(stem[0])
-        ext = (stem[1].lower() if len(stem) > 1 else "png")
-        if ext == "jpg":
-            ext = "jpeg"
-        try:
-            data = f.getvalue() if hasattr(f, "getvalue") else f.read()
-            path = f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.{ext}"
-            client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
-                path, data, {"content-type": f"image/{ext}", "upsert": "true"})
-            urls[name_key] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
-        except Exception as e:
-            if len(errors) < 3:
-                errors.append(f"{getattr(f, 'name', '?')}: {e}")
-    return urls, errors
-
-
-def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
-    """소재별 성과 화면과 같은 톤의 자동 코멘트. 표본이 작은 건 판단에서 뺀다."""
-    if rows is None or rows.empty:
-        return ""
-    d = rows.copy()
-    judged = d[d["_cost"] >= FUNNEL_MIN_SPEND]
-    n_hold = len(d) - len(judged)
-    if judged.empty:
-        return (f"{label}은 아직 판단 가능한(광고비 {FUNNEL_MIN_SPEND:,.0f}원 이상) "
-                f"소재가 없습니다 — {len(d)}개 모두 표본 부족입니다.")
-    n_good = int((judged["_roas"] >= OPS_KPI_ROAS_HIGH).sum())
-    n_bad = int((judged["_roas"] < OPS_KPI_ROAS_LOW).sum())
-    n_mid = len(judged) - n_good - n_bad
-    if len(judged) == 1:
-        one = judged.iloc[0]
-        return (f"{label}은 판단 가능한 소재가 <b>{one['_name']}</b> 1개뿐이라, "
-                "우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.")
-    best = judged.loc[judged["_roas"].idxmax()]
-    worst = judged.loc[judged["_roas"].idxmin()]
-    lines = [
-        f"{label} 소재 {len(judged)}개 중 우수 {n_good}개 · 평균 수준 {n_mid}개 · 부진 {n_bad}개입니다"
-        + (f" (표본 부족 {n_hold}개는 판단 보류)." if n_hold else "."),
-        f"<b>{best['_name']}</b>가 추정 광고비 {best['_cost']:,.0f}원으로 ROAS {best['_roas']:,.0f}%를 "
-        f"기록해 가장 우수했고, <b>{worst['_name']}</b>는 추정 광고비 {worst['_cost']:,.0f}원 대비 "
-        f"ROAS {worst['_roas']:,.0f}%로 평균({avg_roas:,.0f}%) 대비 낮아 가장 부진했습니다.",
-    ]
-    if n_bad:
-        lines.append(_ops_next_action(
-            f"부진 소재({n_bad}개)는 소재 교체 또는 예산 축소를 검토하는 것을 권장합니다."))
-    return "<br>".join(lines)
-
-
-def _gc_media_picker(all_ch, off_by_default) -> list:
-    """엑셀 필터처럼 체크박스로 매체를 고른다. 켜져 있는 매체 목록을 돌려준다.
-
-    라디오 3개(제외/만보기/직접)로 나눠뒀더니 '맨즈탭만' 같은 특수 케이스마다 버튼이 하나씩
-    늘어나는 구조였다. 체크박스 목록이면 어떤 조합이든 클릭 몇 번으로 끝나서 하나로 합친다.
-    (모두 선택)은 자식 체크박스를 한꺼번에 켜고 끈다.
-    """
-    ss = st.session_state
-    for c in all_ch:
-        ss.setdefault(f"gc_ch_{c}", c not in off_by_default)
-    ss.setdefault("gc_ch_all", all(ss[f"gc_ch_{c}"] for c in all_ch))
-
-    def _toggle_all():
-        for c in all_ch:
-            ss[f"gc_ch_{c}"] = ss["gc_ch_all"]
-
-    on = [c for c in all_ch if ss.get(f"gc_ch_{c}", True)]
-    if len(on) == len(all_ch):
-        cap = f"전체 {len(all_ch)}개"
-    elif len(on) == 1:
-        cap = on[0]
-    else:
-        off = [c for c in all_ch if c not in on]
-        cap = (f"{len(on)}개 선택 · {', '.join(off)} 제외"
-               if len(off) <= 3 else f"{len(on)} / {len(all_ch)}개 선택")
-
-    with st.expander(f"매체 선택 — {cap}", expanded=False):
-        st.checkbox("(모두 선택)", key="gc_ch_all", on_change=_toggle_all)
-        st.markdown("<hr style='margin:6px 0 10px'>", unsafe_allow_html=True)
-        cols = st.columns(3)
-        for i, c in enumerate(all_ch):
-            with cols[i % 3]:
-                st.checkbox(c, key=f"gc_ch_{c}")
-    return [c for c in all_ch if ss.get(f"gc_ch_{c}", True)]
 
 
 def _gc_parse_content(v):
@@ -10417,7 +10569,7 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
              exclude=None, alias: dict = None) -> pd.DataFrame:
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
     cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev",
-            "cre_name", "cre_date", "creative"]
+            "cre_name", "cre_label", "cre_date", "creative"]
     if cre is None or cre.empty:
         return pd.DataFrame(columns=cols)
     g = cre.copy()
@@ -10474,13 +10626,15 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
 
     if "_gkey" not in g.columns:
         g["_gkey"] = g["key"]
+    if "cre_label" not in g.columns:
+        g["cre_label"] = g["cre_name"]
 
     out = g.groupby(["_gkey", "channel"], as_index=False).agg(
         key=("key", "first"),
         sessions=("sessions", "sum"), new=("new", "sum"), signup=("signup", "sum"),
         conv=("conversions", "sum"), rev=("revenue", "sum"),
         cre_name=("cre_name", "first"), cre_date=("cre_date", "first"),
-        creative=("creative", "first"))
+        cre_label=("cre_label", "first"), creative=("creative", "first"))
     return out.sort_values("rev", ascending=False)[cols]
 
 
@@ -10510,6 +10664,31 @@ def _gc_alias(name: str, alias: dict) -> str:
     if not alias or not name:
         return name
     return alias.get(_creative_image_key(name), name)
+
+
+def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
+    """매체 API로 받은 소재 실적을 {(매체, 소재명): 지표}로 접는다.
+
+    대행사 리포트와 달리 '일별'이라 기간 합산이 그냥 더하기다(스냅샷 중복 걱정이 없다).
+    """
+    out = {}
+    if ad_creative is None or ad_creative.empty:
+        return out
+    c = ad_creative.copy()
+    c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+    c = c[(c["report_date"] >= start) & (c["report_date"] <= end)]
+    if c.empty:
+        return out
+    for col in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue"):
+        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+    g = c.groupby(["channel", "creative"], as_index=False)[
+        ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
+    for _, r in g.iterrows():
+        k = (_v4_canon_channel(r["channel"]), _creative_image_key(r["creative"]))
+        out[k] = {"impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
+                  "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
+                  "channel": r["channel"], "name": str(r["creative"]), "src": "api"}
+    return out
 
 
 def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dict:
@@ -10597,7 +10776,8 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
 
 def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             utm_map: pd.DataFrame = None,
-                            creative_perf: pd.DataFrame = None):
+                            creative_perf: pd.DataFrame = None,
+                            ad_creative: pd.DataFrame = None):
     """GA 소재별 성과 — 대행사 리포트가 아니라 GA4의 utm_campaign/utm_content로 본다.
 
     매체 리포트(소재별 성과 탭)와 나눠둔 이유: 매체가 신고하는 전환은 매체마다 기준이 달라
@@ -10614,14 +10794,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         if st.button("🔄 소재 데이터 동기화", use_container_width=True, key="gc_sync"):
             cmap = (build_utm_channel_lookup(utm_map)
                     if utm_map is not None and not utm_map.empty else {})
-            with st.spinner("GA4에서 소재별 데이터를 받는 중..."):
-                n, s_, e_, err = sync_ga4_creative_daily(cre, cmap, force_full=cre is None or cre.empty)
-            if err:
-                st.error(err)
-            else:
-                st.success(f"{s_} ~ {e_} · {n}행 저장했습니다")
-                st.cache_data.clear()
-                st.rerun()
+            with st.status("소재 데이터를 받는 중...", expanded=True) as _st2:
+                st.write("① GA4 — 방문·구매·매출")
+                n, s_, e_, err = sync_ga4_creative_daily(
+                    cre, cmap, force_full=cre is None or cre.empty)
+                st.write(f"   {'⚠️ ' + err if err else f'✅ {s_} ~ {e_} · {n:,}행'}")
+                st.write("② 매체 API — 노출·클릭·광고비 (GFA는 리포트 업로드)")
+                n2, saved2, err2 = sync_ad_creative(ad_creative, progress=st.write,
+                                                    unlimited=True)
+                _st2.update(label=f"소재 데이터 동기화 완료 (GA {n:,}행 · 매체 {n2:,}행)",
+                            state="complete")
+            for k, v in (err2 or {}).items():
+                st.warning(f"{k} 소재 실적: {v}")
+            st.cache_data.clear()
+            st.rerun()
 
     if cre is None or cre.empty:
         st.info(
@@ -10705,8 +10891,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
 
-    # 매체 리포트의 소재별 실적(노출·클릭·광고비)을 (매체, 소재명) 키로 접어둔다.
-    media_map = _gc_media_by_key(creative_perf, start, end)
+    # 소재별 실적은 '매체 API 우선, 없으면 대행사 리포트' 순으로 본다.
+    # API는 매일 들어와서 신규 소재가 바로 잡히고, 리포트는 주 단위라 일주일씩 밀린다.
+    # GFA는 네이버가 API를 안 열어줘서 리포트만 있으므로 폴백이 반드시 필요하다.
+    media_map = _gc_media_by_key(creative_perf, start, end)      # 리포트 (폴백)
+    media_map.update(_gc_api_by_key(ad_creative, start, end))    # API (우선)
 
     # ── 소재명 별칭 ──
     # UTM에 박힌 옛 이름을 지금 쓰는 이름으로 바꿔 보여준다.
@@ -12378,7 +12567,8 @@ def main():
     elif page == "소재별 성과":
         render_ga_creative_page(T("ga_creative_daily"), ad_spend=T("ad_spend_daily"),
                                 utm_map=T("utm_channel_map"),
-                                creative_perf=T("creative_performance"))
+                                creative_perf=T("creative_performance"),
+                                ad_creative=T("ad_creative_daily"))
     # GA 매체별 유입 경로는 'UTM 매핑이 안 된 소스/매체'까지 그대로 보여주는 유일한 화면이다.
     # 다른 화면은 전부 매핑된 광고 매체만 세기 때문에, 새 매체를 붙였는데 대시보드에 안 잡힐 때
     # 원인을 찾을 데가 여기밖에 없어서 남겨둔다.
