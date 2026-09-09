@@ -665,6 +665,7 @@ TABLES = {
     "ad_contract": "ad_contract",
     "ga_creative_daily": "ga_creative_daily",
     "kakao_channel_message": "kakao_channel_message",
+    "creative_alias": "creative_alias",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -10413,7 +10414,7 @@ def _gc_parse_content(v):
 
 
 def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
-             exclude=None) -> pd.DataFrame:
+             exclude=None, alias: dict = None) -> pd.DataFrame:
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
     cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev",
             "cre_name", "cre_date", "creative"]
@@ -10446,6 +10447,9 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     g["target"] = parsed.map(lambda t: t[0])
     g["cre_date"] = parsed.map(lambda t: t[1])
     g["cre_name"] = parsed.map(lambda t: t[2])
+    # 별칭은 '보여줄 이름'만 바꾼다. 매체 리포트·이미지를 찾는 키(creative/cre_date)는
+    # UTM 원본을 그대로 써야 과거 데이터와 매칭이 안 깨진다.
+    g["cre_label"] = g["cre_name"].map(lambda v: _gc_alias(v, alias))
 
     if level == "매체":
         g["key"] = g["channel"]
@@ -10460,7 +10464,7 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         # 인코딩된 값과 한글 값으로 따로 주기도 하고, 공백이 붙은 변형도 생긴다. 그대로 두면
         # 화면에 똑같은 줄이 두 개 나오고, 둘 다 같은 매체 소재에 붙어 광고비가 두 번 더해진다
         # (형이 잡은 그 문제 — 수피마티셔츠 127,384원이 두 줄에 각각).
-        g["key"] = (g["cre_name"] + '<span class="gc-sub">'
+        g["key"] = (g["cre_label"] + '<span class="gc-sub">'
                     + g["channel"] + " · " + g["target"]
                     + np.where(g["cre_date"] != "", " · " + g["cre_date"], "")
                     + "</span>")
@@ -10478,6 +10482,34 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         cre_name=("cre_name", "first"), cre_date=("cre_date", "first"),
         creative=("creative", "first"))
     return out.sort_values("rev", ascending=False)[cols]
+
+
+CREATIVE_ALIAS_COLS = ["utm_name", "display_name", "note"]
+
+
+def creative_alias_map(alias_df: pd.DataFrame) -> dict:
+    """{정규화한 UTM 소재명: 보여줄 이름}.
+
+    UTM은 한 번 심으면 GA에 그대로 쌓인다. 나중에 소재 이름을 바꿔도 GA는 옛 이름을 계속
+    들고 있어서 화면과 매체 관리자 화면이 어긋난다(수피마티셔츠 → 데님셔츠).
+    UTM 자체를 기준으로 두되(과거 데이터가 안 깨지므로), 표시할 때만 새 이름으로 바꾼다.
+    """
+    out = {}
+    if alias_df is None or alias_df.empty:
+        return out
+    for _, r in alias_df.iterrows():
+        u = str(r.get("utm_name") or "").strip()
+        d = str(r.get("display_name") or "").strip()
+        if u and d:
+            out[_creative_image_key(u)] = d
+    return out
+
+
+def _gc_alias(name: str, alias: dict) -> str:
+    """소재명에 별칭이 있으면 바꿔서 돌려준다."""
+    if not alias or not name:
+        return name
+    return alias.get(_creative_image_key(name), name)
 
 
 def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dict:
@@ -10673,8 +10705,41 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
 
-    # 매체 리포트의 소재별 실적(노출·클릭·광고비·매체 전환)을 소재명 키로 접어둔다.
+    # 매체 리포트의 소재별 실적(노출·클릭·광고비)을 (매체, 소재명) 키로 접어둔다.
     media_map = _gc_media_by_key(creative_perf, start, end)
+
+    # ── 소재명 별칭 ──
+    # UTM에 박힌 옛 이름을 지금 쓰는 이름으로 바꿔 보여준다.
+    alias_df = load_table("creative_alias")
+    alias = creative_alias_map(alias_df)
+    with st.expander(f"✏️ 소재명 바꿔 보기 ({len(alias)}개 등록됨) — UTM 이름이 옛날 것일 때"):
+        st.caption(
+            "UTM은 한 번 심으면 GA에 그대로 쌓입니다. 나중에 소재 이름을 바꿔도 GA는 옛 이름을 "
+            "계속 주기 때문에 화면과 매체 관리자가 어긋납니다. "
+            "여기에 적어두면 **화면에 보이는 이름만** 바뀌고, 매체 리포트·이미지 매칭은 "
+            "UTM 원본으로 그대로 돌아갑니다(과거 데이터가 안 깨집니다)."
+        )
+        _base = (alias_df[CREATIVE_ALIAS_COLS].copy()
+                 if (alias_df is not None and not alias_df.empty
+                     and "utm_name" in alias_df.columns)
+                 else pd.DataFrame(columns=CREATIVE_ALIAS_COLS))
+        _ed = st.data_editor(
+            _base, num_rows="dynamic", use_container_width=True, key="gc_alias_editor",
+            column_config={
+                "utm_name": st.column_config.TextColumn(
+                    "UTM 소재명 (지금 화면에 보이는 이름)", required=True),
+                "display_name": st.column_config.TextColumn(
+                    "바꿔서 보여줄 이름", required=True),
+                "note": st.column_config.TextColumn("메모"),
+            },
+        )
+        if st.button("저장하고 반영", key="gc_alias_save", type="primary"):
+            _e = _ed.dropna(subset=["utm_name", "display_name"])
+            _e = _e[(_e["utm_name"].astype(str).str.strip() != "")
+                    & (_e["display_name"].astype(str).str.strip() != "")]
+            save_table("creative_alias", _e[CREATIVE_ALIAS_COLS], "utm_name", "소재명 별칭")
+            st.cache_data.clear()
+            st.rerun()
     show_img = (level == "소재")
     head = list(GC_HEAD)
     head[0] = {"소재": "소재 (타겟팅 · 등록일)", "타겟팅": "매체 · 타겟팅",
@@ -10684,7 +10749,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # 탭마다 _gc_rows를 다시 돌리면 같은 계산을 매체 수만큼 반복하게 된다(3만 행이면 탭당
     # 0.15초씩). 한 번만 접어두고 탭에서는 매체로 걸러 쓴다.
-    rows_all = _gc_rows(d, start, end, level, exclude=hidden)
+    rows_all = _gc_rows(d, start, end, level, exclude=hidden, alias=alias)
 
     for ti, label in enumerate(tab_labels):
         with tabs[ti]:
