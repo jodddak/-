@@ -6668,7 +6668,17 @@ FUNNEL_CANON_RULES = [
 FUNNEL_BENCHMARK_NEW = {"클릭": 1.0, "방문": 80.0, "가입": 2.0, "첫구매": 25.0}
 FUNNEL_BENCHMARK_RETURN = {"재클릭": 1.0, "재방문": 80.0, "재구매": 3.0}
 FUNNEL_MIX_DRIFT_PP = 5.0        # 계획 대비 집행 비중이 이만큼(%p) 벌어지면 '예산 이탈'로 표시
-FUNNEL_MIN_SPEND = 100_000       # 이 미만 광고비 채널은 표본이 작아 '판단 보류'로 둔다
+# 이 미만 광고비는 표본이 작아 '판단 보류'로 둔다.
+# 10만원은 소재 단위에서 문턱이 너무 높았다 — 소재 하나에 몇 만원씩 쓰는 구조라 대부분이
+# 보류로 빠져 판단할 게 없어졌다(담당자 확인). 2만원으로 낮춘다.
+FUNNEL_MIN_SPEND = 20_000
+# 클릭이 이만큼 쌓였는데 구매가 0이면 '표본 부족'이 아니라 '성과 부진'으로 본다.
+#
+# 메타 같은 경매형 매체는 반응이 좋은 소재에 예산을 몰아준다. 그래서 광고비가 적게
+# 나간 것 자체가 이미 '효율이 안 좋다'는 신호다. 이걸 표본 부족으로 처리하면 거꾸로 읽는
+# 셈이라, 클릭이 어느 정도 쌓였는데도 구매가 없으면 광고비와 무관하게 부진으로 판정한다.
+FUNNEL_ZERO_CONV_CLICKS = 10
+FUNNEL_MIN_CONV = 3              # 광고비가 적어도 구매가 이만큼 쌓였으면 판정한다
 
 FUNNEL_V4_CSS = """
 <style>
@@ -6886,10 +6896,21 @@ def _v4_delta_html(cur, prev) -> str:
     return f'<span class="fv4-kpi-delta {cls}">{arrow} {abs(pct):.1f}%</span>'
 
 
-def _v4_verdict(roas: float, spend: float) -> tuple:
+def _v4_verdict(roas: float, spend: float, conv: float = None,
+                clicks: float = None) -> tuple:
     """(뱃지 라벨, 뱃지 클래스) — 표본이 작으면 단정하지 않고 '판단 보류'로 둔다
-    (performance-marketing-analysis 스킬의 소표본 처리 원칙)."""
-    if spend < FUNNEL_MIN_SPEND:
+    (performance-marketing-analysis 스킬의 소표본 처리 원칙).
+
+    광고비만 보고 자르면 '구매 5건 · ROAS 789%'인 소재도 보류가 된다. 광고비가 적어도
+    구매가 몇 건 쌓였으면 ROAS가 우연으로 튄 게 아니므로 판정한다.
+    conv를 안 주면 예전처럼 광고비만 본다(매체·채널 단위 판정은 구매 기준이 다르므로).
+    """
+    # 클릭은 충분히 받았는데 구매가 0 → 기회를 줬는데 못 판 것이므로 부진으로 본다.
+    # (광고비가 적은 건 매체가 성과를 보고 예산을 안 태운 결과지, 판단을 미룰 이유가 아니다.)
+    if (conv is not None and conv <= 0
+            and clicks is not None and clicks >= FUNNEL_ZERO_CONV_CLICKS):
+        return "효율 미달", "bad"
+    if spend < FUNNEL_MIN_SPEND and (conv is None or conv < FUNNEL_MIN_CONV):
         return "판단 보류", "hold"
     if roas >= OPS_KPI_ROAS_HIGH:
         return "증액 검토", "good"
@@ -10768,6 +10789,9 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 "media_conv": float(base.get("media_conv", 0) or 0) * w,
                 "channel": base.get("channel"), "name": base.get("name"),
                 "src": base.get("src"), "_split": len(idxs),
+                # 판정은 쪼개기 전 '소재 전체 광고비'로 해야 한다 — 비중이 균등하지 않아
+                # 곱셈으로는 되돌릴 수 없으므로 원본을 그대로 들고 간다.
+                "_full_cost": float(base.get("cost", 0) or 0),
             }
     return out
 
@@ -10835,7 +10859,10 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     aov = (rev / conv) if conv else 0.0
     roas = (rev / cost * 100) if cost > 0 else 0.0
     roas_txt = f"{roas:,.0f}%" if cost > 0 else "-"
-    label, cls = _v4_verdict(roas, cost)
+    # 표본이 충분한지는 '그 소재 전체 광고비'로 본다. 타겟팅별로 쪼갠 값으로 재면
+    # 같은 소재가 10만원 문턱을 사이에 두고 '관찰'과 '보류'로 갈린다.
+    judge_cost = float((media or {}).get("_full_cost", cost) or 0)
+    label, cls = _v4_verdict(roas, judge_cost, conv, clk)
     if cost <= 0:
         label, cls = "광고비 없음", "hold"
 
@@ -11117,7 +11144,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             st.caption(
                 f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · "
-                f"추정 광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만은 표본 부족으로 판단 보류 처리"
+                f"광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
+                f"미만이면 표본 부족으로 판단 보류"
             )
             cmt = _gc_comment(rows, label if label != "TOTAL" else "전체", avg_roas)
             if cmt:
@@ -11196,7 +11224,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 '서로 못 더합니다. ROAS는 <b>GA 매출 ÷ 매체 광고비</b>입니다.<br>'
                 '광고비가 안 붙은 소재는 <b>광고비 없음</b>으로 둡니다 — 매체 리포트에 없거나 '
                 '소재명이 UTM과 달라 못 찾은 경우라, 그게 많으면 작명을 맞춰주세요. '
-                f'광고비가 {FUNNEL_MIN_SPEND:,.0f}원 미만이면 <b>판단 보류</b>입니다.</div>'
+                f'판정 기준 — 클릭 {FUNNEL_ZERO_CONV_CLICKS}회 이상인데 구매가 0이면 '
+                '<b>효율 미달</b>입니다. 경매형 매체는 반응이 좋은 소재에 예산을 몰아주므로, '
+                '광고비가 적게 나간 것 자체가 이미 성과 신호입니다.<br>'
+                f'광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 '
+                '미만일 때만 <b>판단 보류</b>로 둡니다. 표본은 타겟팅으로 쪼개기 전 '
+                '<b>소재 전체 광고비</b>로 봅니다.</div>'
                 + table + '</div></div>'
                 + """
 <script>
