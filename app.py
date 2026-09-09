@@ -6717,9 +6717,12 @@ FUNNEL_V4_CSS = """
 .fv4-chg-tag.warn { background:#FBE9E7; color:#B03A2E; }
 .fv4-chg-dot.flat { background:#C9C7BA; }
 .gc-sub { display:block; margin-top:3px; color:#8a8a7c; font-size:13px; font-weight:500; }
-.gc-img { width:112px; }
-.gc-img img { height:96px; width:96px; border-radius:8px; object-fit:cover; display:block;
-              background:#EFEEE6; }
+.gc-img { width:150px; }
+/* 소재 이미지는 원본 비율이 제각각(정사각·세로형 혼재)이라 그대로 두면 칸 안에서 작게
+   보이거나 여백이 생긴다. object-fit:cover로 가운데를 기준으로 잘라 칸을 꽉 채운다.
+   HTML의 width/height 속성도 같은 값으로 맞춰야 이미지가 늦게 와도 표가 안 흔들린다. */
+.gc-img img { height:132px; width:132px; border-radius:8px; display:block;
+              object-fit:cover; object-position:center; background:#EFEEE6; }
 .gc-noimg { display:inline-block; padding:4px 8px; border-radius:6px; background:#F4F3EC;
             color:#A9A79A; font-size:13px; }
 .gc-tbl td { vertical-align:middle; }
@@ -10816,7 +10819,8 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     img_td = ""
     if show_img:
         if img_url:
-            img_td = f'<td class="gc-img"><img src="{img_url}" loading="lazy" decoding="async" width="140" height="140"></td>'
+            img_td = (f'<td class="gc-img"><img src="{img_url}" loading="lazy" '
+                      f'decoding="async" width="132" height="132"></td>')
         elif "nosort" in extra_cls:
             img_td = '<td class="gc-img"></td>'
         else:
