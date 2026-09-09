@@ -10569,7 +10569,7 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
              exclude=None, alias: dict = None) -> pd.DataFrame:
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
     cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev",
-            "cre_name", "cre_label", "cre_date", "creative"]
+            "cre_name", "cre_label", "cre_title", "cre_date", "creative"]
     if cre is None or cre.empty:
         return pd.DataFrame(columns=cols)
     g = cre.copy()
@@ -10602,6 +10602,10 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     # 별칭은 '보여줄 이름'만 바꾼다. 매체 리포트·이미지를 찾는 키(creative/cre_date)는
     # UTM 원본을 그대로 써야 과거 데이터와 매칭이 안 깨진다.
     g["cre_label"] = g["cre_name"].map(lambda v: _gc_alias(v, alias))
+    # 표에 세울 이름은 매체 관리자와 같은 꼴(날짜_소재명)로 맞춘다.
+    # 예전엔 날짜를 아랫줄로 내렸는데, 매체 화면과 이름이 달라 대조가 번거로웠다.
+    _ymd6 = g["cre_date"].str.replace("-", "", regex=False).str[2:]
+    g["cre_title"] = np.where(_ymd6 != "", _ymd6 + "_" + g["cre_label"], g["cre_label"])
 
     if level == "매체":
         g["key"] = g["channel"]
@@ -10616,10 +10620,8 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         # 인코딩된 값과 한글 값으로 따로 주기도 하고, 공백이 붙은 변형도 생긴다. 그대로 두면
         # 화면에 똑같은 줄이 두 개 나오고, 둘 다 같은 매체 소재에 붙어 광고비가 두 번 더해진다
         # (형이 잡은 그 문제 — 수피마티셔츠 127,384원이 두 줄에 각각).
-        g["key"] = (g["cre_label"] + '<span class="gc-sub">'
-                    + g["channel"] + " · " + g["target"]
-                    + np.where(g["cre_date"] != "", " · " + g["cre_date"], "")
-                    + "</span>")
+        g["key"] = (g["cre_title"] + '<span class="gc-sub">'
+                    + g["channel"] + " · " + g["target"] + "</span>")
         _mk = (g["cre_date"].str.replace("-", "", regex=False).str[2:] + "_"
                + g["target"] + "_" + g["cre_name"])
         g["_gkey"] = [_creative_image_key(v) for v in _mk]
@@ -10628,13 +10630,16 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         g["_gkey"] = g["key"]
     if "cre_label" not in g.columns:
         g["cre_label"] = g["cre_name"]
+    if "cre_title" not in g.columns:
+        g["cre_title"] = g["cre_label"]
 
     out = g.groupby(["_gkey", "channel"], as_index=False).agg(
         key=("key", "first"),
         sessions=("sessions", "sum"), new=("new", "sum"), signup=("signup", "sum"),
         conv=("conversions", "sum"), rev=("revenue", "sum"),
         cre_name=("cre_name", "first"), cre_date=("cre_date", "first"),
-        cre_label=("cre_label", "first"), creative=("creative", "first"))
+        cre_label=("cre_label", "first"), cre_title=("cre_title", "first"),
+        creative=("creative", "first"))
     return out.sort_values("rev", ascending=False)[cols]
 
 
@@ -10931,7 +10936,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             st.rerun()
     show_img = (level == "소재")
     head = list(GC_HEAD)
-    head[0] = {"소재": "소재 (타겟팅 · 등록일)", "타겟팅": "매체 · 타겟팅",
+    head[0] = {"소재": "소재 (날짜_소재명)", "타겟팅": "매체 · 타겟팅",
                "캠페인": "매체 · 캠페인", "매체": "매체"}[level]
     if show_img:
         head.insert(1, "소재")
