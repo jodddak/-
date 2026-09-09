@@ -8176,10 +8176,11 @@ AD_SPEND_LOOKBACK_DAYS = 30
 AD_SPEND_RESYNC_TAIL_DAYS = 8
 
 
-# 화면을 열 때 돌리는 자동 동기화의 총 예산(초). 매체 API 하나가 느리면 화면이 통째로
-# 안 뜨는 걸 막는다 — 예산을 넘기면 남은 매체는 건너뛰고 화면부터 그린다.
-SYNC_TIME_BUDGET_SEC = 25
-SYNC_PER_SOURCE_SEC = 12
+# 자동 동기화 시간 제한 — '느리면 건너뛴다'가 아니라 '완전히 멈춘 걸 풀어준다'가 목적이다.
+# 데이터는 다 가져오는 게 우선이라 넉넉히 잡는다. 이 값에 걸린다면 그 매체 API가 정상이
+# 아닌 것이라, 더 기다려도 안 온다(요청 자체 타임아웃이 90초).
+SYNC_TIME_BUDGET_SEC = 600   # 전체 (사실상 제한 없음 — 진짜 멈춤만 방지)
+SYNC_PER_SOURCE_SEC = 150    # 매체 하나당
 
 
 def _run_bounded(fn, seconds: float):
@@ -8194,12 +8195,13 @@ def _run_bounded(fn, seconds: float):
     try:
         return fut.result(timeout=seconds)
     except FTimeout:
-        raise TimeoutError(f"{seconds:.0f}초 안에 응답이 없어 건너뜁니다")
+        raise TimeoutError(f"{seconds:.0f}초 안에 응답이 없어 시간 초과로 건너뜀")
     finally:
         ex.shutdown(wait=False)
 
 
-def sync_ad_spend(existing: pd.DataFrame):
+def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
+                  progress=None):
     """매체별로 일별 광고비를 받아 ad_spend_daily에 upsert한다. 한 매체가 실패해도 나머지는
     계속 진행한다 — 하나 막히면 전체가 서는 구조를 만들지 않기 위함."""
     today = date.today()
@@ -8216,19 +8218,29 @@ def sync_ad_spend(existing: pd.DataFrame):
     total = 0
     _t0 = time.monotonic()
     for label, fn in AD_SPEND_FETCHERS:
-        if time.monotonic() - _t0 > SYNC_TIME_BUDGET_SEC:
-            errors[label] = "자동 동기화 시간 초과 — 건너뜀 ('광고비 다시 받기'로 직접 받으세요)"
+        if only and label not in only:
             continue
+        # unlimited=True면 사용자가 버튼으로 직접 요청한 것이라 끝까지 기다린다.
+        if not unlimited and time.monotonic() - _t0 > SYNC_TIME_BUDGET_SEC:
+            errors[label] = "시간 초과로 건너뜀 — 아래 '건너뛴 매체 다시 받기'를 눌러주세요"
+            continue
+        if progress:
+            progress(f"⏳ {label} 받는 중...")
         try:
-            df = _run_bounded(lambda f=fn: f(start, end), SYNC_PER_SOURCE_SEC)
+            df = (fn(start, end) if unlimited
+                  else _run_bounded(lambda f=fn: f(start, end), SYNC_PER_SOURCE_SEC))
         except Exception as e:
             errors[label] = str(e)[:250]
+            if progress:
+                progress(f"⚠️ {label} 실패 — {str(e)[:80]}")
             continue
         if df is None or df.empty:
             continue
         n = save_table("ad_spend_daily", df, "report_date,channel,source", f"{label} API")
         saved[label] = n
         total += n
+        if progress:
+            progress(f"✅ {label} {n:,}행")
     return total, saved, errors
 
 
@@ -10845,11 +10857,15 @@ def render_ga_channel_funnel_page(
     spend_sync_note, spend_errors = "", {}
     if "fv4_spend_synced" not in st.session_state:
         st.session_state["fv4_spend_synced"] = True
-        try:
-            n_sp, saved, spend_errors = _run_bounded(
-                lambda: sync_ad_spend(ad_spend), SYNC_TIME_BUDGET_SEC + 10)
-        except Exception as _e:
-            n_sp, saved, spend_errors = 0, {}, {"광고비": f"자동 동기화 건너뜀 — {_e}"}
+        # 매체를 하나씩 받으면서 어디까지 왔는지 보여준다. 예전엔 아무 표시가 없어서
+        # 받는 중인지 멈춘 건지 구분이 안 됐다(형이 본 '무한 로딩').
+        with st.status("광고비를 매체에서 받는 중...", expanded=True) as _stt:
+            try:
+                n_sp, saved, spend_errors = sync_ad_spend(ad_spend, progress=st.write)
+                _stt.update(label=f"광고비 동기화 완료 ({n_sp:,}행)", state="complete")
+            except Exception as _e:
+                n_sp, saved, spend_errors = 0, {}, {"광고비": str(_e)[:200]}
+                _stt.update(label="광고비 동기화 실패", state="error")
         if n_sp:
             st.cache_data.clear()
             ad_spend = load_table("ad_spend_daily")
@@ -10941,8 +10957,28 @@ def render_ga_channel_funnel_page(
     with st.expander("💰 광고비 연동 진단 (매체별 연동 상태)"):
         st.caption("연동 안 된 매체는 채널믹스 예산 일할값으로 자동 대체됩니다 — 대시보드는 항상 동작합니다.")
         if spend_errors:
+            _skipped = [k for k, v in spend_errors.items() if "시간" in str(v)]
             for k, v in spend_errors.items():
                 st.warning(f"{k} 광고비 조회 실패: {v}")
+            if _skipped:
+                # '건너뜀'은 그 매체의 최근 며칠치가 안 채워졌다는 뜻이다. 이미 저장된 과거
+                # 데이터는 그대로 있지만, 놔두면 조용히 구멍이 남으므로 바로 다시 받게 한다.
+                st.info(
+                    f"**{', '.join(_skipped)}**는 {SYNC_PER_SOURCE_SEC}초 안에 응답이 없어 "
+                    "중단했습니다 — API가 정상이 아닐 가능성이 큽니다. "
+                    "이미 저장된 과거 데이터는 그대로 있고 **최근 며칠치만** 비어 있습니다. "
+                    "아래 버튼으로 다시 받아보세요 (이번엔 끝까지 기다립니다)."
+                )
+                if st.button(f"⏱️ 건너뛴 매체 다시 받기 ({len(_skipped)}개)",
+                             key="fv4_retry_skipped", type="primary"):
+                    with st.spinner("건너뛴 매체를 받는 중... 최대 몇 분 걸릴 수 있습니다"):
+                        _n, _saved, _err = sync_ad_spend(ad_spend, only=_skipped, unlimited=True)
+                    if _saved:
+                        st.success("받아왔습니다: " + ", ".join(f"{k} {v}행" for k, v in _saved.items()))
+                    for k, v in _err.items():
+                        st.error(f"{k}: {v}")
+                    st.cache_data.clear()
+                    st.rerun()
         if st.button("광고비 진단 실행", key="fv4_spend_diag_btn"):
             with st.spinner("확인 중..."):
                 st.code(diagnose_ad_spend_setup(), language=None)
