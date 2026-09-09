@@ -8378,40 +8378,56 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
     candidates += CRITEO_VERSION_CANDIDATES
     adv = str(cfg.get("advertiser_id", "") or "").strip()
 
-    payload, last_err = None, None
+    # 소재 단위는 'Ad'(광고)다. Adset은 그 위 묶음이라 관리자 화면의 소재 개수와 안 맞는다
+    # (스태틱_리텐션 묶음 하나에 광고가 6개 들어 있는 식). 계정/버전에 따라 차원 이름이
+    # 달라 거부될 수 있으므로 Ad → AdName → Adset 순으로 시도한다.
+    dim_candidates = [["Day", "Ad"], ["Day", "AdName"], ["Day", "Adset"]]
+
+    payload, used_dim, last_err = None, None, None
     for ver in candidates:
         adv_ids = adv or _criteo_advertiser_ids(token, ver)
-        body = {
-            "advertiserIds": adv_ids,
-            "dimensions": ["Day", "Adset"],   # 크리테오는 소재 묶음이 Adset 단위로 나온다
-            "metrics": ["AdvertiserCost", "Displays", "Clicks", "Sales", "Revenue"],
-            "currency": str(cfg.get("currency", "KRW")).strip(),
-            "startDate": str(start), "endDate": str(end), "format": "json",
-        }
-        r = requests.post(f"{CRITEO_BASE}/{ver}/statistics/report",
-                          headers={"Authorization": f"Bearer {token}",
-                                   "Content-Type": "application/json"},
-                          json=body, timeout=90)
-        if r.status_code == 404:
-            continue
-        if r.status_code >= 400:
-            last_err = f"({r.status_code}, {ver}) {r.text[:250]}"
-            continue
-        try:
-            payload = r.json()
-        except Exception:
-            last_err = f"({ver}) 응답 해석 실패"
-            continue
-        break
+        for dims in dim_candidates:
+            body = {
+                "advertiserIds": adv_ids,
+                "dimensions": dims,
+                "metrics": ["AdvertiserCost", "Displays", "Clicks", "Sales", "Revenue"],
+                "currency": str(cfg.get("currency", "KRW")).strip(),
+                "startDate": str(start), "endDate": str(end), "format": "json",
+            }
+            r = requests.post(f"{CRITEO_BASE}/{ver}/statistics/report",
+                              headers={"Authorization": f"Bearer {token}",
+                                       "Content-Type": "application/json"},
+                              json=body, timeout=90)
+            if r.status_code == 404:
+                break                     # 폐기된 버전 → 다음 버전으로
+            if r.status_code >= 400:
+                last_err = f"({r.status_code}, {ver}, {dims[1]}) {r.text[:200]}"
+                continue                  # 차원 이름이 안 맞음 → 다음 후보로
+            try:
+                payload = r.json()
+            except Exception:
+                last_err = f"({ver}) 응답 해석 실패"
+                continue
+            used_dim = dims[1]
+            break
+        if payload is not None:
+            break
     if payload is None:
         raise RuntimeError(f"크리테오 소재 조회 실패: {last_err}")
 
     rows = []
     for d in (payload.get("Rows") or payload.get("rows") or []):
+        # 응답 키는 요청한 차원 이름 그대로 온다(대소문자 표기가 흔들려서 둘 다 본다)
+        _name = ""
+        for k in (used_dim, (used_dim or "").lower(), "Ad", "ad", "AdName", "adName",
+                  "Adset", "adset"):
+            if k and d.get(k):
+                _name = str(d.get(k)).strip()
+                break
         rows.append({
             "report_date": d.get("Day") or d.get("day"),
             "channel": "크리테오",
-            "creative": str(d.get("Adset") or d.get("adset") or "").strip(),
+            "creative": _name,
             "impressions": float(d.get("Displays") or d.get("displays") or 0),
             "clicks": float(d.get("Clicks") or d.get("clicks") or 0),
             # 크리테오 청구액은 VAT 포함으로 들어온다(기존 광고비 페처와 동일 기준)
