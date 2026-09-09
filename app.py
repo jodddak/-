@@ -20,6 +20,7 @@ import hashlib
 import io
 import json
 import re
+import time
 import urllib.parse
 from functools import lru_cache
 from datetime import date, datetime, timedelta
@@ -787,10 +788,17 @@ def load_table(name: str) -> pd.DataFrame:
         try:
             from concurrent.futures import ThreadPoolExecutor
             got = {}
-            with ThreadPoolExecutor(max_workers=LOAD_MAX_WORKERS) as ex:
-                for page, chunk in ex.map(
-                        lambda pg: _load_page(client, table_name, pg, since), range(1, n_pages)):
+            # 스레드가 멈추면 with 블록이 끝나기를 영원히 기다린다. 시간 제한을 걸고
+            # 넘으면 순차 방식으로 되돌린다.
+            ex = ThreadPoolExecutor(max_workers=LOAD_MAX_WORKERS)
+            try:
+                futs = [ex.submit(_load_page, client, table_name, pg, since)
+                        for pg in range(1, n_pages)]
+                for f in futs:
+                    page, chunk = f.result(timeout=60)
                     got[page] = chunk
+            finally:
+                ex.shutdown(wait=False)
             for pg in range(1, n_pages):
                 rows.extend(got.get(pg, []))
             return pd.DataFrame(rows)
@@ -8168,6 +8176,29 @@ AD_SPEND_LOOKBACK_DAYS = 30
 AD_SPEND_RESYNC_TAIL_DAYS = 8
 
 
+# 화면을 열 때 돌리는 자동 동기화의 총 예산(초). 매체 API 하나가 느리면 화면이 통째로
+# 안 뜨는 걸 막는다 — 예산을 넘기면 남은 매체는 건너뛰고 화면부터 그린다.
+SYNC_TIME_BUDGET_SEC = 25
+SYNC_PER_SOURCE_SEC = 12
+
+
+def _run_bounded(fn, seconds: float):
+    """fn()을 제한 시간 안에서만 기다린다. 넘기면 TimeoutError.
+
+    파이썬은 돌고 있는 스레드를 강제로 못 죽인다. 그래서 '기다리는 걸 그만두는' 방식이다 —
+    남은 작업은 백그라운드에서 알아서 끝나고, 화면은 먼저 그려진다.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FTimeout
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fn)
+    try:
+        return fut.result(timeout=seconds)
+    except FTimeout:
+        raise TimeoutError(f"{seconds:.0f}초 안에 응답이 없어 건너뜁니다")
+    finally:
+        ex.shutdown(wait=False)
+
+
 def sync_ad_spend(existing: pd.DataFrame):
     """매체별로 일별 광고비를 받아 ad_spend_daily에 upsert한다. 한 매체가 실패해도 나머지는
     계속 진행한다 — 하나 막히면 전체가 서는 구조를 만들지 않기 위함."""
@@ -8183,9 +8214,13 @@ def sync_ad_spend(existing: pd.DataFrame):
 
     saved, errors = {}, {}
     total = 0
+    _t0 = time.monotonic()
     for label, fn in AD_SPEND_FETCHERS:
+        if time.monotonic() - _t0 > SYNC_TIME_BUDGET_SEC:
+            errors[label] = "자동 동기화 시간 초과 — 건너뜀 ('광고비 다시 받기'로 직접 받으세요)"
+            continue
         try:
-            df = fn(start, end)
+            df = _run_bounded(lambda f=fn: f(start, end), SYNC_PER_SOURCE_SEC)
         except Exception as e:
             errors[label] = str(e)[:250]
             continue
@@ -10792,8 +10827,14 @@ def render_ga_channel_funnel_page(
     lookup = build_utm_channel_lookup(utm_map) if utm_map is not None and not utm_map.empty else {}
     sync_note, sync_err = "", None
     if "fv4_synced" not in st.session_state:
-        n, s, e, sync_err = sync_ga4_channel_daily(ga_daily, lookup)
+        # 플래그를 먼저 세운다. 동기화가 멈췄을 때 새로고침하면 또 같은 데서 멈추는
+        # 무한 로딩을 막기 위함 — 한 번 시도했으면 그걸로 끝내고 화면을 띄운다.
         st.session_state["fv4_synced"] = True
+        try:
+            n, s, e, sync_err = _run_bounded(
+                lambda: sync_ga4_channel_daily(ga_daily, lookup), SYNC_TIME_BUDGET_SEC)
+        except Exception as _e:
+            n, s, e, sync_err = 0, None, None, f"GA4 자동 동기화 건너뜀 — {_e}"
         if n:
             st.cache_data.clear()
             ga_daily = load_table("ga_channel_daily")
@@ -10803,8 +10844,12 @@ def render_ga_channel_funnel_page(
     ad_spend = ad_spend if ad_spend is not None else pd.DataFrame()
     spend_sync_note, spend_errors = "", {}
     if "fv4_spend_synced" not in st.session_state:
-        n_sp, saved, spend_errors = sync_ad_spend(ad_spend)
         st.session_state["fv4_spend_synced"] = True
+        try:
+            n_sp, saved, spend_errors = _run_bounded(
+                lambda: sync_ad_spend(ad_spend), SYNC_TIME_BUDGET_SEC + 10)
+        except Exception as _e:
+            n_sp, saved, spend_errors = 0, {}, {"광고비": f"자동 동기화 건너뜀 — {_e}"}
         if n_sp:
             st.cache_data.clear()
             ad_spend = load_table("ad_spend_daily")
