@@ -10500,7 +10500,11 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
     for col in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue"):
         c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
     for _, r in c.iterrows():
-        k = _creative_image_key(r["creative"])
+        # 키에 매체를 반드시 넣는다. 같은 소재명을 여러 매체에 동시에 쓰기 때문에
+        # (260807_수피마티셔츠가 GFA·메타·구글에 다 있음), 소재명만으로 찾으면 한 매체의
+        # 광고비가 다른 매체 줄에도 붙어 중복 계산된다(형이 잡은 그 문제).
+        # 대행사 채널명은 'GFA PC/MO'처럼 기기까지 나뉘어 있어 대표 채널명으로 모은다.
+        k = (_v4_canon_channel(r.get("channel")), _creative_image_key(r["creative"]))
         cur = out.setdefault(k, {"impressions": 0.0, "clicks": 0.0, "cost": 0.0,
                                  "media_conv": 0.0, "channel": r.get("channel"),
                                  "name": str(r["creative"])})
@@ -10697,12 +10701,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             def media_of(r):
                 """소재 한 줄에 붙일 매체 실적. UTM의 날짜+소재명이 대행사 리포트의
-                소재명(날짜_소재명)과 같은 꼴이라 그 키로 찾는다."""
+                소재명(날짜_소재명)과 같은 꼴이라 그 키로 찾되, 매체가 같아야만 붙인다."""
                 if level != "소재":
                     return None
+                ch = r["channel"]
                 for k in _gc_image_keys(r):
-                    if k in media_map:
-                        return media_map[k]
+                    hit = media_map.get((ch, k))
+                    if hit:
+                        return hit
                 return None
 
             rows["_media"] = rows.apply(media_of, axis=1)
