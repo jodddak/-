@@ -10438,6 +10438,11 @@ def _gc_image_keys(row) -> list:
 
     keys = []
     for name in names:
+        # 이름에 이미 날짜가 들어 있으면(별칭을 '260807_데님셔츠'로 등록한 경우) 그대로 쓴다.
+        # 날짜를 또 붙이면 260807_260807_... 이 되어 매칭이 안 된다.
+        if re.match(r"^\d{6}_|^\d{8}_", name):
+            keys.append(name)
+            continue
         if ymd:
             keys.append(f"{ymd[2:]}_{name}")
             keys.append(f"{ymd}_{name}")
@@ -10604,8 +10609,13 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     g["cre_label"] = g["cre_name"].map(lambda v: _gc_alias(v, alias))
     # 표에 세울 이름은 매체 관리자와 같은 꼴(날짜_소재명)로 맞춘다.
     # 예전엔 날짜를 아랫줄로 내렸는데, 매체 화면과 이름이 달라 대조가 번거로웠다.
+    #
+    # 이미 날짜로 시작하는 이름에는 또 붙이지 않는다. 별칭을 '260807_데님셔츠'처럼 날짜까지
+    # 넣어 등록하면 260807_260807_데님셔츠가 되어버린다(형이 잡은 그 문제).
     _ymd6 = g["cre_date"].str.replace("-", "", regex=False).str[2:]
-    g["cre_title"] = np.where(_ymd6 != "", _ymd6 + "_" + g["cre_label"], g["cre_label"])
+    _has_date = g["cre_label"].str.match(r"^\d{6}_|^\d{8}_", na=False)
+    g["cre_title"] = np.where(
+        _has_date | (_ymd6 == ""), g["cre_label"], _ymd6 + "_" + g["cre_label"])
 
     if level == "매체":
         g["key"] = g["channel"]
