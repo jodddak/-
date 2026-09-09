@@ -2615,21 +2615,38 @@ def extract_creative_images(file, sheets_and_channels) -> dict:
         if name_idx is None:
             continue
 
+        # '이미지' 열이 몇 번째인지도 찾아둔다.
+        # 행만 보고 가져오면, 한 소재 줄에 이미지가 둘 이상일 때(광고 미리보기 + 배너)
+        # 엉뚱한 게 잡힌다 — 어느 게 걸릴지는 엑셀 안의 저장 순서에 달려서 예측도 안 된다.
+        # '이미지' 열에 앵커된 것만 받아 배너가 확실히 오게 한다.
+        img_idx = match_col_pos(headers, include_any=["이미지"])
+
         for img in imgs:
             try:
                 row_i = img.anchor._from.row  # 0-indexed, header=None으로 읽은 raw의 행 인덱스와 동일
+                col_i = img.anchor._from.col
                 if row_i <= hdr or row_i >= len(raw):
+                    continue
+                # 이미지 열을 찾았으면 그 열(±1칸)에 놓인 것만 쓴다. 셀 안에서 살짝 밀려
+                # 배치된 경우가 있어 한 칸은 허용한다.
+                if img_idx is not None and abs(col_i - img_idx) > 1:
                     continue
                 name = str(raw.iloc[row_i, name_idx]).replace("\n", "").strip()
                 if not name or name.lower() == "nan":
                     continue
                 data = img._data()
                 ext = (img.format or "png").lower()
-                images[(origin_channel, _creative_image_key(name))] = (data, ext)
+                key = (origin_channel, _creative_image_key(name))
+                # 같은 소재에 이미지가 여러 장이면 '이미지 열에 가장 가까운' 것을 남긴다.
+                prev = images.get(key)
+                dist = abs(col_i - img_idx) if img_idx is not None else 0
+                if prev is None or dist <= prev[2]:
+                    images[key] = (data, ext, dist)
             except Exception:
                 continue
 
-    return images
+    # 내부에서 거리(dist)를 3번째 값으로 들고 다녔으니 원래 모양으로 되돌린다
+    return {k: (v[0], v[1]) for k, v in images.items()}
 
 
 def _safe_storage_name(name_key: str) -> str:
@@ -2660,7 +2677,12 @@ def upload_creative_images(images: dict):
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
                 path, data, {"content-type": f"image/{ext}", "upsert": "true"}
             )
-            urls[(origin_channel, name_key)] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+            # 같은 소재는 늘 같은 경로에 덮어쓴다(upsert). 그래서 URL이 안 바뀌고,
+            # 브라우저가 예전 이미지를 캐시해두면 새로 올려도 옛 그림이 계속 보인다.
+            # 올린 시각을 뒤에 붙여 새 이미지가 바로 반영되게 한다.
+            _u = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+            _sep = "&" if "?" in _u else "?"
+            urls[(origin_channel, name_key)] = f"{_u}{_sep}v={int(time.time())}"
         except Exception as e:
             if len(errors) < 3:  # 화면에 너무 길게 쌓이지 않도록 앞의 몇 개만 보관
                 errors.append(f"{origin_channel}/{name_key}: {e}")
@@ -10504,7 +10526,9 @@ def upload_ga_creative_images(files) -> tuple:
             path = f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.{ext}"
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
                 path, data, {"content-type": f"image/{ext}", "upsert": "true"})
-            urls[name_key] = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+            _u = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(path)
+            _sep = "&" if "?" in _u else "?"
+            urls[name_key] = f"{_u}{_sep}v={int(time.time())}"   # 캐시 무효화
         except Exception as e:
             if len(errors) < 3:
                 errors.append(f"{getattr(f, 'name', '?')}: {e}")
