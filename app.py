@@ -10706,6 +10706,43 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     return out
 
 
+def _gc_attach_media(rows: pd.DataFrame, media_map: dict) -> list:
+    """소재 줄마다 매체 실적을 붙이되, 한 소재가 여러 줄로 쪼개졌으면 나눠 담는다.
+
+    매체는 소재 하나로 실적을 주는데, GA는 같은 소재를 타겟팅별로 쪼개서 준다
+    (수피마티셔츠 · 패션관심타겟 / 수피마티셔츠 · 방문자180일). 매칭된 매체 실적을 두 줄에
+    통째로 붙이면 노출·클릭·광고비가 줄 수만큼 뻥튀기된다 — 형이 잡은 그 문제
+    (광고관리자 76만원 vs 대시보드 232만원).
+    그래서 같은 매체 실적에 걸린 줄들끼리 GA 방문 비중으로 나눠 담는다. 이러면 합계가
+    매체 관리자 숫자와 맞고, 줄별 비교도 방문 규모에 맞게 유지된다.
+    """
+    hits = [_gc_lookup_media(r, media_map) for _, r in rows.iterrows()]
+    # 같은 매체 실적을 가리키는 줄들을 모은다 (dict는 해시가 안 되므로 id로 묶는다)
+    groups = {}
+    for i, m in enumerate(hits):
+        if m:
+            groups.setdefault(id(m), []).append(i)
+
+    out = list(hits)
+    ses = pd.to_numeric(rows["sessions"], errors="coerce").fillna(0).tolist()
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        base = hits[idxs[0]]
+        tot = sum(ses[i] for i in idxs)
+        for i in idxs:
+            w = (ses[i] / tot) if tot > 0 else (1.0 / len(idxs))
+            out[i] = {
+                "impressions": float(base.get("impressions", 0) or 0) * w,
+                "clicks": float(base.get("clicks", 0) or 0) * w,
+                "cost": float(base.get("cost", 0) or 0) * w,
+                "media_conv": float(base.get("media_conv", 0) or 0) * w,
+                "channel": base.get("channel"), "name": base.get("name"),
+                "src": base.get("src"), "_split": len(idxs),
+            }
+    return out
+
+
 def _gc_lookup_media(row, media_map: dict):
     """소재 한 줄에 붙일 매체 실적을 찾는다.
 
@@ -11005,7 +11042,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             rows = rows.copy()
 
-            rows["_media"] = (rows.apply(lambda r: _gc_lookup_media(r, media_map), axis=1)
+            rows["_media"] = (_gc_attach_media(rows, media_map)
                               if level == "소재" else None)
             rows["_cost"] = rows["_media"].map(lambda m: float((m or {}).get("cost", 0) or 0))
             # 매체·캠페인·타겟팅 단위로 볼 때는 소재별 매칭이 무의미하므로 매체 광고비를 그대로 쓴다
