@@ -10393,7 +10393,7 @@ def diagnose_ad_spend_setup() -> str:
 # 광고비가 매체 실제 청구액이라 소재별 ROAS를 제대로 볼 수 있다.
 # 전환은 GA 기준 하나만 쓴다 — 매체 신고 전환은 매체마다 기준이 달라 서로 못 더한다.
 GC_HEAD = ["구분", "노출", "클릭", "CTR", "광고비(VAT+)",
-           "GA 방문", "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
+           "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
 
 # utm_content 작명 규칙: 그룹명(타겟팅명)_날짜_소재이름
 #   예) 패션관심타겟_260807_수피마티셔츠
@@ -10706,6 +10706,21 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     return out
 
 
+def _gc_lookup_media(row, media_map: dict):
+    """소재 한 줄에 붙일 매체 실적을 찾는다.
+
+    UTM의 날짜+소재명이 매체 소재명(날짜_소재명)과 같은 꼴이라 그 키로 찾되,
+    매체까지 같아야 붙인다 — 같은 소재명을 여러 매체에 쓰기 때문에 매체를 안 보면
+    한 매체 광고비가 다른 매체 줄에도 붙어 중복 계산된다.
+    """
+    ch = row.get("channel")
+    for k in _gc_image_keys(row):
+        hit = media_map.get((ch, k))
+        if hit:
+            return hit
+    return None
+
+
 def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dict:
     """대행사 리포트의 소재별 실적을 {정규화 소재명: 지표}로 접는다.
 
@@ -10779,7 +10794,6 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         f'<td data-v="{clk:.0f}">{dash(clk, ",.0f")}</td>'
         f'<td data-v="{ctr:.3f}">{f"{ctr:.2f}%" if imp else "-"}</td>'
         f'<td data-v="{cost:.0f}">{(f"{cost:,.0f}원" if cost else "-")}</td>'
-        f'<td data-v="{ses:.0f}">{_v4_num(ses)}</td>'
         f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
         f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
         f'<td data-v="{aov:.0f}">{dash(aov, ",.0f")}{"원" if aov else ""}</td>'
@@ -10955,6 +10969,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 0.15초씩). 한 번만 접어두고 탭에서는 매체로 걸러 쓴다.
     rows_all = _gc_rows(d, start, end, level, exclude=hidden, alias=alias)
 
+    # ── 지금 돌리지 않는 옛 소재 걸러내기 ──
+    # UTM은 한 번 심으면 그 링크가 어딘가에 남아 있어서, 몇 달 전에 내린 소재도 방문 1~2건씩
+    # 계속 찍힌다. 그게 이번 달 표에 섞이면 '어떤 소재를 끌지' 판단할 때 눈이 분산된다.
+    # 광고비도 0이고 구매도 0이면 이번 기간에 집행한 소재가 아니라고 보고 접어둔다.
+    # (광고비가 있으면 지금 돌리는 것이고, 구매가 있으면 매출을 만든 것이라 둘 다 남긴다.)
+    show_idle = st.checkbox(
+        "집행 안 한 옛 소재도 보기", value=False, key="gc_show_idle",
+        help="광고비도 0이고 구매도 0인 줄입니다. UTM 링크만 남아 방문이 한두 건 찍힌 것들이라 "
+             "평소에는 접어둡니다.",
+    )
+    if not show_idle and level == "소재" and not rows_all.empty:
+        _before = len(rows_all)
+        _cost_of = rows_all.apply(
+            lambda r: float((_gc_lookup_media(r, media_map) or {}).get("cost", 0) or 0), axis=1)
+        keep_mask = (_cost_of > 0) | (pd.to_numeric(rows_all["conv"], errors="coerce").fillna(0) > 0)
+        rows_all = rows_all[keep_mask]
+        _hidden_n = _before - len(rows_all)
+        if _hidden_n:
+            st.caption(
+                f"집행 안 한 옛 소재 {_hidden_n}개를 접었습니다 "
+                "(광고비 0 · 구매 0). 위 체크박스로 펼칠 수 있습니다."
+            )
+
     for ti, label in enumerate(tab_labels):
         with tabs[ti]:
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
@@ -10968,19 +11005,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             rows = rows.copy()
 
-            def media_of(r):
-                """소재 한 줄에 붙일 매체 실적. UTM의 날짜+소재명이 대행사 리포트의
-                소재명(날짜_소재명)과 같은 꼴이라 그 키로 찾되, 매체가 같아야만 붙인다."""
-                if level != "소재":
-                    return None
-                ch = r["channel"]
-                for k in _gc_image_keys(r):
-                    hit = media_map.get((ch, k))
-                    if hit:
-                        return hit
-                return None
-
-            rows["_media"] = rows.apply(media_of, axis=1)
+            rows["_media"] = (rows.apply(lambda r: _gc_lookup_media(r, media_map), axis=1)
+                              if level == "소재" else None)
             rows["_cost"] = rows["_media"].map(lambda m: float((m or {}).get("cost", 0) or 0))
             # 매체·캠페인·타겟팅 단위로 볼 때는 소재별 매칭이 무의미하므로 매체 광고비를 그대로 쓴다
             if level != "소재":
