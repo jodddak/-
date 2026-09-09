@@ -5940,8 +5940,13 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
 GA4_DIMENSIONS = ["date", "sessionSourceMedium", "newVsReturning"]
 # 소재별 성과용. utm_campaign(캠페인) / utm_content(소재)까지 쪼갠다. 차원이 늘수록 행이
 # 곱으로 불어나므로(날짜×소스×캠페인×소재×신규재방문) 채널용과 테이블을 나눠 저장한다.
+# sessionManualCampaignId = utm_id.
+# 매체마다 소재명을 어디에 넣는지가 다르다 — 메타·GFA·P-MAX는 utm_content에 넣는데
+# 크리테오는 utm_id에 넣는다(크리테오 관리자 화면의 '접미사 적용'이 그렇게 만들어준다).
+# 둘 다 받아서, utm_content가 비면 utm_id를 소재명으로 쓴다.
 GA4_CREATIVE_DIMENSIONS = ["date", "sessionSourceMedium", "sessionCampaignName",
-                           "sessionManualAdContent", "newVsReturning"]
+                           "sessionManualAdContent", "sessionManualCampaignId",
+                           "newVsReturning"]
 
 # 회원가입 이벤트 이름. 회사마다 다르고(STCO는 '회원가입_신규') 바뀌기도 해서 Secrets로
 # 덮어쓸 수 있게 두되, 기본값에 후보를 여러 개 넣어 하나만 맞아도 잡히게 한다.
@@ -6130,7 +6135,8 @@ def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -
                 dv = [d.value for d in r.dimension_values]
                 mv = [m.value for m in r.metric_values]
                 rec = {"report_date": dv[0], "source_medium": dv[1],
-                       "campaign": dv[2], "creative": dv[3], "user_type": dv[4]}
+                       "campaign": dv[2], "creative": dv[3], "utm_id": dv[4],
+                       "user_type": dv[5]}
                 if out_key:
                     rec[out_key] = mv[0]
                 else:
@@ -6154,7 +6160,7 @@ def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -
         signup_rows = []
 
     out = pd.DataFrame(base)
-    keys = ["report_date", "source_medium", "campaign", "creative", "user_type"]
+    keys = ["report_date", "source_medium", "campaign", "creative", "utm_id", "user_type"]
     if signup_rows:
         out = out.merge(pd.DataFrame(signup_rows), on=keys, how="left")
     if "signups" not in out.columns:
@@ -6169,11 +6175,15 @@ def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -
         lambda v: "신규" if str(v).lower().startswith("new")
         else ("재방문" if str(v).lower().startswith("return") else "미상")
     )
-    for c in ("campaign", "creative"):
-        out[c] = out[c].map(
-            lambda v: "(미설정)" if str(v).strip().lower() in
-            ("(not set)", "(not provided)", "", "nan", "none") else str(v).strip()
-        )
+    def _clean(v):
+        return ("(미설정)" if str(v).strip().lower() in
+                ("(not set)", "(not provided)", "", "nan", "none") else str(v).strip())
+
+    for c in ("campaign", "creative", "utm_id"):
+        out[c] = out[c].map(_clean)
+    # 크리테오처럼 utm_content 대신 utm_id에 소재명을 넣는 매체를 위해, 비어 있으면 채운다.
+    out["creative"] = np.where(out["creative"] == "(미설정)", out["utm_id"], out["creative"])
+    out = out.drop(columns=["utm_id"])
     if channel_map:
         out["channel"] = out["source_medium"].map(
             lambda sm: channel_map.get(str(sm).strip().lower()))
@@ -10865,6 +10875,11 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     label, cls = _v4_verdict(roas, judge_cost, conv, clk)
     if cost <= 0:
         label, cls = "광고비 없음", "hold"
+    if (media or {}).get("_unmatched"):
+        # GA에서 이 소재를 못 찾았으니 매출이 0인 게 아니라 '알 수 없음'이다.
+        # 성과가 나쁘다고 단정하면 안 된다 — UTM을 붙여야 판단이 가능해진다.
+        label, cls = "UTM 없음", "hold"
+        roas_txt = "-"
 
     name = r["key"] if not isinstance(r, dict) else r.get("key", "")
     img_td = ""
@@ -11137,9 +11152,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             unset = float(sub[sub["creative"] == "(미설정)"]["sessions"].sum())
             if t_ses > 0 and unset / t_ses > 0.2:
                 st.warning(
-                    f"소재(utm_content)가 안 붙은 방문이 {unset:,.0f} / {t_ses:,.0f}건 "
-                    f"({unset / t_ses * 100:.0f}%)입니다. 광고 랜딩 URL에 `utm_content`를 "
-                    "넣어야 소재별 비교가 됩니다 — 운영 도구 › UTM 빌더에서 만들 수 있습니다."
+                    f"소재명이 안 붙은 방문이 {unset:,.0f} / {t_ses:,.0f}건 "
+                    f"({unset / t_ses * 100:.0f}%)입니다. 광고 랜딩 URL에 `utm_content` "
+                    "(크리테오는 `utm_id`)를 넣어야 소재별 비교가 됩니다 — "
+                    "운영 도구 › UTM 빌더에서 만들 수 있습니다."
                 )
 
             st.caption(
@@ -11166,21 +11182,32 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 소재는 통째로 빠졌다. 그래서 합계가 광고 관리자보다 10%쯤 적게 나왔다.
             # 빠뜨리지 말고 따로 세워두면 합계가 매체 값과 맞고, UTM이 안 붙은 소재가
             # 얼마나 되는지도 바로 보인다.
-            leftovers = [v for k, v in media_map.items()
+            leftovers = [(k, v) for k, v in media_map.items()
                          if k[0] in ch_keep and id(v) not in _matched]
+            _lo = {"impressions": 0.0, "clicks": 0.0, "cost": 0.0, "media_conv": 0.0}
             if level == "소재" and leftovers:
-                _lo = {
-                    "impressions": sum(float(m.get("impressions", 0) or 0) for m in leftovers),
-                    "clicks": sum(float(m.get("clicks", 0) or 0) for m in leftovers),
-                    "cost": sum(float(m.get("cost", 0) or 0) for m in leftovers),
-                    "media_conv": 0.0,
-                }
-                _lo_row = pd.Series({
-                    "key": (f'<b>(GA 매칭 안 됨)</b><span class="gc-sub">'
-                            f'매체 소재 {len(leftovers)}개 · UTM이 안 붙었거나 이름이 다릅니다</span>'),
-                    "sessions": 0.0, "conv": 0.0, "rev": 0.0,
-                })
-                body.append(_gc_row_html(_lo_row, _lo, "gc-unmatched", show_img=show_img))
+                # 한 줄로 뭉치지 않고 소재별로 세운다.
+                # 크리테오처럼 UTM이 아예 안 붙은 매체는 GA 쪽에 소재가 없어서 전부 여기로
+                # 오는데, 뭉쳐버리면 어느 소재가 얼마 썼는지도, 배너 이미지도 못 본다.
+                # GA 매출만 못 붙일 뿐 노출·클릭·광고비는 매체가 준 실적 그대로다.
+                for (ch_k, name_k), m in sorted(
+                        leftovers, key=lambda x: -float(x[1].get("cost", 0) or 0)):
+                    _nm = str(m.get("name") or name_k)
+                    _row = pd.Series({
+                        "key": (f'{_nm}<span class="gc-sub">{ch_k} · '
+                                f'GA 매칭 안 됨</span>'),
+                        "sessions": 0.0, "conv": 0.0, "rev": 0.0,
+                        "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
+                    })
+                    _url = None
+                    for k2 in _gc_image_keys(_row):
+                        if k2 in img_map:
+                            _url = img_map[k2]
+                            break
+                    body.append(_gc_row_html(_row, dict(m, _unmatched=True), "gc-unmatched",
+                                             img_url=_url, show_img=show_img))
+                    for f in ("impressions", "clicks", "cost"):
+                        _lo[f] += float(m.get(f, 0) or 0)
                 tot_cost += _lo["cost"]
 
             tot_r = rows[["sessions", "conv", "rev"]].sum()
