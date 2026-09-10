@@ -8614,14 +8614,23 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
     # 달라 거부될 수 있으므로 Ad → AdName → Adset 순으로 시도한다.
     dim_candidates = [["Day", "Ad"], ["Day", "AdName"], ["Day", "Adset"]]
 
-    payload, used_dim, last_err = None, None, None
+    # 지표는 광고비 페처와 **똑같은 세 개만** 쓴다.
+    #
+    # 예전엔 여기에 Sales·Revenue를 얹었는데, 크리테오가 그 이름을 모르는 지표로 보고
+    # 400 json-serialization-error("metrics ...")를 냈다. 차원이 아니라 지표가 문제라서
+    # Ad/AdName/Adset을 아무리 바꿔도 전부 실패했고, 그래서 소재가 한 건도 안 들어왔다.
+    # 매체 신고 전환은 화면에서 안 쓰고(전환은 GA 기준 하나만) 있으니 뺀다.
+    metrics = ["AdvertiserCost", "Displays", "Clicks"]
+
+    payload, used_dim, used_ver, last_err = None, None, None, None
     for ver in candidates:
         adv_ids = adv or _criteo_advertiser_ids(token, ver)
+        dead_version = False
         for dims in dim_candidates:
             body = {
                 "advertiserIds": adv_ids,
                 "dimensions": dims,
-                "metrics": ["AdvertiserCost", "Displays", "Clicks", "Sales", "Revenue"],
+                "metrics": metrics,
                 "currency": str(cfg.get("currency", "KRW")).strip(),
                 "startDate": str(start), "endDate": str(end), "format": "json",
             }
@@ -8630,24 +8639,34 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
                                        "Content-Type": "application/json"},
                               json=body, timeout=90)
             if r.status_code == 404:
+                dead_version = True
                 break                     # 폐기된 버전 → 다음 버전으로
             if r.status_code >= 400:
-                last_err = f"({r.status_code}, {ver}, {dims[1]}) {r.text[:200]}"
+                last_err = f"({r.status_code}, {ver}, {dims[1]}) {r.text[:400]}"
                 continue                  # 차원 이름이 안 맞음 → 다음 후보로
             try:
                 payload = r.json()
             except Exception:
-                last_err = f"({ver}) 응답 해석 실패"
+                last_err = f"({ver}) 응답 해석 실패: {r.text[:200]}"
                 continue
-            used_dim = dims[1]
+            used_dim, used_ver = dims[1], ver
             break
         if payload is not None:
             break
     if payload is None:
-        raise RuntimeError(f"크리테오 소재 조회 실패: {last_err}")
+        raise RuntimeError(
+            f"크리테오 소재 조회 실패 (지표 {', '.join(metrics)}): {last_err}")
 
     rows = []
-    for d in (payload.get("Rows") or payload.get("rows") or []):
+    _raw_rows = (payload.get("Rows") or payload.get("rows") or []) \
+        if isinstance(payload, dict) else (payload or [])
+    if not _raw_rows:
+        raise RuntimeError(
+            f"크리테오 소재 조회는 성공했지만 0행입니다 (버전 {used_ver} · 차원 {used_dim} · "
+            f"{start}~{end}). 광고주 ID나 기간을 확인해 주세요.")
+    for d in _raw_rows:
+        if not isinstance(d, dict):
+            continue
         # 응답 키는 요청한 차원 이름 그대로 온다(대소문자 표기가 흔들려서 둘 다 본다)
         _name = ""
         for k in (used_dim, (used_dim or "").lower(), "Ad", "ad", "AdName", "adName",
@@ -8655,16 +8674,27 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
             if k and d.get(k):
                 _name = str(d.get(k)).strip()
                 break
+        def _f(*keys):
+            for k in keys:
+                v = d.get(k)
+                if v is not None:
+                    try:
+                        return float(str(v).replace(",", ""))
+                    except Exception:
+                        pass
+            return 0.0
+
         rows.append({
-            "report_date": d.get("Day") or d.get("day"),
+            "report_date": d.get("Day") or d.get("day") or d.get("date"),
             "channel": "크리테오",
             "creative": _name,
-            "impressions": float(d.get("Displays") or d.get("displays") or 0),
-            "clicks": float(d.get("Clicks") or d.get("clicks") or 0),
+            "impressions": _f("Displays", "displays"),
+            "clicks": _f("Clicks", "clicks"),
             # 크리테오 청구액은 VAT 포함으로 들어온다(기존 광고비 페처와 동일 기준)
-            "cost_incl_vat": float(d.get("AdvertiserCost") or d.get("advertiserCost") or 0),
-            "conversions": float(d.get("Sales") or d.get("sales") or 0),
-            "revenue": float(d.get("Revenue") or d.get("revenue") or 0),
+            "cost_incl_vat": _f("AdvertiserCost", "advertiserCost", "advertisercost"),
+            # 매체 신고 전환은 안 받는다 — 화면은 GA 기준 전환만 쓴다
+            "conversions": 0.0,
+            "revenue": 0.0,
             "source": "criteo_api",
         })
     return _creative_frame(rows)
