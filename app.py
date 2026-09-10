@@ -852,6 +852,23 @@ def load_table(name: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def delete_ad_creative_for_channel(channel: str) -> bool:
+    """ad_creative_daily에서 한 매체 행을 통째로 지운다.
+
+    잘못된 단위(크리테오 묶음명 등)로 저장된 게 남아 있으면 화면이 계속 틀리므로,
+    다시 받기 전에 비울 수 있어야 한다.
+    """
+    client = get_supabase_client()
+    if client is None:
+        return False
+    try:
+        client.table(TABLES["ad_creative_daily"]).delete().eq("channel", channel).execute()
+        return True
+    except Exception as e:
+        st.error(f"'{channel}' 소재 실적 삭제 실패: {e}")
+        return False
+
+
 def delete_creative_performance_for_date(as_of_date_value):
     """오늘자 소재별 성과를 다시 저장하기 전에, 같은 날짜로 이미 저장돼있던 이전 스냅샷을
     통째로 지운다. upsert는 '새 업로드에 있는 행'만 갱신할 뿐 '새 업로드에서 빠진 행'은
@@ -8595,6 +8612,83 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
     return _creative_frame(rows)
 
 
+# 크리테오가 '광고(소재) 단위'를 뭐라고 부르는지는 계정·API 버전마다 다르다.
+# 이름을 하나씩 찍어보다 며칠을 쓴 끝에, 후보를 한 번에 훑고 어느 게 통하는지
+# 화면에서 바로 확인하는 방식으로 바꿨다(아래 render_criteo_dim_probe).
+CRITEO_CREATIVE_DIM_CANDIDATES = [
+    "Ad", "AdName", "AdId",
+    "Creative", "CreativeName", "CreativeId",
+    "Banner", "BannerName", "BannerId",
+]
+# 이 이름들은 '묶음' 단위다 — 성공해도 소재로 쓰면 안 된다.
+CRITEO_ADSET_DIMS = {"adset", "adsetname", "adsetid", "campaign", "campaignname", "campaignid"}
+
+
+def probe_criteo_dimensions(start: date, end: date) -> list:
+    """소재 단위 차원 후보를 하나씩 던져보고 (차원, 버전, 결과)를 돌려준다.
+
+    추측으로 코드를 고치고 배포해서 확인하는 왕복을 없애기 위한 진단이다.
+    한 번 돌리면 이 계정에서 어떤 이름이 통하는지 확정된다.
+    """
+    cfg = _secrets_section("criteo")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return [("(설정 없음)", "-", "Secrets에 [criteo]가 없습니다")]
+    import requests
+
+    token = _criteo_token(cfg)
+    vers = []
+    if cfg.get("api_version"):
+        vers.append(str(cfg["api_version"]).strip())
+    vers += CRITEO_VERSION_CANDIDATES
+    adv = str(cfg.get("advertiser_id", "") or "").strip()
+
+    # 살아 있는 버전 하나를 먼저 찾는다(Day만으로 확인)
+    live_ver, adv_ids = None, adv
+    for ver in vers:
+        ids = adv or _criteo_advertiser_ids(token, ver)
+        r = requests.post(
+            f"{CRITEO_BASE}/{ver}/statistics/report",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"advertiserIds": ids, "dimensions": ["Day"],
+                  "metrics": ["AdvertiserCost", "Displays", "Clicks"],
+                  "currency": str(cfg.get("currency", "KRW")).strip(),
+                  "startDate": str(start), "endDate": str(end), "format": "json"},
+            timeout=60)
+        if r.status_code < 400:
+            live_ver, adv_ids = ver, ids
+            break
+    if live_ver is None:
+        return [("(버전 없음)", "-", "살아 있는 API 버전을 못 찾았습니다")]
+
+    out = []
+    for name in CRITEO_CREATIVE_DIM_CANDIDATES + ["AdSet", "Adset"]:
+        r = requests.post(
+            f"{CRITEO_BASE}/{live_ver}/statistics/report",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"advertiserIds": adv_ids, "dimensions": ["Day", name],
+                  "metrics": ["AdvertiserCost", "Displays", "Clicks"],
+                  "currency": str(cfg.get("currency", "KRW")).strip(),
+                  "startDate": str(start), "endDate": str(end), "format": "json"},
+            timeout=60)
+        if r.status_code < 400:
+            try:
+                rows = (r.json() or {}).get("Rows") or (r.json() or {}).get("rows") or []
+            except Exception:
+                rows = []
+            names = []
+            for it in rows[:200]:
+                if isinstance(it, dict):
+                    v = it.get(name) or it.get(name.lower())
+                    if v and str(v) not in names:
+                        names.append(str(v))
+            out.append((name, live_ver,
+                        f"✅ 성공 · {len(rows)}행 · 값 {len(names)}종 "
+                        + (f"(예: {', '.join(names[:4])})" if names else "")))
+        else:
+            out.append((name, live_ver, f"❌ {r.status_code} {r.text[:160]}"))
+    return out
+
+
 def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
     """크리테오 크리에이티브(광고) 단위 일별 실적."""
     cfg = _secrets_section("criteo")
@@ -8609,10 +8703,15 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
     candidates += CRITEO_VERSION_CANDIDATES
     adv = str(cfg.get("advertiser_id", "") or "").strip()
 
-    # 소재 단위는 'Ad'(광고)다. Adset은 그 위 묶음이라 관리자 화면의 소재 개수와 안 맞는다
-    # (스태틱_리텐션 묶음 하나에 광고가 6개 들어 있는 식). 계정/버전에 따라 차원 이름이
-    # 달라 거부될 수 있으므로 Ad → AdName → Adset 순으로 시도한다.
-    dim_candidates = [["Day", "Ad"], ["Day", "AdName"], ["Day", "Adset"]]
+    # 소재 단위는 광고(Ad)다. Adset은 그 위 묶음이라 관리자 화면의 소재 개수와 안 맞는다
+    # (스태틱_리텐션 묶음 하나에 광고가 6개 들어 있는 식).
+    #
+    # ⚠️ Adset으로 폴백하면 안 된다. 예전엔 Ad가 거부되면 Adset으로 내려갔는데, 그러면
+    # '다이나믹_리텐션 / 스태틱_리텐션' 두 줄만 들어오고 화면은 그걸 소재로 착각한다.
+    # 게다가 크리테오가 API 매체로 잡히면서 대행사 리포트 폴백이 꺼져, 원래 보이던
+    # 소재 3개의 노출·클릭·광고비까지 사라졌다. 광고 단위가 안 되면 차라리 실패시키고
+    # 리포트를 계속 쓰는 편이 낫다.
+    dim_candidates = [["Day", n] for n in CRITEO_CREATIVE_DIM_CANDIDATES]
 
     # 지표는 광고비 페처와 **똑같은 세 개만** 쓴다.
     #
@@ -8655,7 +8754,18 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
             break
     if payload is None:
         raise RuntimeError(
-            f"크리테오 소재 조회 실패 (지표 {', '.join(metrics)}): {last_err}")
+            "크리테오는 이 계정에서 광고(소재) 단위 조회를 안 받아줍니다 — "
+            f"시도한 차원: {', '.join(CRITEO_CREATIVE_DIM_CANDIDATES)}. "
+            "소재별 성과의 크리테오는 대행사 리포트로 계속 채워집니다. "
+            "화면의 '크리테오 차원 진단'을 눌러 어떤 이름이 통하는지 확인해 주세요. "
+            f"(마지막 응답: {last_err})")
+    if str(used_dim or "").lower() in CRITEO_ADSET_DIMS:
+        # 묶음 단위가 통했다고 소재로 쓰면 안 된다 — 그러면 '다이나믹_리텐션' 두 줄만 남고
+        # 리포트 폴백까지 꺼져서 원래 보이던 소재들이 통째로 사라진다.
+        raise RuntimeError(
+            f"크리테오가 광고 단위는 거부하고 묶음 단위({used_dim})만 받아줍니다. "
+            "묶음을 소재로 쓰면 표가 틀리므로 저장하지 않았습니다 — "
+            "크리테오는 대행사 리포트로 계속 채웁니다.")
 
     rows = []
     _raw_rows = (payload.get("Rows") or payload.get("rows") or []) \
@@ -11483,6 +11593,35 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         if _l1 is None or _l1 < _yday or _stale:
             _run_sync("자동 — " + (", ".join(_stale) + " 늦음" if _stale else "GA4 갱신"),
                       unlimited=False)
+
+    # ── 크리테오 차원 진단 ──
+    # 크리테오가 '광고 단위'를 뭐라고 부르는지 계정마다 달라서, 이름을 하나씩 고쳐 배포하며
+    # 확인하느라 며칠을 썼다. 여기서 후보를 한 번에 던져보고 통하는 이름을 확정한다.
+    with st.expander("🔎 크리테오 차원 진단 — 광고(소재) 단위 이름 찾기"):
+        st.caption(
+            "크리테오 API에 소재 단위 차원 이름 후보를 하나씩 던져보고 어떤 게 통하는지 봅니다. "
+            "✅ 로 나온 이름과 그 예시 값을 알려주시면 코드에 확정해 넣겠습니다."
+        )
+        cpb1, cpb2 = st.columns([1, 1])
+        with cpb1:
+            if st.button("진단 실행 (최근 7일)", key="gc_criteo_probe"):
+                try:
+                    _pr = probe_criteo_dimensions(date.today() - timedelta(days=7),
+                                                  date.today() - timedelta(days=1))
+                    st.session_state["gc_criteo_probe_result"] = _pr
+                except Exception as _e:
+                    st.session_state["gc_criteo_probe_result"] = [("(오류)", "-", str(_e)[:300])]
+        with cpb2:
+            if st.button("크리테오 소재 실적 비우기", key="gc_criteo_wipe",
+                         help="묶음 단위로 잘못 저장된 행을 지웁니다. 지운 뒤 다시 받으면 됩니다."):
+                if delete_ad_creative_for_channel("크리테오"):
+                    st.success("지웠습니다. 이제 대행사 리포트로 다시 채워집니다.")
+                    st.cache_data.clear()
+                    st.rerun()
+        _pr = st.session_state.get("gc_criteo_probe_result")
+        if _pr:
+            st.dataframe(pd.DataFrame(_pr, columns=["차원 이름", "API 버전", "결과"]),
+                         use_container_width=True, hide_index=True)
 
     # 자동 동기화는 세션당 한 번뿐이라, 실패한 매체를 다시 받으려면 새로고침 말고 버튼이 필요하다.
     _never = [lab for lab, _ in AD_CREATIVE_FETCHERS if _media_last.get(lab) is None]
