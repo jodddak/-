@@ -8632,7 +8632,7 @@ def probe_criteo_dimensions(start: date, end: date) -> list:
     """
     cfg = _secrets_section("criteo")
     if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
-        return [("(설정 없음)", "-", "Secrets에 [criteo]가 없습니다")]
+        return [("(설정 없음)", "-", "", "Secrets에 [criteo]가 없습니다")]
     import requests
 
     token = _criteo_token(cfg)
@@ -8658,34 +8658,60 @@ def probe_criteo_dimensions(start: date, end: date) -> list:
             live_ver, adv_ids = ver, ids
             break
     if live_ver is None:
-        return [("(버전 없음)", "-", "살아 있는 API 버전을 못 찾았습니다")]
+        return [("(버전 없음)", "-", "", "살아 있는 API 버전을 못 찾았습니다")]
+
+    def _try(name):
+        """한 차원 이름을 던져본다. 429(호출 제한)면 쉬었다가 한 번 더."""
+        for attempt in (0, 1):
+            r = requests.post(
+                f"{CRITEO_BASE}/{live_ver}/statistics/report",
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+                json={"advertiserIds": adv_ids, "dimensions": ["Day", name],
+                      "metrics": ["AdvertiserCost", "Displays", "Clicks"],
+                      "currency": str(cfg.get("currency", "KRW")).strip(),
+                      "startDate": str(start), "endDate": str(end), "format": "json"},
+                timeout=90)
+            if r.status_code == 429 and attempt == 0:
+                time.sleep(6)
+                continue
+            return r
+        return r
 
     out = []
-    for name in CRITEO_CREATIVE_DIM_CANDIDATES + ["AdSet", "Adset"]:
-        r = requests.post(
-            f"{CRITEO_BASE}/{live_ver}/statistics/report",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"advertiserIds": adv_ids, "dimensions": ["Day", name],
-                  "metrics": ["AdvertiserCost", "Displays", "Clicks"],
-                  "currency": str(cfg.get("currency", "KRW")).strip(),
-                  "startDate": str(start), "endDate": str(end), "format": "json"},
-            timeout=60)
+    for name in CRITEO_CREATIVE_DIM_CANDIDATES + ["AdSet", "AdSetName", "AdSetId"]:
+        try:
+            r = _try(name)
+        except Exception as e:
+            out.append((name, live_ver, "", f"❌ 호출 실패 {str(e)[:120]}"))
+            continue
         if r.status_code < 400:
             try:
-                rows = (r.json() or {}).get("Rows") or (r.json() or {}).get("rows") or []
+                pl = r.json() or {}
+                rows = pl.get("Rows") or pl.get("rows") or []
             except Exception:
                 rows = []
-            names = []
-            for it in rows[:200]:
-                if isinstance(it, dict):
-                    v = it.get(name) or it.get(name.lower())
-                    if v and str(v) not in names:
-                        names.append(str(v))
-            out.append((name, live_ver,
-                        f"✅ 성공 · {len(rows)}행 · 값 {len(names)}종 "
-                        + (f"(예: {', '.join(names[:4])})" if names else "")))
+            # 응답이 실제로 어떤 키를 쓰는지가 핵심 단서다. 요청한 이름과 다르게 오는 경우가 있어
+            # (AdSet을 넣었는데 13행이 왔는데도 값이 안 읽혔다) 키 목록을 그대로 보여준다.
+            keys = sorted((rows[0] or {}).keys()) if rows and isinstance(rows[0], dict) else []
+            vals = []
+            for it in rows[:300]:
+                if not isinstance(it, dict):
+                    continue
+                for k in (name, name.lower(), *[k2 for k2 in it.keys()
+                                                if k2.lower() not in
+                                                ("day", "date", "advertisercost",
+                                                 "displays", "clicks")]):
+                    v = it.get(k)
+                    if v not in (None, "") and str(v) not in vals:
+                        vals.append(str(v))
+                        break
+            out.append((name, live_ver, ", ".join(keys)[:160],
+                        f"✅ 성공 · {len(rows)}행"
+                        + (f" · 예: {', '.join(vals[:4])}" if vals else " · 값 못 읽음")))
         else:
-            out.append((name, live_ver, f"❌ {r.status_code} {r.text[:160]}"))
+            out.append((name, live_ver, "", f"❌ {r.status_code} {r.text[:160]}"))
+        time.sleep(1.5)      # 호출 제한(429)에 걸리지 않게 텀을 둔다
     return out
 
 
@@ -11600,17 +11626,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     with st.expander("🔎 크리테오 차원 진단 — 광고(소재) 단위 이름 찾기"):
         st.caption(
             "크리테오 API에 소재 단위 차원 이름 후보를 하나씩 던져보고 어떤 게 통하는지 봅니다. "
-            "✅ 로 나온 이름과 그 예시 값을 알려주시면 코드에 확정해 넣겠습니다."
+            "호출 제한(429)에 안 걸리게 1.5초씩 쉬면서 돌기 때문에 20~30초 걸립니다. "
+            "**응답 키** 열이 핵심입니다 — 크리테오가 실제로 뭐라고 돌려주는지가 거기 나옵니다."
         )
         cpb1, cpb2 = st.columns([1, 1])
         with cpb1:
             if st.button("진단 실행 (최근 7일)", key="gc_criteo_probe"):
-                try:
-                    _pr = probe_criteo_dimensions(date.today() - timedelta(days=7),
-                                                  date.today() - timedelta(days=1))
-                    st.session_state["gc_criteo_probe_result"] = _pr
-                except Exception as _e:
-                    st.session_state["gc_criteo_probe_result"] = [("(오류)", "-", str(_e)[:300])]
+                with st.spinner("크리테오에 차원 이름을 하나씩 물어보는 중..."):
+                    try:
+                        _pr = probe_criteo_dimensions(date.today() - timedelta(days=7),
+                                                      date.today() - timedelta(days=1))
+                        st.session_state["gc_criteo_probe_result"] = _pr
+                    except Exception as _e:
+                        st.session_state["gc_criteo_probe_result"] = [
+                            ("(오류)", "-", "", str(_e)[:300])]
         with cpb2:
             if st.button("크리테오 소재 실적 비우기", key="gc_criteo_wipe",
                          help="묶음 단위로 잘못 저장된 행을 지웁니다. 지운 뒤 다시 받으면 됩니다."):
@@ -11620,8 +11649,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     st.rerun()
         _pr = st.session_state.get("gc_criteo_probe_result")
         if _pr:
-            st.dataframe(pd.DataFrame(_pr, columns=["차원 이름", "API 버전", "결과"]),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(
+                pd.DataFrame(_pr, columns=["차원 이름", "API 버전", "응답 키", "결과"]),
+                use_container_width=True, hide_index=True)
+            st.caption("429는 '거부'가 아니라 **호출 제한**입니다 — 그 줄은 판정 보류이니 "
+                       "다시 한 번 눌러 확인해 주세요.")
 
     # 자동 동기화는 세션당 한 번뿐이라, 실패한 매체를 다시 받으려면 새로고침 말고 버튼이 필요하다.
     _never = [lab for lab, _ in AD_CREATIVE_FETCHERS if _media_last.get(lab) is None]
