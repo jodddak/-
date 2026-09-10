@@ -8615,11 +8615,33 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
 # 크리테오가 '광고(소재) 단위'를 뭐라고 부르는지는 계정·API 버전마다 다르다.
 # 이름을 하나씩 찍어보다 며칠을 쓴 끝에, 후보를 한 번에 훑고 어느 게 통하는지
 # 화면에서 바로 확인하는 방식으로 바꿨다(아래 render_criteo_dim_probe).
-CRITEO_CREATIVE_DIM_CANDIDATES = [
-    "Ad", "AdName", "AdId",
-    "Creative", "CreativeName", "CreativeId",
-    "Banner", "BannerName", "BannerId",
-]
+# 진단으로 확정: 2026-07 버전에서 **`Ad`** 가 정답이다.
+#   응답 키 = Ad, AdId, AdvertiserCost, Clicks, Currency, Day, Displays
+#   값 예시  = 260903_니들코드셔츠v1, 260902_말라네울수트  ← 매체 관리자 광고명 그대로
+# AdId도 되지만 숫자라 소재명으로 못 쓴다. 나머지(AdName·Creative·Banner…)는 전부 400.
+CRITEO_CREATIVE_DIM_CANDIDATES = ["Ad", "AdId"]
+
+
+def _criteo_post(path: str, token: str, body: dict, tries: int = 3):
+    """크리테오 report 호출. 429(호출 제한)면 쉬었다가 다시 던진다.
+
+    이게 없어서 한참 헤맸다. 429는 '그 이름이 틀렸다'가 아니라 '너무 빨리 불렀다'인데,
+    코드가 400과 똑같이 취급해서 다음 후보(묶음 단위)로 내려가 버렸다.
+    그 결과 광고 단위가 멀쩡히 되는데도 Adset 두 줄만 저장됐다.
+    """
+    import requests
+    last = None
+    for i in range(tries):
+        r = requests.post(f"{CRITEO_BASE}{path}",
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/json"},
+                          json=body, timeout=90)
+        if r.status_code == 429:
+            last = r
+            time.sleep(6 * (i + 1))
+            continue
+        return r
+    return last
 # 이 이름들은 '묶음' 단위다 — 성공해도 소재로 쓰면 안 된다.
 CRITEO_ADSET_DIMS = {"adset", "adsetname", "adsetid", "campaign", "campaignname", "campaignid"}
 
@@ -8759,10 +8781,10 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
                 "currency": str(cfg.get("currency", "KRW")).strip(),
                 "startDate": str(start), "endDate": str(end), "format": "json",
             }
-            r = requests.post(f"{CRITEO_BASE}/{ver}/statistics/report",
-                              headers={"Authorization": f"Bearer {token}",
-                                       "Content-Type": "application/json"},
-                              json=body, timeout=90)
+            r = _criteo_post(f"/{ver}/statistics/report", token, body)
+            if r is None:
+                last_err = f"({ver}, {dims[1]}) 호출 제한(429)이 계속됩니다"
+                continue
             if r.status_code == 404:
                 dead_version = True
                 break                     # 폐기된 버전 → 다음 버전으로
@@ -8800,6 +8822,11 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
         raise RuntimeError(
             f"크리테오 소재 조회는 성공했지만 0행입니다 (버전 {used_ver} · 차원 {used_dim} · "
             f"{start}~{end}). 광고주 ID나 기간을 확인해 주세요.")
+    # 어느 버전·차원으로 받았는지 화면에서 확인할 수 있게 남긴다
+    try:
+        st.session_state["gc_criteo_used"] = f"{used_ver} · {used_dim}"
+    except Exception:
+        pass
     for d in _raw_rows:
         if not isinstance(d, dict):
             continue
@@ -8820,6 +8847,10 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
                         pass
             return 0.0
 
+        # 소재명이 숫자만이면(AdId로 받은 경우) 소재로 못 쓴다 — 표에 '682609' 같은 줄이
+        # 생겨서 오히려 헷갈린다. 이름이 있는 행만 남긴다.
+        if not _name or _name.isdigit():
+            continue
         rows.append({
             "report_date": d.get("Day") or d.get("day") or d.get("date"),
             "channel": "크리테오",
@@ -11647,6 +11678,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     st.success("지웠습니다. 이제 대행사 리포트로 다시 채워집니다.")
                     st.cache_data.clear()
                     st.rerun()
+        _used = st.session_state.get("gc_criteo_used")
+        if _used:
+            st.success(f"마지막 동기화에서 크리테오 소재를 받은 경로 — **{_used}**")
         _pr = st.session_state.get("gc_criteo_probe_result")
         if _pr:
             st.dataframe(
