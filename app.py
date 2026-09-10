@@ -11019,13 +11019,28 @@ def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
                 "우수/부진 비교는 소재가 더 쌓이면 확인하겠습니다.")
     best = judged.loc[judged["_roas"].idxmax()]
     worst = judged.loc[judged["_roas"].idxmin()]
-    lines = [
-        f"{label} 소재 {len(judged)}개 중 우수 {n_good}개 · 평균 수준 {n_mid}개 · 부진 {n_bad}개입니다"
-        + (f" (표본 부족 {n_hold}개는 판단 보류)." if n_hold else "."),
-        f"<b>{best['_name']}</b>가 광고비 {best['_cost']:,.0f}원으로 ROAS {best['_roas']:,.0f}%를 "
-        f"기록해 가장 우수했고, <b>{worst['_name']}</b>는 광고비 {worst['_cost']:,.0f}원 대비 "
-        f"ROAS {worst['_roas']:,.0f}%로 평균({avg_roas:,.0f}%) 대비 낮아 가장 부진했습니다.",
-    ]
+    head = (f"{label} 소재 {len(judged)}개 중 우수 {n_good}개 · 평균 수준 {n_mid}개 · "
+            f"부진 {n_bad}개입니다"
+            + (f" (표본 부족 {n_hold}개는 판단 보류)." if n_hold else "."))
+    if float(best["_roas"]) == float(worst["_roas"]):
+        # 전부 같은 수준(대개 다 같이 ROAS 0%)인데 '가장 우수/가장 부진'을 붙이면
+        # 같은 소재가 우수이자 부진으로 나온다 — 실제로 그렇게 나왔다.
+        detail = (f"판단 가능한 {len(judged)}개가 모두 ROAS {best['_roas']:,.0f}% 수준이라 "
+                  "우열을 가릴 게 없습니다."
+                  if float(best["_roas"]) <= 0 else
+                  f"판단 가능한 {len(judged)}개가 모두 ROAS {best['_roas']:,.0f}%로 같습니다.")
+    elif n_good == 0:
+        # 우수가 하나도 없는데 '가장 우수했고'라고 쓰면 읽는 사람이 오해한다.
+        detail = (f"그중 <b>{best['_name']}</b>가 ROAS {best['_roas']:,.0f}%로 가장 높지만 "
+                  f"목표 하단({OPS_KPI_ROAS_LOW:.0f}%)에는 못 미치고, "
+                  f"<b>{worst['_name']}</b>가 {worst['_roas']:,.0f}%로 가장 낮습니다.")
+    else:
+        detail = (f"<b>{best['_name']}</b>가 광고비 {best['_cost']:,.0f}원으로 "
+                  f"ROAS {best['_roas']:,.0f}%를 기록해 가장 우수했고, "
+                  f"<b>{worst['_name']}</b>는 광고비 {worst['_cost']:,.0f}원 대비 "
+                  f"ROAS {worst['_roas']:,.0f}%로 평균({avg_roas:,.0f}%) 대비 낮아 "
+                  "가장 부진했습니다.")
+    lines = [head, detail]
     if n_bad:
         lines.append(_ops_next_action(
             f"부진 소재({n_bad}개)는 소재 교체 또는 예산 축소를 검토하는 것을 권장합니다."))
@@ -11387,10 +11402,22 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                                 unlimited=unlimited)
             _st2.update(label=f"소재 데이터 동기화 완료 (GA {n:,}행 · 매체 {n2:,}행)",
                         state="complete")
-        for k, v in (err2 or {}).items():
-            st.warning(f"{k} 소재 실적: {v}")
+        # 바로 아래에서 st.rerun()을 하면 지금 그린 경고가 통째로 사라진다.
+        # 그래서 실패 내용을 세션에 넣어두고 새로 그린 화면에서 보여준다
+        # (이것 때문에 '크리테오 없음'만 보이고 왜 없는지는 안 보였다).
+        if err2:
+            st.session_state["gc_sync_errors"] = dict(err2)
+        if err:
+            st.session_state["gc_sync_ga_error"] = err
         st.cache_data.clear()
         st.rerun()
+
+    _prev_err = st.session_state.pop("gc_sync_errors", None)
+    _prev_ga_err = st.session_state.pop("gc_sync_ga_error", None)
+    if _prev_ga_err:
+        st.warning(f"GA4 소재 동기화 실패 — {_prev_ga_err}")
+    for _k, _v in (_prev_err or {}).items():
+        st.error(f"**{_k}** 소재 실적을 못 받았습니다 — {_v}")
 
     c1, c2 = st.columns([3, 1])
     with c2:
@@ -11426,6 +11453,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         if _l1 is None or _l1 < _yday or _stale:
             _run_sync("자동 — " + (", ".join(_stale) + " 늦음" if _stale else "GA4 갱신"),
                       unlimited=False)
+
+    # 자동 동기화는 세션당 한 번뿐이라, 실패한 매체를 다시 받으려면 새로고침 말고 버튼이 필요하다.
+    _never = [lab for lab, _ in AD_CREATIVE_FETCHERS if _media_last.get(lab) is None]
+    if _never:
+        st.warning(
+            f"**{', '.join(_never)}** 소재 실적이 한 건도 저장돼 있지 않습니다. "
+            "그 매체 소재는 대행사 리포트로만 채워지고 있어 최근 소재가 빠질 수 있습니다."
+        )
+        if st.button(f"🔁 {', '.join(_never)} 소재만 다시 받기 (원인까지 표시)",
+                     key="gc_retry_never"):
+            with st.status("다시 받는 중...", expanded=True) as _st3:
+                _n, _sv, _er = sync_ad_creative(
+                    ad_creative, only=_never, unlimited=True, progress=st.write,
+                    start=date.today() - timedelta(days=AD_SPEND_LOOKBACK_DAYS),
+                    end=date.today() - timedelta(days=1))
+                _st3.update(label=f"완료 — {_n:,}행", state="complete")
+            if _er:
+                for _k, _v in _er.items():
+                    st.error(f"**{_k}** 실패 — {_v}")
+                st.caption("이 메시지를 그대로 알려주시면 원인을 잡겠습니다.")
+            else:
+                st.cache_data.clear()
+                st.rerun()
 
     if cre is None or cre.empty:
         st.info(
@@ -11504,8 +11554,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
     hidden += [c for c in all_ch if c in GC_NON_CREATIVE]
     all_ch = [c for c in all_ch if c not in hidden]
+
+    # GFA 기기 분리가 됐으면, 접미사가 없어 기기를 못 가른 잔여 줄(옛 소재의 UTM 링크가
+    # 아직 살아 있는 경우)은 탭을 따로 만들지 않는다. 탭이 GFA / GFA PC / GFA MO 셋으로
+    # 보여서 오해를 낳는다. 대신 TOTAL에는 그대로 넣어 합계가 새지 않게 한다.
+    _gfa_split = any(c in ("네이버 GFA PC", "네이버 GFA MO") for c in all_ch)
+    folded = ["네이버 GFA"] if (_gfa_split and "네이버 GFA" in all_ch) else []
+
     sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE]
-    order = [c for c in all_ch if c not in sep] + sep
+    order = [c for c in all_ch if c not in sep and c not in folded] + sep
     if not order:
         st.warning(
             "UTM 매핑이 비어 있어 광고 매체를 가려낼 수 없습니다. "
@@ -11518,6 +11575,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if _non_cre:
         st.caption("검색광고(" + " · ".join(_non_cre) + ")는 배너 소재가 없어 이 화면에서 뺐습니다 — "
                    "채널 성과 탭에서 보세요.")
+    if folded:
+        st.caption("GFA 중 utm_campaign에 `_PC`/`_MO`가 없는 옛 소재는 탭을 따로 만들지 않았습니다 "
+                   "(TOTAL에는 포함). 대개 예전 링크가 아직 살아 있어 방문이 한두 건 찍히는 것입니다.")
 
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
@@ -11542,7 +11602,6 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # GA 쪽이 GFA를 PC/MO로 못 갈랐으면(utm_campaign에 접미사가 없음) 매체 실적도 합쳐서
     # '네이버 GFA' 하나로 붙인다 — 안 그러면 GFA 소재 전부가 '광고비 없음'이 된다.
-    _gfa_split = any(c in ("네이버 GFA PC", "네이버 GFA MO") for c in all_ch)
     if not _gfa_split:
         _merged = {}
         for (ch, key), m in list(media_map.items()):
@@ -11640,7 +11699,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         with tabs[ti]:
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
-            keep = [c for c in order if c not in sep] if label == "TOTAL" else [label]
+            keep = ([c for c in order if c not in sep] + folded) if label == "TOTAL" else [label]
             ch_keep = keep
             rows = rows_all[rows_all["channel"].isin(keep)]
             if rows.empty:
@@ -11648,18 +11707,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 continue
 
             rows = rows.copy()
-            if label == "네이버 GFA":
-                if _gfa_split:
-                    st.warning(
-                        "이 줄들은 utm_campaign에 `_PC` / `_MO`가 없어 기기를 못 갈랐습니다. "
-                        "리포트의 소재 실적은 PC/MO로 나뉘어 있어 여기엔 광고비가 안 붙습니다 — "
-                        "해당 GFA 캠페인의 utm_campaign을 캠페인명(…_PC / …_MO)과 같게 맞춰주세요."
-                    )
-                else:
-                    st.caption(
-                        "GFA를 PC/MO로 나누려면 utm_campaign에 캠페인명(…_PC / …_MO)이 들어 있어야 "
-                        "합니다. 지금 GA 유입에는 그 표시가 없어 PC+MO를 합쳐서 보여줍니다."
-                    )
+            if label == "네이버 GFA" and not _gfa_split:
+                st.caption(
+                    "GFA를 PC/MO로 나누려면 utm_campaign에 캠페인명(…_PC / …_MO)이 들어 있어야 "
+                    "합니다. 지금 GA 유입에는 그 표시가 없어 PC+MO를 합쳐서 보여줍니다."
+                )
 
             _matched = set()
             rows["_media"] = _gc_attach_media(rows, media_map, _matched)
