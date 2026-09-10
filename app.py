@@ -10582,6 +10582,60 @@ def upload_ga_creative_images(files) -> tuple:
     return urls, errors
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _gc_stored_image_index() -> dict:
+    """직접 올린 소재 이미지를 Storage에서 다시 읽어 {저장키: URL}로 돌려준다.
+
+    왜 필요한가:
+      업로드한 파일 자체는 Storage에 남는데, 화면이 그 목록을 세션 메모리에만 들고 있었다.
+      그래서 브라우저를 닫거나 앱이 재시작하면 이미지가 통째로 사라진 것처럼 보였다.
+      파일은 멀쩡히 있으니 매번 폴더를 읽어 다시 붙인다 — 별도 표를 만들 필요가 없다.
+
+    저장 경로는 소재명에서 규칙대로 만들어지므로(_safe_storage_name), 파일명만 보고도
+    어느 소재의 이미지인지 되짚을 수 있다.
+    """
+    client = get_supabase_client()
+    if client is None:
+        return {}
+    try:
+        items = client.storage.from_(CREATIVE_IMAGE_BUCKET).list(
+            GC_IMAGE_FOLDER, {"limit": 1000, "sortBy": {"column": "name", "order": "asc"}})
+    except Exception:
+        return {}
+    out = {}
+    for it in (items or []):
+        if isinstance(it, dict):
+            nm = str(it.get("name") or "")
+            ver = str(it.get("updated_at") or it.get("created_at") or "")
+        else:
+            nm = str(getattr(it, "name", "") or "")
+            ver = str(getattr(it, "updated_at", "") or "")
+        stem = nm.rsplit(".", 1)[0] if "." in nm else ""
+        if not stem:   # 빈 폴더 표식(.emptyFolderPlaceholder) 등은 건너뛴다
+            continue
+        try:
+            u = client.storage.from_(CREATIVE_IMAGE_BUCKET).get_public_url(
+                f"{GC_IMAGE_FOLDER}/{nm}")
+        except Exception:
+            continue
+        if ver:   # 같은 소재를 다시 올렸을 때 브라우저 캐시가 옛 이미지를 안 보여주게
+            u = f"{u}{'&' if '?' in u else '?'}v={re.sub(r'[^0-9]', '', ver)[:14]}"
+        out[stem] = u
+    return out
+
+
+def _gc_pick_image(row, img_map: dict, store_idx: dict):
+    """소재 한 줄에 붙일 이미지 URL. 리포트에 박혀 온 것 → 직접 올린 것 순으로 본다."""
+    for k in _gc_image_keys(row):
+        if k in img_map:
+            return img_map[k]
+        if store_idx:
+            hit = store_idx.get(_safe_storage_name(k))
+            if hit:
+                return hit
+    return None
+
+
 def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
     """소재별 성과 화면과 같은 톤의 자동 코멘트. 표본이 작은 건 판단에서 뺀다."""
     if rows is None or rows.empty:
@@ -10999,6 +11053,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 리포트에 없던 소재(GFA 신규 등)만 아래 업로더로 채우면 된다.
     img_map = dict(_gc_image_lookup(creative_perf))
     img_map.update(st.session_state.get("gc_img_extra", {}))
+    # 직접 올린 이미지는 Storage에서 다시 읽는다 — 세션에만 두면 다음 접속에 사라진다.
+    store_idx = _gc_stored_image_index()
     with st.expander("소재 이미지 추가 업로드 — 파일명을 소재명으로 (예: 260807_수피마티셔츠.jpg)"):
         ups = st.file_uploader("이미지 여러 장 한 번에 올릴 수 있습니다",
                                type=["png", "jpg", "jpeg", "webp"],
@@ -11007,13 +11063,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             urls, errs = upload_ga_creative_images(ups)
             if urls:
                 st.session_state.setdefault("gc_img_extra", {}).update(urls)
-                st.success(f"{len(urls)}장 올렸습니다.")
+                _gc_stored_image_index.clear()   # 방금 올린 것이 바로 목록에 잡히게
+                st.success(f"{len(urls)}장 올렸습니다. 다음 접속에도 그대로 남습니다.")
                 st.rerun()
             for e in errs:
                 st.error(e)
         st.caption(
             "대행사 리포트에 있던 소재는 이미 올라가 있어 다시 주실 필요 없습니다. "
-            "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다."
+            "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다. "
+            f"현재 직접 올려둔 이미지 {len(store_idx)}장."
         )
 
     # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
@@ -11185,12 +11243,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             body = []
             for _, r in rows.iterrows():
-                url = None
-                if show_img:
-                    for k in _gc_image_keys(r):
-                        if k in img_map:
-                            url = img_map[k]
-                            break
+                url = _gc_pick_image(r, img_map, store_idx) if show_img else None
                 body.append(_gc_row_html(r, r["_media"], img_url=url, show_img=show_img))
             # 매체에는 있는데 GA에서 못 찾은 소재를 한 줄로 모은다.
             #
@@ -11215,11 +11268,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         "sessions": 0.0, "conv": 0.0, "rev": 0.0,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
                     })
-                    _url = None
-                    for k2 in _gc_image_keys(_row):
-                        if k2 in img_map:
-                            _url = img_map[k2]
-                            break
+                    _url = _gc_pick_image(_row, img_map, store_idx)
                     body.append(_gc_row_html(_row, dict(m, _unmatched=True), "gc-unmatched",
                                              img_url=_url, show_img=show_img))
                     for f in ("impressions", "clicks", "cost"):
