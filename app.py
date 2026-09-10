@@ -8697,30 +8697,53 @@ AD_CREATIVE_FETCHERS = [
 ]
 
 
+def _creative_last_dates(existing: pd.DataFrame) -> dict:
+    """ad_creative_daily에 매체별로 어느 날짜까지 들어와 있는지 {매체: date}."""
+    out = {}
+    if existing is None or existing.empty or "report_date" not in existing.columns \
+            or "channel" not in existing.columns:
+        return out
+    e = existing[["channel", "report_date"]].copy()
+    e["report_date"] = pd.to_datetime(e["report_date"], errors="coerce")
+    e = e.dropna(subset=["report_date"])
+    for ch, v in e.groupby("channel")["report_date"].max().items():
+        out[_v4_canon_channel(ch)] = v.date()
+    return out
+
+
 def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
                      progress=None, start: date = None, end: date = None):
-    """소재 단위 실적을 매체에서 받아 ad_creative_daily에 upsert한다."""
+    """소재 단위 실적을 매체에서 받아 ad_creative_daily에 upsert한다.
+
+    시작일은 **매체별로** 따로 잡는다. 예전엔 표 전체의 최신 날짜 하나로 잡아서, 메타가 어제까지
+    들어와 있으면 크리테오가 일주일 전에 멈춰 있어도 '최신'으로 보고 최근 며칠만 다시 받았다.
+    그래서 크리테오 소재가 3개만 보이던 문제가 재발했다. 매체마다 자기 마지막 날짜부터 받는다.
+    """
     today = date.today()
     if end is None:
         end = today - timedelta(days=1)
-    if start is None:
-        if existing is None or existing.empty or "report_date" not in existing.columns:
-            start = end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
-        else:
-            last = pd.to_datetime(existing["report_date"]).max().date()
-            start = min(last - timedelta(days=AD_SPEND_RESYNC_TAIL_DAYS - 1), end)
-    if start > end:
-        return 0, {}, {}
+    last_by_ch = _creative_last_dates(existing)
+
+    def _start_for(label):
+        if start is not None:
+            return start
+        last = last_by_ch.get(label)
+        if last is None:
+            return end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
+        return min(last - timedelta(days=AD_SPEND_RESYNC_TAIL_DAYS - 1), end)
 
     saved, errors, total = {}, {}, 0
     for label, fn in AD_CREATIVE_FETCHERS:
         if only and label not in only:
             continue
+        s0 = _start_for(label)
+        if s0 > end:
+            continue
         if progress:
-            progress(f"⏳ {label} 소재 실적 받는 중...")
+            progress(f"⏳ {label} 소재 실적 받는 중... ({s0} ~ {end})")
         try:
-            df = (fn(start, end) if unlimited
-                  else _run_bounded(lambda f=fn: f(start, end), SYNC_PER_SOURCE_SEC))
+            df = (fn(s0, end) if unlimited
+                  else _run_bounded(lambda f=fn, s=s0: f(s, end), SYNC_PER_SOURCE_SEC))
         except Exception as e:
             errors[label] = str(e)[:250]
             if progress:
@@ -10775,6 +10798,44 @@ GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
 # 오히려 헷갈린다. 다시 집행을 시작하면(선택 기간에 광고비가 잡히면) 자동으로 다시 나온다.
 GC_HIDE_IF_IDLE = ["(DA) ADN", "카카오톡 플친", "네이버 트렌드픽"]
 
+# 배너 소재가 없는 매체 — 검색광고는 키워드·확장소재라 '소재별' 비교 대상이 아니다(담당자 확인).
+# 탭에 두면 (미설정) 한 줄만 나와서 헷갈리고 TOTAL도 흐려지므로 이 화면에서는 뺀다.
+GC_NON_CREATIVE = ["네이버 검색광고", "네이버 브랜드검색광고", "네이버 쇼핑검색광고"]
+
+
+def _gc_channel(name) -> str:
+    """소재별 화면용 매체명. 대표명으로 모으되 GFA만 PC/MO를 살린다.
+
+    대행사 리포트는 GFA를 '네이버 GFA PC' / '네이버 GFA MO'로 나눠 주고 운영도 그렇게 한다.
+    _v4_canon_channel은 둘을 '네이버 GFA' 하나로 합치는데, 소재 화면에서는 기기별로 봐야
+    어느 쪽 소재를 끌지 판단이 된다.
+    """
+    s = str(name or "")
+    low = s.lower()
+    if "gfa" in low and "애드부스트" not in s and "advoost" not in low and "adboost" not in low:
+        if re.search(r"(^|[^a-z])pc([^a-z]|$)", low):
+            return "네이버 GFA PC"
+        if re.search(r"(^|[^a-z])mo([^a-z]|$)", low) or "모바일" in s:
+            return "네이버 GFA MO"
+    return _v4_canon_channel(name)
+
+
+def _gc_ga_channel(channel, campaign) -> str:
+    """GA 줄의 매체명. GFA는 utm_campaign의 _PC/_MO 접미사로 기기를 가른다.
+
+    GA4는 소스/매체만으로는 GFA PC와 MO를 구분 못 한다. 대행사가 캠페인명을
+    '..._PC' / '..._MO'로 짓고 그걸 utm_campaign에 그대로 쓰기 때문에 거기서 읽는다.
+    접미사가 없으면 '네이버 GFA'(기기 미상)로 남긴다 — 억지로 나누지 않는다.
+    """
+    base = _gc_channel(channel)
+    if base == "네이버 GFA":
+        c = str(campaign or "").upper()
+        if re.search(r"(^|[^A-Z])PC([^A-Z]|$)", c):
+            return "네이버 GFA PC"
+        if re.search(r"(^|[^A-Z])MO([^A-Z]|$)", c) or "MOBILE" in c or "모바일" in c:
+            return "네이버 GFA MO"
+    return base
+
 
 GC_IMAGE_FOLDER = "ga_creative"
 
@@ -11026,7 +11087,7 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     g = g[g.apply(classify_ga_bucket, axis=1) == "광고"]
     if g.empty:
         return pd.DataFrame(columns=cols)
-    g["channel"] = g["channel"].map(_v4_canon_channel)
+    g["channel"] = [_gc_ga_channel(ch, cp) for ch, cp in zip(g["channel"], g["campaign"])]
     if exclude:
         g = g[~g["channel"].isin(set(exclude))]
         if g.empty:
@@ -11136,7 +11197,7 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     g = c.groupby(["channel", "creative"], as_index=False)[
         ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
     for _, r in g.iterrows():
-        k = (_v4_canon_channel(r["channel"]), _creative_image_key(r["creative"]))
+        k = (_gc_channel(r["channel"]), _creative_image_key(r["creative"]))
         out[k] = {"impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
                   "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
                   "channel": r["channel"], "name": str(r["creative"]), "src": "api"}
@@ -11222,8 +11283,8 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
         # 키에 매체를 반드시 넣는다. 같은 소재명을 여러 매체에 동시에 쓰기 때문에
         # (260807_수피마티셔츠가 GFA·메타·구글에 다 있음), 소재명만으로 찾으면 한 매체의
         # 광고비가 다른 매체 줄에도 붙어 중복 계산된다(형이 잡은 그 문제).
-        # 대행사 채널명은 'GFA PC/MO'처럼 기기까지 나뉘어 있어 대표 채널명으로 모은다.
-        k = (_v4_canon_channel(r.get("channel")), _creative_image_key(r["creative"]))
+        # 대행사 채널명은 'GFA PC/MO'처럼 기기까지 나뉘어 있다 — 소재 화면은 그 구분을 살린다.
+        k = (_gc_channel(r.get("channel")), _creative_image_key(r["creative"]))
         cur = out.setdefault(k, {"impressions": 0.0, "clicks": 0.0, "cost": 0.0,
                                  "media_conv": 0.0, "channel": r.get("channel"),
                                  "name": str(r["creative"])})
@@ -11339,19 +11400,32 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # ── 자동 동기화 ── 채널 퍼널 리포트처럼, 어제 데이터가 없으면 세션당 한 번 알아서 받는다.
     # 매번 버튼을 눌러야 최신이 되는 구조라 하루 지난 표를 보고 판단하는 일이 있었다.
     # '시도했음' 플래그를 먼저 세워, 중간에 멈춰도 새로고침 때 또 멈추지 않게 한다.
+    _yday = date.today() - timedelta(days=1)
+
+    def _last(df):
+        if df is None or df.empty or "report_date" not in df.columns:
+            return None
+        v = pd.to_datetime(df["report_date"], errors="coerce").max()
+        return v.date() if pd.notna(v) else None
+
+    # 매체별 최신 날짜 — 하나라도 어제보다 오래됐으면 동기화 대상이다.
+    # (표 전체의 최신 날짜만 보면 메타가 최신이라는 이유로 멈춘 크리테오를 못 잡는다)
+    _l1 = _last(cre)
+    _media_last = _creative_last_dates(ad_creative)
+    _stale = [lab for lab, _ in AD_CREATIVE_FETCHERS
+              if _media_last.get(lab) is None or _media_last[lab] < _yday]
+    with c1:
+        st.caption(
+            "소재 데이터 최신 날짜 — GA4 " + (str(_l1) if _l1 else "없음") + " · "
+            + " · ".join(f"{lab} {_media_last[lab]}" if _media_last.get(lab) else f"{lab} 없음"
+                         for lab, _ in AD_CREATIVE_FETCHERS)
+            + (f"  ⚠️ {', '.join(_stale)} 늦음" if _stale else "  ✅ 모두 어제까지")
+        )
     if "gc_synced" not in st.session_state and get_ga4_client()[0] is not None:
         st.session_state["gc_synced"] = True
-        _yday = date.today() - timedelta(days=1)
-
-        def _last(df):
-            if df is None or df.empty or "report_date" not in df.columns:
-                return None
-            v = pd.to_datetime(df["report_date"], errors="coerce").max()
-            return v.date() if pd.notna(v) else None
-
-        _l1, _l2 = _last(cre), _last(ad_creative)
-        if _l1 is None or _l1 < _yday or _l2 is None or _l2 < _yday:
-            _run_sync("자동 — 저장된 최신 날짜 " + (str(_l1) if _l1 else "없음"), unlimited=False)
+        if _l1 is None or _l1 < _yday or _stale:
+            _run_sync("자동 — " + (", ".join(_stale) + " 늦음" if _stale else "GA4 갱신"),
+                      unlimited=False)
 
     if cre is None or cre.empty:
         st.info(
@@ -11420,8 +11494,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # ── 매체 탭 ── 캡처하신 소재별 성과 화면과 같은 구성.
     # 맨즈탭처럼 별도 시트로 관리하는 매체는 탭 순서 맨 뒤로 보낸다(평소에 안 보게).
-    all_ch = sorted({_v4_canon_channel(c) for c in d["channel"].dropna().unique()})
-    hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(c, 0) <= 0]
+    # GFA는 utm_campaign의 _PC/_MO로 기기를 갈라 탭을 따로 둔다.
+    if "campaign" not in d.columns:
+        d["campaign"] = "(미설정)"
+    d["_gc_ch"] = [(_gc_ga_channel(ch, cp) if pd.notna(ch) and str(ch).strip() else None)
+                   for ch, cp in zip(d["channel"], d["campaign"])]
+    _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
+    all_ch = sorted({c for c in _in_period["_gc_ch"].dropna().unique()})
+    hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
+    hidden += [c for c in all_ch if c in GC_NON_CREATIVE]
     all_ch = [c for c in all_ch if c not in hidden]
     sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE]
     order = [c for c in all_ch if c not in sep] + sep
@@ -11433,6 +11514,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         return
     tab_labels = ["TOTAL"] + order
     tabs = st.tabs(tab_labels)
+    _non_cre = [c for c in GC_NON_CREATIVE if c in hidden]
+    if _non_cre:
+        st.caption("검색광고(" + " · ".join(_non_cre) + ")는 배너 소재가 없어 이 화면에서 뺐습니다 — "
+                   "채널 성과 탭에서 보세요.")
 
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
@@ -11454,6 +11539,22 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _api_channels = {ch for ch, _ in _api_map}
     media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
     media_map.update(_api_map)
+
+    # GA 쪽이 GFA를 PC/MO로 못 갈랐으면(utm_campaign에 접미사가 없음) 매체 실적도 합쳐서
+    # '네이버 GFA' 하나로 붙인다 — 안 그러면 GFA 소재 전부가 '광고비 없음'이 된다.
+    _gfa_split = any(c in ("네이버 GFA PC", "네이버 GFA MO") for c in all_ch)
+    if not _gfa_split:
+        _merged = {}
+        for (ch, key), m in list(media_map.items()):
+            if ch in ("네이버 GFA PC", "네이버 GFA MO"):
+                cur = _merged.setdefault(key, {"impressions": 0.0, "clicks": 0.0, "cost": 0.0,
+                                               "media_conv": 0.0, "channel": "네이버 GFA",
+                                               "name": m.get("name"), "src": m.get("src")})
+                for f in ("impressions", "clicks", "cost", "media_conv"):
+                    cur[f] += float(m.get(f, 0) or 0)
+                del media_map[(ch, key)]
+        for key, m in _merged.items():
+            media_map[("네이버 GFA", key)] = m
 
     # ── 소재명 별칭 ──
     # UTM에 박힌 옛 이름을 지금 쓰는 이름으로 바꿔 보여준다.
@@ -11547,6 +11648,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 continue
 
             rows = rows.copy()
+            if label == "네이버 GFA":
+                if _gfa_split:
+                    st.warning(
+                        "이 줄들은 utm_campaign에 `_PC` / `_MO`가 없어 기기를 못 갈랐습니다. "
+                        "리포트의 소재 실적은 PC/MO로 나뉘어 있어 여기엔 광고비가 안 붙습니다 — "
+                        "해당 GFA 캠페인의 utm_campaign을 캠페인명(…_PC / …_MO)과 같게 맞춰주세요."
+                    )
+                else:
+                    st.caption(
+                        "GFA를 PC/MO로 나누려면 utm_campaign에 캠페인명(…_PC / …_MO)이 들어 있어야 "
+                        "합니다. 지금 GA 유입에는 그 표시가 없어 PC+MO를 합쳐서 보여줍니다."
+                    )
 
             _matched = set()
             rows["_media"] = _gc_attach_media(rows, media_map, _matched)
@@ -11593,7 +11706,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # 매체 탭의 광고비는 소재 실적이 없는 매체(검색광고·브검 등)도 있어야 하므로
                 # ad_spend_daily 값을 쓴다. 노출·클릭은 소재 실적이 있는 매체만 채워진다.
                 if level == "매체":
-                    agg["_m_cost"] = agg["channel"].map(lambda c: spend_by_ch.get(c, 0.0))
+                    # GFA PC/MO처럼 ad_spend_daily에 기기별 줄이 없는 매체는 소재 합계를 그대로 둔다
+                    agg["_m_cost"] = [spend_by_ch[c] if c in spend_by_ch else mc
+                                      for c, mc in zip(agg["channel"], agg["_m_cost"])]
                 agg["key"] = agg["_gk"]
                 agg["cre_name"] = agg["_gk"]
                 agg["cre_label"] = agg["_gk"]
@@ -11608,7 +11723,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             rows["_cost"] = rows["_media"].map(lambda m: float((m or {}).get("cost", 0) or 0))
             rows["_roas"] = np.where(rows["_cost"] > 0, rows["rev"] / rows["_cost"] * 100, 0.0)
-            rows["_name"] = rows["cre_name"] if show_img else rows["key"]
+            # 코멘트에 쓰는 이름은 표와 똑같이 '날짜_소재명(별칭 반영)'으로 — 예전엔 UTM 원본
+            # 이름(수피마티셔츠)을 써서 표의 260807_데님셔츠와 다른 소재처럼 보였다.
+            rows["_name"] = rows["cre_title"] if show_img else rows["key"]
             tot_cost = float(rows["_cost"].sum())
             tot_rev = float(rows["rev"].sum())
             # 평균 ROAS의 분모에는 GA 매칭 안 된 소재의 광고비도 들어가야 한다 — 돈은 나갔으니까.
@@ -11620,8 +11737,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             avg_roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0.0
 
             # (미설정) 비중 경고 — 이 탭에 해당하는 것만
-            sub = per if label == "TOTAL" else per[
-                per["channel"].map(_v4_canon_channel) == label]
+            sub = (per[per["_gc_ch"].isin(keep)] if label == "TOTAL"
+                   else per[per["_gc_ch"] == label])
             t_ses = float(sub["sessions"].sum())
             unset = float(sub[sub["creative"] == "(미설정)"]["sessions"].sum())
             if t_ses > 0 and unset / t_ses > 0.2:
@@ -11631,6 +11748,24 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     "(크리테오는 `utm_id`)를 넣어야 소재별 비교가 됩니다 — "
                     "운영 도구 › UTM 빌더에서 만들 수 있습니다."
                 )
+
+            # 매체엔 있는데 GA에 못 붙은 소재(UTM 없음)와, GA엔 있는데 소재명이 없는 구매((미설정)·
+            # (규칙 외))가 같은 매체에 동시에 있으면 십중팔구 같은 광고다 — 크리테오 다이나믹처럼
+            # utm_id에 소재명 대신 숫자나 빈값이 들어간 경우. 합계는 맞지만 줄이 둘로 갈라진다.
+            if level == "소재" and label != "TOTAL" and leftovers:
+                _noname = rows[rows["cre_name"].isin(["(미설정)"]) | (rows["target"] == "(규칙 외)")]
+                _nn_conv = float(pd.to_numeric(_noname["conv"], errors="coerce").fillna(0).sum())
+                _nn_rev = float(pd.to_numeric(_noname["rev"], errors="coerce").fillna(0).sum())
+                _lo_cost = sum(float(m.get("cost", 0) or 0) for _, m in leftovers)
+                if _nn_conv > 0 and _lo_cost > 0:
+                    _lo_names = ", ".join(str(m.get("name") or k[1]) for k, m in leftovers[:3])
+                    st.info(
+                        f"GA에 **소재명 없이 들어온 구매 {_nn_conv:,.0f}건 · {_nn_rev:,.0f}원**과 "
+                        f"GA 매칭이 안 된 매체 소재 **{_lo_names}** (광고비 {_lo_cost:,.0f}원)는 "
+                        "같은 광고일 가능성이 큽니다. 그 광고의 트래킹 파라미터에 소재명을 "
+                        "(크리테오는 `utm_id`, 나머지는 `utm_content`) 넣으면 한 줄로 합쳐집니다. "
+                        "합계(TOTAL)는 이미 둘 다 포함하고 있어 정확합니다."
+                    )
 
             st.caption(
                 f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · "
