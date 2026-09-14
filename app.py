@@ -6997,10 +6997,13 @@ FUNNEL_V4_CSS = """
 /* ── KPI 카드 ──────────────────────────────────────────────────────────
    한 덩어리 띠에서 '카드 여러 장'으로 바꿨다. 카드마다 위쪽에 색 띠를 두고,
    첫 카드(총 방문자)는 통짜 파랑으로 채워 시선이 먼저 가게 한다. */
-.fv4-kpis { display:flex; gap:11px; margin-bottom:26px; flex-wrap:wrap;
+/* 카드가 6장이라 최소폭을 크게 잡으면 화면 밖으로 밀려 가로 스크롤이 생긴다.
+   min-width:0 + 작은 기준폭으로 두면 좁은 화면에서 알아서 줄바꿈된다. */
+.fv4-kpis { display:flex; gap:11px; margin-bottom:26px; flex-wrap:wrap; width:100%;
             border:none; background:none; border-radius:0; overflow:visible; }
-.fv4-kpi { flex:1 1 168px; padding:18px 20px 17px; position:relative; overflow:hidden;
+.fv4-kpi { flex:1 1 148px; min-width:0; padding:18px 20px 17px; position:relative; overflow:hidden;
            border:1px solid #E8E6DC; border-radius:14px; background:#fff; }
+.fv4-kpi-value { overflow-wrap:anywhere; }
 .fv4-kpi::after { content:""; position:absolute; left:0; top:0; width:100%; height:3px;
                   background:#3D5AFE; }
 .fv4-kpi:nth-child(3n+2)::after { background:#7C4DFF; }
@@ -9795,10 +9798,11 @@ CP_CSS = """
 /* 칸 개수가 화면마다 달라서 grid를 고정 칸수로 잡으면 빈 칸이 생기고 칸막이가 끊긴다.
    flex로 두고 칸막이를 왼쪽 테두리로 그리면 몇 개든 알아서 맞는다. */
 /* 채널 성과 KPI — 퍼널 화면과 같은 카드 규칙(흰 카드 + 위쪽 색 띠, 첫 장은 통짜 파랑) */
-.cp-kpis{display:flex;gap:11px;flex-wrap:wrap;margin-bottom:14px;
+.cp-kpis{display:flex;gap:11px;flex-wrap:wrap;margin-bottom:14px;width:100%;
   background:none;border:none;border-radius:0;overflow:visible}
-.cp-kpi{flex:1 1 160px;min-width:0;padding:16px 18px;position:relative;overflow:hidden;
+.cp-kpi{flex:1 1 144px;min-width:0;padding:16px 18px;position:relative;overflow:hidden;
   border:1px solid #E3E1DC;border-radius:14px;background:#FFF}
+.cp-kpi .v{overflow-wrap:anywhere}
 .cp-kpi::after{content:"";position:absolute;left:0;top:0;width:100%;height:3px;background:#3D5AFE}
 .cp-kpi:nth-child(3n+2)::after{background:#7C4DFF}
 .cp-kpi:nth-child(3n)::after{background:#63C132}
