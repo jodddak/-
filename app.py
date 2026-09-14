@@ -3920,7 +3920,9 @@ def _mr_channel_of(campaign: str, filename: str) -> str:
     ext = ("외부몰" in blob) or ("스마트스토어" in blob)
     if any(k in blob for k in ("advoost", "adboost", "애드부스트", "ad voost")):
         return "네이버 애드부스트"
-    if any(k in blob for k in ("맨즈탭", "맨즈텝", "manstab", "n.box", "핫아이템")):
+    # 파일명이 '네이버 맨즈_18_자사몰'처럼 '탭'이 빠져 오는 경우가 있어 '맨즈'만으로도 잡는다.
+    # (예전엔 여기서 안 걸려서 맨즈탭 파일이 통째로 GFA로 들어갔다)
+    if any(k in blob for k in ("맨즈탭", "맨즈텝", "맨즈", "manstab", "n.box", "핫아이템")):
         return "네이버 맨즈탭_외부몰" if ext else "네이버 맨즈탭_자사몰"
     if "gfa" in blob or "자사몰" in blob or "전환" in blob:
         return "네이버 GFA"
@@ -4165,7 +4167,8 @@ def detect_upload_kind(file) -> str:
     flat = name.replace(" ", "").lower()
     if "주간보고서" in flat:
         return "weekly"
-    if any(k in flat for k in ("맨즈탭", "맨즈텝", "소재별", "일일성과", "result.csv")):
+    # '네이버 맨즈_18_자사몰.xlsx'처럼 '탭' 없이 오는 파일명이 있어 '맨즈'만으로도 잡는다.
+    if any(k in flat for k in ("맨즈탭", "맨즈텝", "맨즈", "소재별", "일일성과", "result.csv")):
         return "media_report"
     if "캐시사용현황" in flat or "비즈월렛" in flat or "캐시관리" in flat:
         return "kakao_cash"
@@ -4228,6 +4231,11 @@ UPLOAD_KIND_LABELS = {
     "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
     "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat)",
     "kakao_cash": "⑦ 카카오 비즈월렛 캐시 사용현황",
+}
+# 여러 개 올렸을 때 요약에 쓰는 짧은 이름
+UPLOAD_KIND_SHORT = {
+    "weekly": "주간 리포트", "ga": "GA 유입", "budget": "예산", "mix": "채널 믹스",
+    "media_report": "매체 리포트", "kakao_msg": "카카오 메시지", "kakao_cash": "카카오 캐시",
 }
 
 
@@ -4360,29 +4368,54 @@ def render_upload_panel():
     # 파일마다 종류를 자동 판단해 보여주고, 버튼 한 번으로 전부 저장한다.
     # (한 개만 올렸을 때는 예전처럼 미리보기·옵션이 있는 화면을 그대로 쓴다)
     if len(up_files) > 1:
-        st.sidebar.caption(f"파일 {len(up_files)}개 — 종류를 자동으로 판단했습니다. "
-                           "틀린 게 있으면 아래에서 바꿔주세요.")
+        _kind_opts = list(KIND_LABELS.keys())
+        # 파일이 20개가 넘으면 종류 선택 상자가 사이드바를 꽉 채워서 저장 버튼이 한참 아래로
+        # 밀린다(형이 못 찾은 그 문제). 그래서 **버튼을 맨 위**에 두고, 파일별 종류는 접어둔다.
+        _autos = []
+        for f in up_files:
+            try:
+                _autos.append(detect_upload_kind(f))
+            except Exception:
+                _autos.append("weekly")
+
+        def _cur_kind(i):
+            """사용자가 고친 값이 있으면 그걸, 없으면 자동 인식값을 쓴다."""
+            lbl = st.session_state.get(f"batch_kind_{i}")
+            if lbl:
+                for k in _kind_opts:
+                    if KIND_LABELS[k] == lbl:
+                        return k
+            return _autos[i]
+
+        _picked = [_cur_kind(i) for i in range(len(up_files))]
+
+        _counts = {}
+        for k in _picked:
+            _counts[k] = _counts.get(k, 0) + 1
+        st.sidebar.caption(
+            f"파일 {len(up_files)}개 — "
+            + " · ".join(f"{UPLOAD_KIND_SHORT.get(k, k)} {v}개" for k, v in _counts.items())
+        )
+
+        _go = st.sidebar.button(f"💾 {len(up_files)}개 전부 저장하기", type="primary",
+                                key="batch_save_all", use_container_width=True)
+
+        with st.sidebar.expander(f"📋 파일별 종류 확인 · 수정 ({len(up_files)}개)", expanded=False):
+            st.caption("자동 인식이 틀린 것만 바꾸면 됩니다.")
+            for i, f in enumerate(up_files):
+                st.selectbox(
+                    f"{i + 1}. {getattr(f, 'name', '파일')}",
+                    [KIND_LABELS[k] for k in _kind_opts],
+                    index=_kind_opts.index(_autos[i]), key=f"batch_kind_{i}",
+                )
+
         st.sidebar.caption(
             "맨즈탭처럼 **정액 계약 매체**는 회차별 파일을 몇 개 올리든 노출·클릭만 가져옵니다 — "
             "광고비는 '정액 계약 광고비' 패널 값이 그대로 유지됩니다(이중 계상 방지). "
             "파일명에 **자사몰 / 외부몰**이 들어 있어야 두 계정이 안 섞입니다."
         )
-        _kind_opts = list(KIND_LABELS.keys())
-        _picked = []
-        for i, f in enumerate(up_files):
-            try:
-                _auto = detect_upload_kind(f)
-            except Exception:
-                _auto = "weekly"
-            _sel = st.sidebar.selectbox(
-                f"{i + 1}. {getattr(f, 'name', '파일')}",
-                [KIND_LABELS[k] for k in _kind_opts],
-                index=_kind_opts.index(_auto), key=f"batch_kind_{i}",
-            )
-            _picked.append(next(k for k in _kind_opts if KIND_LABELS[k] == _sel))
 
-        if st.sidebar.button(f"💾 {len(up_files)}개 전부 저장하기", type="primary",
-                             key="batch_save_all"):
+        if _go:
             # 주간 리포트는 기준일이 늦은 파일이 나중에 저장돼야 최신 스냅샷이 남는다.
             order = sorted(
                 range(len(up_files)),
