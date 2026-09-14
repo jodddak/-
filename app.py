@@ -597,16 +597,19 @@ def inject_theme():
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
         }}
         div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
-        /* 소분류(페이지) — 그룹보다 한 단계 작게, 안쪽으로 들여쓴다.
-           들여쓰기 덕분에 어느 그룹에 속한 항목인지 눈으로 바로 따라간다. */
-        div.st-key-stco_nav .stButton > button {{
+        /* 소분류(페이지) — 그룹보다 한 단계 작게, 그룹 '글자'와 왼쪽 끝을 맞춘다.
+           그룹 글자 시작점 = 안쪽여백 11 + 아이콘 18 + 간격 8 = 37px.
+           항목은 왼쪽 막대 3px + 안쪽여백 34px = 37px 로 정확히 같은 선에 선다. */
+        div.st-key-stco_nav button {{
             background: transparent !important;
             border: none !important;
             border-left: 3px solid transparent !important;
             box-shadow: none !important;
-            text-align: left !important;
+            display: flex !important;
+            align-items: center !important;
             justify-content: flex-start !important;
-            padding: 8px 12px 8px 20px !important;
+            text-align: left !important;
+            padding: 8px 12px 8px 34px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
@@ -614,30 +617,34 @@ def inject_theme():
             color: {THEME_COLORS["body"]} !important;
             transition: background .12s ease, color .12s ease;
         }}
-        /* Streamlit이 버튼 안에 div > div > p 를 겹겹이 넣어서, 버튼에만 text-align을 주면
-           글자가 가운데로 남는다. 안쪽 컨테이너까지 전부 왼쪽으로 붙인다. */
-        div.st-key-stco_nav .stButton > button > div,
-        div.st-key-stco_nav .stButton > button div[data-testid="stMarkdownContainer"] {{
+        /* Streamlit이 버튼 안에 div를 겹겹이 넣어서 버튼에만 text-align을 주면 글자가
+           가운데에 남는다. 안쪽 컨테이너까지 전부 왼쪽으로 붙여야 실제로 왼쪽에 선다. */
+        div.st-key-stco_nav button > div,
+        div.st-key-stco_nav button > div > div,
+        div.st-key-stco_nav button div[data-testid="stMarkdownContainer"] {{
             width: 100% !important;
             text-align: left !important;
             justify-content: flex-start !important;
+            align-items: flex-start !important;
             display: block !important;
         }}
-        div.st-key-stco_nav .stButton > button p {{
+        div.st-key-stco_nav button p {{
             text-align: left !important; width: 100%; margin: 0 !important;
             font-size: 14.5px !important; line-height: 1.45 !important;
         }}
-        div.st-key-stco_nav .stButton > button[kind="primary"] {{
+        div.st-key-stco_nav button[kind="primary"],
+        div.st-key-stco_nav button[data-testid="stBaseButton-primary"] {{
             color: {THEME_COLORS["weak_fg"]} !important;
             font-weight: 700 !important;
             background: {THEME_COLORS["weak_bg"]} !important;
             border-left: 3px solid {THEME_COLORS["primary"]} !important;
         }}
-        div.st-key-stco_nav .stButton > button:hover {{
+        div.st-key-stco_nav button:hover {{
             background: {THEME_COLORS["surface"]} !important;
             color: {THEME_COLORS["foreground"]} !important;
         }}
-        div.st-key-stco_nav .stButton > button[kind="primary"]:hover {{
+        div.st-key-stco_nav button[kind="primary"]:hover,
+        div.st-key-stco_nav button[data-testid="stBaseButton-primary"]:hover {{
             background: {THEME_COLORS["weak_bg"]} !important;
             color: {THEME_COLORS["weak_fg"]} !important;
         }}
