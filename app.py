@@ -568,71 +568,64 @@ def inject_theme():
 
         hr {{ border-color: {THEME_COLORS["border"]}; }}
 
-        /* 사이드바 '메뉴' 내비게이션 전용 스타일 (네이버 광고관리자 스타일 참고):
-           그룹 헤더는 아이콘+굵은 글씨+expander 기본 화살표(펼침/접힘)만 남기고 박스/배경 제거,
-           페이지 항목은 버튼 박스가 아니라 '텍스트 링크'처럼 보이게(현재 페이지만 파란 굵은 글씨). */
-        div.st-key-stco_nav div[data-testid="stExpander"] {{
-            border: none !important;
-            box-shadow: none !important;
-            background: transparent !important;
+        /* ── 사이드바 내비게이션 ──────────────────────────────────────────
+           아코디언(expander)을 걷어냈다. 페이지 하나 가려고 그룹을 먼저 펼치는 클릭이
+           사라지고, 지금 어느 페이지에 있는지가 왼쪽 막대로 한눈에 보인다.
+           그룹명은 누를 수 없는 작은 라벨이고, 아이콘은 CSS ::before로 붙인다. */
+        .stco-navgrp {{
+            display: flex; align-items: center; gap: 7px;
+            margin: 18px 0 4px; padding: 0 4px;
+            font-size: 11.5px; font-weight: 800; letter-spacing: .04em;
+            color: {THEME_COLORS["muted"]};
         }}
-        div.st-key-stco_nav div[data-testid="stExpander"] summary {{
-            font-weight: 700 !important;
-            font-size: 15px !important;
-            color: {THEME_COLORS["foreground"]} !important;
-            padding: 8px 4px !important;
-        }}
-        /* 그룹명 왼쪽에 커스텀 아이콘(SVG, 이모지 대신) 표시 */
-        div.st-key-stco_nav div[data-testid="stExpander"] summary p::before {{
-            content: "";
-            display: inline-block;
-            width: 18px;
-            height: 18px;
-            margin-right: 6px;
-            vertical-align: -4px;
+        .stco-navgrp::before {{
+            content: ""; display: inline-block; width: 15px; height: 15px; flex: none;
             background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}");
-            background-size: contain;
-            background-repeat: no-repeat;
+            background-size: contain; background-repeat: no-repeat; background-position: center;
+            opacity: .9;
         }}
-        /* 그룹별 아이콘 지정 — render_nav()에서 그룹마다 container(key=f"navgrp_xxx")로 한 번 더
-           감싸서 붙는 고유 클래스(st-key-navgrp_xxx)로 구분한다. :nth-of-type은 Streamlit이 위젯을
-           각각 별도 element-container로 감싸는 구조라 전부 "1번째"로 잡혀서 못 쓴다.
-           GA 유입 리포트는 별도 아이콘을 안 받아서 위 기본값(NAV_GROUP_ICON_B64) 그대로 유지. */
-        div.st-key-navgrp_report div[data-testid="stExpander"] summary p::before {{
+        .stco-navgrp.g-report::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_PERFORMANCE_B64}");
         }}
-        div.st-key-navgrp_ops div[data-testid="stExpander"] summary p::before {{
+        .stco-navgrp.g-ops::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_OPERATIONS_B64}");
         }}
-        div.st-key-navgrp_guide div[data-testid="stExpander"] summary p::before {{
+        .stco-navgrp.g-guide::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
         }}
-        div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
-            color: {THEME_COLORS["primary"]} !important;
-        }}
-        div.st-key-stco_nav div[data-testid="stExpanderDetails"] {{
-            padding-left: 4px !important;
-        }}
+        div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
         div.st-key-stco_nav .stButton > button {{
             background: transparent !important;
             border: none !important;
+            border-left: 3px solid transparent !important;
             box-shadow: none !important;
             text-align: left !important;
             justify-content: flex-start !important;
-            padding: 6px 14px !important;
-            border-radius: 8px !important;
-            font-weight: 400 !important;
-            font-size: 14px !important;
+            padding: 7px 10px !important;
+            min-height: 0 !important;
+            border-radius: 0 8px 8px 0 !important;
+            font-weight: 500 !important;
+            font-size: 13.5px !important;
             color: {THEME_COLORS["body"]} !important;
+            transition: background .12s ease, color .12s ease;
+        }}
+        div.st-key-stco_nav .stButton > button p {{
+            text-align: left !important; width: 100%; margin: 0 !important;
+            font-size: 13.5px !important;
         }}
         div.st-key-stco_nav .stButton > button[kind="primary"] {{
-            color: {THEME_COLORS["primary"]} !important;
+            color: {THEME_COLORS["weak_fg"]} !important;
             font-weight: 700 !important;
-            background: transparent !important;
+            background: {THEME_COLORS["weak_bg"]} !important;
+            border-left: 3px solid {THEME_COLORS["primary"]} !important;
         }}
         div.st-key-stco_nav .stButton > button:hover {{
             background: {THEME_COLORS["surface"]} !important;
-            color: {THEME_COLORS["primary"]} !important;
+            color: {THEME_COLORS["foreground"]} !important;
+        }}
+        div.st-key-stco_nav .stButton > button[kind="primary"]:hover {{
+            background: {THEME_COLORS["weak_bg"]} !important;
+            color: {THEME_COLORS["weak_fg"]} !important;
         }}
         </style>
         """,
@@ -5225,7 +5218,7 @@ def render_nav() -> str:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = default_page
     # key="stco_nav"로 감싸면 Streamlit이 이 블록에 "st-key-stco_nav" 클래스를 붙여주는데,
-    # inject_theme()의 CSS가 그 클래스 안의 expander/button만 골라 '텍스트 링크' 스타일로 바꾼다
+    # inject_theme()의 CSS가 그 클래스 안의 버튼만 골라 메뉴 항목 스타일로 바꾼다
     # (사이드바 위쪽의 업로드/저장 버튼 등 다른 버튼들은 기존 스타일 그대로 유지됨).
     # container(key=...)는 비교적 최신 Streamlit에서만 지원하므로, 혹시 배포 환경 버전이 낮아
     # TypeError가 나더라도 내비게이션 자체는 동작하도록 안전하게 폴백한다(이 경우 스타일만 예전
@@ -5235,29 +5228,24 @@ def render_nav() -> str:
     except TypeError:
         nav_box = st.sidebar.container()
     with nav_box:
+        # 예전엔 그룹마다 expander(아코디언)였다. 페이지 하나를 가려면 그룹을 먼저 펼쳐야 해서
+        # 클릭이 한 번 더 들었고, 지금 어디 있는지도 한눈에 안 보였다.
+        # 이제 전부 펼쳐두고, 그룹명은 '누를 수 없는 작은 라벨'로만 둔다.
+        # 현재 페이지는 왼쪽 막대 + 옅은 파란 배경으로 표시한다(inject_theme의 CSS).
         for group, pages in NAV_GROUPS.items():
-            # 아이콘은 텍스트가 아니라 CSS(summary p::before)로 붙인다 — NAV_GROUP_ICON_B64 참고.
-            # 그룹이 여러 개가 되면 전부 펼쳐두면 사이드바가 너무 길어지니, 현재 선택된 페이지가
-            # 속한 그룹만 자동으로 펼치고 나머지는 접어둔다.
-            is_active_group = st.session_state["nav_page"] in pages
-            # 그룹별로 다른 아이콘을 쓰려면 CSS에서 그룹을 구분할 수 있어야 하는데, Streamlit은
-            # 위젯마다 개별 element-container로 감싸버려서 :nth-of-type으로는 구분이 안 된다
-            # (모든 expander가 "자기 부모 안에서는 1번째"라 전부 같은 규칙에 걸림). 그래서 그룹마다
-            # container(key=...)로 한 번 더 감싸 고유 CSS 클래스(st-key-{key})를 붙여준다.
-            group_key = NAV_GROUP_KEYS.get(group)
-            try:
-                group_box = st.container(key=f"navgrp_{group_key}") if group_key else st.container()
-            except TypeError:
-                group_box = st.container()
-            with group_box, st.expander(group, expanded=is_active_group):
-                for p in pages:
-                    is_current = st.session_state["nav_page"] == p
-                    if st.button(
-                        p, key=f"nav_{p}", use_container_width=True,
-                        type="primary" if is_current else "secondary",
-                    ):
-                        st.session_state["nav_page"] = p
-                        st.rerun()
+            gkey = NAV_GROUP_KEYS.get(group) or "default"
+            st.markdown(
+                f'<div class="stco-navgrp g-{gkey}">{group}</div>',
+                unsafe_allow_html=True,
+            )
+            for p in pages:
+                is_current = st.session_state["nav_page"] == p
+                if st.button(
+                    p, key=f"nav_{p}", use_container_width=True,
+                    type="primary" if is_current else "secondary",
+                ):
+                    st.session_state["nav_page"] = p
+                    st.rerun()
     return st.session_state["nav_page"]
 
 
@@ -6992,22 +6980,46 @@ FUNNEL_V4_CSS = """
 .fv4-mixpanel-wide .fv4-mix-track i{display:block;height:100%;background:#8B7BE8;border-radius:4px}
 .fv4-mixpanel-wide .fv4-mix-list{margin-top:16px}
 .cp-rec-det{color:#3F5210;font-size:14.5px}
+/* 판정 칩 — 알약 모양에 점을 찍어, 색만으로 구분하지 않아도 읽히게 했다 */
 .fv4-chip {
-  display:inline-block; font-size:13px; font-weight:700; padding:3px 9px; border-radius:5px; margin-bottom:9px;
+  display:inline-flex; align-items:center; gap:5px;
+  font-size:12.5px; font-weight:700; padding:4px 10px; border-radius:999px; margin-bottom:9px;
+  white-space:nowrap;
 }
-.fv4-chip.bad  { background:#fadadd; color:#a3172b; }
-.fv4-chip.good { background:#d9f5cf; color:#1f6b2c; }
-.fv4-chip.warn { background:#f7edc4; color:#7a5c14; }
-.fv4-chip.hold { background:#ececdf; color:#6d6d5d; }
+.fv4-chip::before { content:""; width:5px; height:5px; border-radius:50%; background:currentColor; flex:none; }
+.fv4-chip.bad  { background:#FDE7E9; color:#C0273A; }
+.fv4-chip.good { background:#E4F6DC; color:#2C7A3C; }
+.fv4-chip.warn { background:#FBF0CE; color:#8A6714; }
+.fv4-chip.hold { background:#EFEEE8; color:#767668; }
 .fv4-signal-title { color:#fdfdf7; font-size:14px; font-weight:700; margin-bottom:5px; }
 .fv4-signal-sub { color:#96968a; font-size:13.5px; line-height:1.5; }
 
-.fv4-kpis { display:flex; border:1px solid #e6e4da; border-radius:12px; overflow:hidden; background:#fffef9; margin-bottom:26px; flex-wrap:wrap; }
-.fv4-kpi { flex:1 1 170px; padding:17px 20px; border-right:1px solid #eceadf; }
-.fv4-kpi:last-child { border-right:none; }
+/* ── KPI 카드 ──────────────────────────────────────────────────────────
+   한 덩어리 띠에서 '카드 여러 장'으로 바꿨다. 카드마다 위쪽에 색 띠를 두고,
+   첫 카드(총 방문자)는 통짜 파랑으로 채워 시선이 먼저 가게 한다. */
+.fv4-kpis { display:flex; gap:11px; margin-bottom:26px; flex-wrap:wrap;
+            border:none; background:none; border-radius:0; overflow:visible; }
+.fv4-kpi { flex:1 1 168px; padding:18px 20px 17px; position:relative; overflow:hidden;
+           border:1px solid #E8E6DC; border-radius:14px; background:#fff; }
+.fv4-kpi::after { content:""; position:absolute; left:0; top:0; width:100%; height:3px;
+                  background:#3D5AFE; }
+.fv4-kpi:nth-child(3n+2)::after { background:#7C4DFF; }
+.fv4-kpi:nth-child(3n)::after   { background:#63C132; }
+.fv4-kpi:last-child { border-right:1px solid #E8E6DC; }
 .fv4-kpi-label { color:#8a8a7c; font-size:13.5px; margin-bottom:9px; }
 .fv4-kpi-value { color:#17170f; font-size:26px; font-weight:800; letter-spacing:-.02em; display:flex; align-items:baseline; gap:8px; }
 .fv4-kpi-value.money { font-size:21px; letter-spacing:-.03em; flex-wrap:wrap; gap:6px; }
+/* 첫 카드 = 통짜 파랑. 안쪽 글자색을 전부 뒤집는다(증감 색도 포함). */
+.fv4-kpi:first-child { background:#3D5AFE; border-color:#3D5AFE; }
+.fv4-kpi:first-child::after { background:rgba(255,255,255,.45); }
+.fv4-kpi:first-child .fv4-kpi-label { color:rgba(255,255,255,.78); }
+.fv4-kpi:first-child .fv4-kpi-value { color:#fff; }
+.fv4-kpi:first-child .fv4-kpi-sub   { color:rgba(255,255,255,.72); }
+.fv4-kpi:first-child .fv4-kpi-delta,
+.fv4-kpi:first-child .fv4-up,
+.fv4-kpi:first-child .fv4-down { color:#fff !important;
+  background:rgba(255,255,255,.18); padding:2px 7px; border-radius:999px; }
+.fv4-kpi:first-child .fv4-stack { background:rgba(255,255,255,.25); }
 .fv4-chg-note { margin-top:10px; padding-top:9px; border-top:1px dashed #DEDCCF;
                 color:#8a8a7c; font-size:14px; line-height:1.6; }
 .fv4-chg-p   { color:#8a8a7c; font-weight:500; }
@@ -7051,14 +7063,23 @@ FUNNEL_V4_CSS = """
 .fv4-conv { flex:0 0 62px; display:flex; align-items:center; justify-content:center; color:#a3a396; font-size:13.5px; font-weight:600; }
 .fv4-conv.low { color:#c0392b; }
 
-.fv4-tbl { width:100%; border-collapse:collapse; font-size:14px; margin-top:18px; }
-.fv4-tbl th { color:#8a8a7c; font-weight:600; font-size:13.5px; text-align:right; padding:10px 12px;
-  border-bottom:1px solid #e6e4da; background:#f7f6ef; white-space:nowrap; }
+/* ── 표 ────────────────────────────────────────────────────────────────
+   가로 줄을 얇게 깔아 숫자 열이 눈에 먼저 들어오게 했다. 머리글은 스크롤해도
+   위에 붙어 있어서(sticky) 아래로 내려가도 어느 열인지 안 잃어버린다.
+   숫자는 표 폭이 흔들리지 않게 고정폭(tabular-nums)으로 그린다. */
+.fv4-tbl { width:100%; border-collapse:separate; border-spacing:0; font-size:14px; margin-top:18px; }
+.fv4-tbl th { color:#8a8a7c; font-weight:700; font-size:12.5px; letter-spacing:.01em;
+  text-align:right; padding:11px 12px; background:#F7F6EF; white-space:nowrap;
+  border-bottom:1px solid #E3E1DC; position:sticky; top:0; z-index:2; }
+.fv4-tbl th:first-child { border-radius:8px 0 0 0; }
+.fv4-tbl th:last-child  { border-radius:0 8px 0 0; }
 .fv4-tbl th:first-child, .fv4-tbl th:nth-child(2) { text-align:left; }
-.fv4-tbl td { color:#26261c; text-align:right; padding:13px 12px; border-bottom:1px solid #efeee4; white-space:nowrap; }
+.fv4-tbl td { color:#26261c; text-align:right; padding:12px; white-space:nowrap;
+  border-bottom:1px solid #F0EFE7; font-variant-numeric:tabular-nums; }
 .fv4-tbl td:first-child { text-align:left; font-weight:700; }
 .fv4-tbl td:nth-child(2) { text-align:left; }
-.fv4-tbl tr:hover td { background:#faf9f2; }
+.fv4-tbl tr:hover td { background:#FAF9F2; }
+.fv4-tbl tr:hover td:first-child { box-shadow:inset 3px 0 0 #3D5AFE; }
 .fv4-mix-bar { width:120px; height:6px; border-radius:3px; background:#e6e4da; position:relative; overflow:hidden; }
 .fv4-mix-bar b { position:absolute; left:0; top:0; height:100%; display:block; border-radius:3px; }
 .fv4-mix-plan { background:#17170f; }
@@ -9773,21 +9794,35 @@ CP_CSS = """
 .cp-title{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 14px}
 /* 칸 개수가 화면마다 달라서 grid를 고정 칸수로 잡으면 빈 칸이 생기고 칸막이가 끊긴다.
    flex로 두고 칸막이를 왼쪽 테두리로 그리면 몇 개든 알아서 맞는다. */
-.cp-kpis{display:flex;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;
-  overflow:hidden;margin-bottom:14px}
-.cp-kpi{flex:1 1 0;min-width:0;padding:14px 16px;border-left:1px solid #E3E1DC}
-.cp-kpi:first-child{border-left:none}
+/* 채널 성과 KPI — 퍼널 화면과 같은 카드 규칙(흰 카드 + 위쪽 색 띠, 첫 장은 통짜 파랑) */
+.cp-kpis{display:flex;gap:11px;flex-wrap:wrap;margin-bottom:14px;
+  background:none;border:none;border-radius:0;overflow:visible}
+.cp-kpi{flex:1 1 160px;min-width:0;padding:16px 18px;position:relative;overflow:hidden;
+  border:1px solid #E3E1DC;border-radius:14px;background:#FFF}
+.cp-kpi::after{content:"";position:absolute;left:0;top:0;width:100%;height:3px;background:#3D5AFE}
+.cp-kpi:nth-child(3n+2)::after{background:#7C4DFF}
+.cp-kpi:nth-child(3n)::after{background:#63C132}
+.cp-kpi:first-child{background:#3D5AFE;border-color:#3D5AFE}
+.cp-kpi:first-child::after{background:rgba(255,255,255,.45)}
+.cp-kpi:first-child .k{color:rgba(255,255,255,.78)}
+.cp-kpi:first-child .v{color:#FFF}
+.cp-kpi:first-child .s{color:rgba(255,255,255,.72)}
 .cp-kpi .k{font-size:14px;color:#6E747C;font-weight:600;margin-bottom:6px}
 .cp-kpi .v{font-size:22px;font-weight:800;letter-spacing:-.02em}
 .cp-kpi .s{font-size:13.5px;color:#7A8088;margin-top:5px}
-.cp-tbl{width:100%;border-collapse:collapse;background:#FFF;border:1px solid #E3E1DC;border-radius:10px;overflow:hidden;font-size:14.5px}
-.cp-tbl th{background:#F4F2ED;color:#5E646C;font-size:14px;font-weight:700;text-align:right;padding:11px 12px;border-bottom:1px solid #E3E1DC;white-space:nowrap}
+.cp-tbl{width:100%;border-collapse:separate;border-spacing:0;background:#FFF;
+  border:1px solid #E3E1DC;border-radius:12px;overflow:hidden;font-size:14.5px}
+.cp-tbl th{background:#F4F2ED;color:#5E646C;font-size:12.5px;font-weight:700;letter-spacing:.01em;
+  text-align:right;padding:12px;border-bottom:1px solid #E3E1DC;white-space:nowrap;
+  position:sticky;top:0;z-index:2}
 .cp-tbl th.l,.cp-tbl td.l{text-align:left}
 .cp-ar{margin-left:6px;color:#B9BEC5;font-size:13px}
 .cp-tbl th:hover{background:#EDEAE3}
-.cp-tbl td{padding:11px 12px;text-align:right;border-bottom:1px solid #F0EEE9;white-space:nowrap}
+.cp-tbl td{padding:12px;text-align:right;border-bottom:1px solid #F3F1EC;white-space:nowrap;
+  font-variant-numeric:tabular-nums}
 .cp-tbl tr:last-child td{border-bottom:none}
 .cp-tbl tr:hover td{background:#FAFAF8}
+.cp-tbl tr:hover td:first-child{box-shadow:inset 3px 0 0 #3D5AFE}
 .cp-tbl td.m{font-weight:700;color:#14181F}
 .cp-tbl td.sub{font-size:13.5px;color:#7A8088;font-weight:400}
 .cp-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:13px;font-weight:700}
