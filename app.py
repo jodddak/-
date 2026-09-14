@@ -581,11 +581,20 @@ def inject_theme():
             border: none !important;
             background: transparent !important;
         }}
-        /* 대분류 머리는 검정 띠 + 흰 글씨 — 소분류(흰 바탕)와 확실히 갈라진다. */
+        /* 대분류 머리는 검정 띠 + 흰 글씨 — 소분류(흰 바탕)와 확실히 갈라진다.
+           ★ 정렬의 핵심: Streamlit 기본 화살표가 글자 '앞'에 붙어서, 그룹 글자만
+             오른쪽으로 밀려 하위 항목과 세로선이 안 맞았다(폭도 버전마다 달라 계산 불가).
+             그래서 기본 화살표를 숨기고 오른쪽에 직접 그린다. 그러면 그룹 글자가
+             '안쪽여백 11 + 아이콘 18 + 간격 7 = 36px'에서 정확히 시작하고,
+             하위 항목(막대 3 + 여백 33 = 36px)과 딱 맞는다. */
         div.st-key-stco_nav div[data-testid="stExpander"] summary {{
             background: {THEME_COLORS["foreground"]} !important;
             border-radius: 9px !important;
             padding: 10px 11px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            gap: 8px;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
             background: #2B323C !important;
@@ -597,11 +606,30 @@ def inject_theme():
             letter-spacing: -.01em;
             color: #FFFFFF !important;
             margin: 0 !important;
+            padding: 0 !important;
         }}
-        /* 펼침/접힘 화살표도 흰색으로 (검정 띠 위라 안 그러면 안 보인다) */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary
+            div[data-testid="stMarkdownContainer"] {{
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+        /* 기본 화살표(svg) 숨기고 */
         div.st-key-stco_nav div[data-testid="stExpander"] summary svg {{
-            fill: #FFFFFF !important;
-            color: #FFFFFF !important;
+            display: none !important;
+        }}
+        /* 오른쪽에 흰색 꺾쇠를 직접 그린다 (펼치면 뒤집힌다) */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary::after {{
+            content: "";
+            flex: none;
+            width: 7px; height: 7px;
+            margin-right: 3px;
+            border-right: 2px solid #FFFFFF;
+            border-bottom: 2px solid #FFFFFF;
+            transform: rotate(45deg) translate(-2px, -2px);
+            transition: transform .15s ease;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] details[open] > summary::after {{
+            transform: rotate(-135deg) translate(-2px, -2px);
         }}
         /* 그룹명 왼쪽 아이콘 (이모지 대신 SVG) */
         div.st-key-stco_nav div[data-testid="stExpander"] summary p::before {{
@@ -647,7 +675,7 @@ def inject_theme():
             align-items: center !important;
             justify-content: flex-start !important;
             text-align: left !important;
-            padding: 9px 12px 9px 13px !important;
+            padding: 9px 12px 9px 33px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
