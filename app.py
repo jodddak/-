@@ -569,38 +569,68 @@ def inject_theme():
         hr {{ border-color: {THEME_COLORS["border"]}; }}
 
         /* ── 사이드바 내비게이션 ──────────────────────────────────────────
-           아코디언(expander)을 걷어냈다. 페이지 하나 가려고 그룹을 먼저 펼치는 클릭이
-           사라지고, 지금 어느 페이지에 있는지가 왼쪽 막대로 한눈에 보인다.
-           그룹명은 누를 수 없는 작은 라벨이고, 아이콘은 CSS ::before로 붙인다. */
-        /* 대분류(그룹) — 회색 띠에 얹어 소분류와 확실히 갈라놓는다.
-           예전엔 그룹 글자가 페이지 이름보다 오히려 작고 배경도 같아서 위아래 구분이 안 됐다. */
-        .stco-navgrp {{
-            display: flex; align-items: center; gap: 8px;
-            margin: 22px 0 8px; padding: 9px 11px;
-            font-size: 15px; font-weight: 800; letter-spacing: -.01em;
-            color: #FFFFFF;
-            background: {THEME_COLORS["foreground"]};
-            border-radius: 9px;
+           그룹은 접이식(expander)이다. 지금 보는 페이지가 속한 그룹만 펼쳐진다.
+           대분류는 회색 띠 + 굵은 글씨, 소분류는 안쪽으로 들여써서 위아래를 갈라놓는다. */
+        div.st-key-stco_nav div[data-testid="stExpander"] {{
+            border: none !important;
+            box-shadow: none !important;
+            background: transparent !important;
+            margin-bottom: 4px !important;
         }}
-        .stco-navgrp::before {{
-            content: ""; display: inline-block; width: 18px; height: 18px; flex: none;
+        div.st-key-stco_nav div[data-testid="stExpander"] details {{
+            border: none !important;
+            background: transparent !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary {{
+            background: {THEME_COLORS["surface"]} !important;
+            border-radius: 9px !important;
+            padding: 10px 11px !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
+            background: #E5E8EB !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary p {{
+            font-size: 15px !important;
+            font-weight: 800 !important;
+            letter-spacing: -.01em;
+            color: {THEME_COLORS["foreground"]} !important;
+            margin: 0 !important;
+        }}
+        /* 펼침/접힘 화살표 색 */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary svg {{
+            fill: {THEME_COLORS["body"]} !important;
+            color: {THEME_COLORS["body"]} !important;
+        }}
+        /* 그룹명 왼쪽 아이콘 (이모지 대신 SVG) */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary p::before {{
+            content: "";
+            display: inline-block;
+            width: 18px; height: 18px;
+            margin-right: 7px;
+            vertical-align: -4px;
             background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}");
-            background-size: contain; background-repeat: no-repeat; background-position: center;
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
         }}
-        .stco-navgrp.g-report::before {{
+        div.st-key-navgrp_report div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_PERFORMANCE_B64}");
         }}
-        .stco-navgrp.g-ops::before {{
+        div.st-key-navgrp_ops div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_OPERATIONS_B64}");
         }}
-        .stco-navgrp.g-guide::before {{
+        div.st-key-navgrp_guide div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
+        }}
+        div.st-key-stco_nav div[data-testid="stExpanderDetails"] {{
+            padding: 5px 0 2px 0 !important;
         }}
         div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
         /* 소분류(페이지) — 그룹보다 한 단계 작게, 그룹 '글자'와 왼쪽 끝을 맞춘다.
-           그룹 글자 시작점 = 안쪽여백 11 + 아이콘 18 + 간격 8 = 37px.
-           항목은 왼쪽 막대 3px + 안쪽여백 34px = 37px 로 정확히 같은 선에 선다. */
-        div.st-key-stco_nav button {{
+           그룹 글자 시작점 = 안쪽여백 11 + 아이콘 18 + 간격 7 = 36px.
+           항목은 왼쪽 막대 3px + 안쪽여백 33px = 36px 로 같은 선에 선다.
+           (expander 화살표 버튼까지 잡히지 않게 .stButton 안쪽만 고른다) */
+        div.st-key-stco_nav .stButton button {{
             background: transparent !important;
             border: none !important;
             border-left: 3px solid transparent !important;
@@ -609,7 +639,7 @@ def inject_theme():
             align-items: center !important;
             justify-content: flex-start !important;
             text-align: left !important;
-            padding: 8px 12px 8px 34px !important;
+            padding: 8px 12px 8px 33px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
@@ -619,30 +649,29 @@ def inject_theme():
         }}
         /* Streamlit이 버튼 안에 div를 겹겹이 넣어서 버튼에만 text-align을 주면 글자가
            가운데에 남는다. 안쪽 컨테이너까지 전부 왼쪽으로 붙여야 실제로 왼쪽에 선다. */
-        div.st-key-stco_nav button > div,
-        div.st-key-stco_nav button > div > div,
-        div.st-key-stco_nav button div[data-testid="stMarkdownContainer"] {{
+        div.st-key-stco_nav .stButton button > div,
+        div.st-key-stco_nav .stButton button > div > div,
+        div.st-key-stco_nav .stButton button div[data-testid="stMarkdownContainer"] {{
             width: 100% !important;
             text-align: left !important;
             justify-content: flex-start !important;
             align-items: flex-start !important;
             display: block !important;
         }}
-        div.st-key-stco_nav button p {{
+        div.st-key-stco_nav .stButton button p {{
             text-align: left !important; width: 100%; margin: 0 !important;
             font-size: 14.5px !important; line-height: 1.45 !important;
         }}
         /* 안 고른 항목은 배경 없이 완전히 비워둔다 — Streamlit 기본 버튼 배경이 옅게
            남아 있으면 고른 항목과 구분이 흐려진다. */
-        div.st-key-stco_nav button[kind="secondary"],
-        div.st-key-stco_nav button[data-testid="stBaseButton-secondary"] {{
+        div.st-key-stco_nav .stButton button[kind="secondary"],
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-secondary"] {{
             background: transparent !important;
             background-color: transparent !important;
         }}
-        /* 지금 보고 있는 페이지 — 옅은 파랑이 아니라 통짜 파랑 + 흰 글씨.
-           멀리서 봐도 어느 페이지인지 바로 보인다. */
-        div.st-key-stco_nav button[kind="primary"],
-        div.st-key-stco_nav button[data-testid="stBaseButton-primary"] {{
+        /* 지금 보고 있는 페이지 — 통짜 파랑 + 흰 글씨. 멀리서 봐도 바로 보인다. */
+        div.st-key-stco_nav .stButton button[kind="primary"],
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"] {{
             color: #FFFFFF !important;
             font-weight: 700 !important;
             background: {THEME_COLORS["primary"]} !important;
@@ -650,17 +679,17 @@ def inject_theme():
             border-left: 3px solid {THEME_COLORS["weak_fg"]} !important;
             border-radius: 0 9px 9px 0 !important;
         }}
-        div.st-key-stco_nav button[kind="primary"] p,
-        div.st-key-stco_nav button[data-testid="stBaseButton-primary"] p {{
+        div.st-key-stco_nav .stButton button[kind="primary"] p,
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"] p {{
             color: #FFFFFF !important;
         }}
-        div.st-key-stco_nav button:hover {{
+        div.st-key-stco_nav .stButton button:hover {{
             background: {THEME_COLORS["surface"]} !important;
             background-color: {THEME_COLORS["surface"]} !important;
             color: {THEME_COLORS["foreground"]} !important;
         }}
-        div.st-key-stco_nav button[kind="primary"]:hover,
-        div.st-key-stco_nav button[data-testid="stBaseButton-primary"]:hover {{
+        div.st-key-stco_nav .stButton button[kind="primary"]:hover,
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"]:hover {{
             background: {THEME_COLORS["primary_hover"]} !important;
             background-color: {THEME_COLORS["primary_hover"]} !important;
             color: #FFFFFF !important;
@@ -5502,24 +5531,28 @@ def render_nav() -> str:
     except TypeError:
         nav_box = st.sidebar.container()
     with nav_box:
-        # 예전엔 그룹마다 expander(아코디언)였다. 페이지 하나를 가려면 그룹을 먼저 펼쳐야 해서
-        # 클릭이 한 번 더 들었고, 지금 어디 있는지도 한눈에 안 보였다.
-        # 이제 전부 펼쳐두고, 그룹명은 '누를 수 없는 작은 라벨'로만 둔다.
-        # 현재 페이지는 왼쪽 막대 + 옅은 파란 배경으로 표시한다(inject_theme의 CSS).
+        # 그룹은 접이식(expander)이다. 지금 보고 있는 페이지가 속한 그룹만 펼쳐두고
+        # 나머지는 접어서, 사이드바가 길어지지 않게 한다.
+        # 현재 페이지는 왼쪽 파란 막대 + 파란 배경으로 표시한다(inject_theme의 CSS).
         for group, pages in NAV_GROUPS.items():
-            gkey = NAV_GROUP_KEYS.get(group) or "default"
-            st.markdown(
-                f'<div class="stco-navgrp g-{gkey}">{group}</div>',
-                unsafe_allow_html=True,
-            )
-            for p in pages:
-                is_current = st.session_state["nav_page"] == p
-                if st.button(
-                    p, key=f"nav_{p}", use_container_width=True,
-                    type="primary" if is_current else "secondary",
-                ):
-                    st.session_state["nav_page"] = p
-                    st.rerun()
+            is_active_group = st.session_state["nav_page"] in pages
+            # 그룹마다 다른 아이콘을 쓰려면 CSS가 그룹을 구분할 수 있어야 하는데, Streamlit은
+            # 위젯마다 별도 컨테이너로 감싸서 :nth-of-type으로는 구분이 안 된다.
+            # 그래서 container(key=...)로 한 번 더 감싸 고유 클래스(st-key-navgrp_xxx)를 붙인다.
+            group_key = NAV_GROUP_KEYS.get(group)
+            try:
+                group_box = st.container(key=f"navgrp_{group_key}") if group_key else st.container()
+            except TypeError:
+                group_box = st.container()
+            with group_box, st.expander(group, expanded=is_active_group):
+                for p in pages:
+                    is_current = st.session_state["nav_page"] == p
+                    if st.button(
+                        p, key=f"nav_{p}", use_container_width=True,
+                        type="primary" if is_current else "secondary",
+                    ):
+                        st.session_state["nav_page"] = p
+                        st.rerun()
     return st.session_state["nav_page"]
 
 
@@ -7959,11 +7992,11 @@ AD_SPEND_SOURCE_LABEL = {
     "criteo_api": "크리테오 API",
     "naver_gfa_api": "GFA API",
     "contract": "정액 계약(일할)",
-    "manual": "직접 입력(실집행)",
+    "manual": "직접 입력",
     "agency_weekly": "대행사 주간(일할)",
-    "budget_prorate": "예산 일할",
-    "kakao_msg": "카카오 메시지(발송·클릭)",
-    "kakao_cash": "카카오 캐시 사용액",
+    "budget_prorate": "예산 일할(추정)",
+    "kakao_msg": "카카오 메시지",
+    "kakao_cash": "카카오 비즈월렛",
     "mixed": "출처 혼합(날짜별 최선값)",
 }
 # '신규 매체'는 시기별로 실제 매체가 달랐다(사용자 확인):
