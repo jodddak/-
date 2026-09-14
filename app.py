@@ -573,13 +573,13 @@ def inject_theme():
            사라지고, 지금 어느 페이지에 있는지가 왼쪽 막대로 한눈에 보인다.
            그룹명은 누를 수 없는 작은 라벨이고, 아이콘은 CSS ::before로 붙인다. */
         .stco-navgrp {{
-            display: flex; align-items: center; gap: 7px;
-            margin: 18px 0 4px; padding: 0 4px;
-            font-size: 11.5px; font-weight: 800; letter-spacing: .04em;
+            display: flex; align-items: center; gap: 8px;
+            margin: 22px 0 6px; padding: 0 4px;
+            font-size: 13.5px; font-weight: 800; letter-spacing: .01em;
             color: {THEME_COLORS["muted"]};
         }}
         .stco-navgrp::before {{
-            content: ""; display: inline-block; width: 15px; height: 15px; flex: none;
+            content: ""; display: inline-block; width: 17px; height: 17px; flex: none;
             background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}");
             background-size: contain; background-repeat: no-repeat; background-position: center;
             opacity: .9;
@@ -593,7 +593,7 @@ def inject_theme():
         .stco-navgrp.g-guide::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
         }}
-        div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
+        div.st-key-stco_nav .stButton {{ margin-bottom: 2px; }}
         div.st-key-stco_nav .stButton > button {{
             background: transparent !important;
             border: none !important;
@@ -601,17 +601,26 @@ def inject_theme():
             box-shadow: none !important;
             text-align: left !important;
             justify-content: flex-start !important;
-            padding: 7px 10px !important;
+            padding: 9px 12px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
-            font-size: 13.5px !important;
+            font-size: 15px !important;
             color: {THEME_COLORS["body"]} !important;
             transition: background .12s ease, color .12s ease;
         }}
+        /* Streamlit이 버튼 안에 div > div > p 를 겹겹이 넣어서, 버튼에만 text-align을 주면
+           글자가 가운데로 남는다. 안쪽 컨테이너까지 전부 왼쪽으로 붙인다. */
+        div.st-key-stco_nav .stButton > button > div,
+        div.st-key-stco_nav .stButton > button div[data-testid="stMarkdownContainer"] {{
+            width: 100% !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            display: block !important;
+        }}
         div.st-key-stco_nav .stButton > button p {{
             text-align: left !important; width: 100%; margin: 0 !important;
-            font-size: 13.5px !important;
+            font-size: 15px !important; line-height: 1.45 !important;
         }}
         div.st-key-stco_nav .stButton > button[kind="primary"] {{
             color: {THEME_COLORS["weak_fg"]} !important;
