@@ -572,17 +572,20 @@ def inject_theme():
            아코디언(expander)을 걷어냈다. 페이지 하나 가려고 그룹을 먼저 펼치는 클릭이
            사라지고, 지금 어느 페이지에 있는지가 왼쪽 막대로 한눈에 보인다.
            그룹명은 누를 수 없는 작은 라벨이고, 아이콘은 CSS ::before로 붙인다. */
+        /* 대분류(그룹) — 회색 띠에 얹어 소분류와 확실히 갈라놓는다.
+           예전엔 그룹 글자가 페이지 이름보다 오히려 작고 배경도 같아서 위아래 구분이 안 됐다. */
         .stco-navgrp {{
             display: flex; align-items: center; gap: 8px;
-            margin: 22px 0 6px; padding: 0 4px;
-            font-size: 13.5px; font-weight: 800; letter-spacing: .01em;
-            color: {THEME_COLORS["muted"]};
+            margin: 22px 0 8px; padding: 9px 11px;
+            font-size: 15px; font-weight: 800; letter-spacing: -.01em;
+            color: {THEME_COLORS["foreground"]};
+            background: {THEME_COLORS["surface"]};
+            border-radius: 9px;
         }}
         .stco-navgrp::before {{
-            content: ""; display: inline-block; width: 17px; height: 17px; flex: none;
+            content: ""; display: inline-block; width: 18px; height: 18px; flex: none;
             background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}");
             background-size: contain; background-repeat: no-repeat; background-position: center;
-            opacity: .9;
         }}
         .stco-navgrp.g-report::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_PERFORMANCE_B64}");
@@ -593,7 +596,9 @@ def inject_theme():
         .stco-navgrp.g-guide::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
         }}
-        div.st-key-stco_nav .stButton {{ margin-bottom: 2px; }}
+        div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
+        /* 소분류(페이지) — 그룹보다 한 단계 작게, 안쪽으로 들여쓴다.
+           들여쓰기 덕분에 어느 그룹에 속한 항목인지 눈으로 바로 따라간다. */
         div.st-key-stco_nav .stButton > button {{
             background: transparent !important;
             border: none !important;
@@ -601,11 +606,11 @@ def inject_theme():
             box-shadow: none !important;
             text-align: left !important;
             justify-content: flex-start !important;
-            padding: 9px 12px !important;
+            padding: 8px 12px 8px 20px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
-            font-size: 15px !important;
+            font-size: 14.5px !important;
             color: {THEME_COLORS["body"]} !important;
             transition: background .12s ease, color .12s ease;
         }}
@@ -620,7 +625,7 @@ def inject_theme():
         }}
         div.st-key-stco_nav .stButton > button p {{
             text-align: left !important; width: 100%; margin: 0 !important;
-            font-size: 15px !important; line-height: 1.45 !important;
+            font-size: 14.5px !important; line-height: 1.45 !important;
         }}
         div.st-key-stco_nav .stButton > button[kind="primary"] {{
             color: {THEME_COLORS["weak_fg"]} !important;
