@@ -578,8 +578,8 @@ def inject_theme():
             display: flex; align-items: center; gap: 8px;
             margin: 22px 0 8px; padding: 9px 11px;
             font-size: 15px; font-weight: 800; letter-spacing: -.01em;
-            color: {THEME_COLORS["foreground"]};
-            background: {THEME_COLORS["surface"]};
+            color: #FFFFFF;
+            background: {THEME_COLORS["foreground"]};
             border-radius: 9px;
         }}
         .stco-navgrp::before {{
@@ -632,21 +632,38 @@ def inject_theme():
             text-align: left !important; width: 100%; margin: 0 !important;
             font-size: 14.5px !important; line-height: 1.45 !important;
         }}
+        /* 안 고른 항목은 배경 없이 완전히 비워둔다 — Streamlit 기본 버튼 배경이 옅게
+           남아 있으면 고른 항목과 구분이 흐려진다. */
+        div.st-key-stco_nav button[kind="secondary"],
+        div.st-key-stco_nav button[data-testid="stBaseButton-secondary"] {{
+            background: transparent !important;
+            background-color: transparent !important;
+        }}
+        /* 지금 보고 있는 페이지 — 옅은 파랑이 아니라 통짜 파랑 + 흰 글씨.
+           멀리서 봐도 어느 페이지인지 바로 보인다. */
         div.st-key-stco_nav button[kind="primary"],
         div.st-key-stco_nav button[data-testid="stBaseButton-primary"] {{
-            color: {THEME_COLORS["weak_fg"]} !important;
+            color: #FFFFFF !important;
             font-weight: 700 !important;
-            background: {THEME_COLORS["weak_bg"]} !important;
-            border-left: 3px solid {THEME_COLORS["primary"]} !important;
+            background: {THEME_COLORS["primary"]} !important;
+            background-color: {THEME_COLORS["primary"]} !important;
+            border-left: 3px solid {THEME_COLORS["weak_fg"]} !important;
+            border-radius: 0 9px 9px 0 !important;
+        }}
+        div.st-key-stco_nav button[kind="primary"] p,
+        div.st-key-stco_nav button[data-testid="stBaseButton-primary"] p {{
+            color: #FFFFFF !important;
         }}
         div.st-key-stco_nav button:hover {{
             background: {THEME_COLORS["surface"]} !important;
+            background-color: {THEME_COLORS["surface"]} !important;
             color: {THEME_COLORS["foreground"]} !important;
         }}
         div.st-key-stco_nav button[kind="primary"]:hover,
         div.st-key-stco_nav button[data-testid="stBaseButton-primary"]:hover {{
-            background: {THEME_COLORS["weak_bg"]} !important;
-            color: {THEME_COLORS["weak_fg"]} !important;
+            background: {THEME_COLORS["primary_hover"]} !important;
+            background-color: {THEME_COLORS["primary_hover"]} !important;
+            color: #FFFFFF !important;
         }}
         </style>
         """,
