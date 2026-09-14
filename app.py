@@ -624,13 +624,19 @@ def inject_theme():
         div.st-key-navgrp_guide div[data-testid="stExpander"] summary p::before {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
         }}
+        /* expander 본문이 기본으로 왼쪽 여백을 갖고 있어서, 여기에 버튼 여백까지 더해지면
+           하위 항목이 그룹 글자보다 더 오른쪽으로 튀어나온다. 본문 여백을 0으로 만들고
+           들여쓰기는 버튼 쪽에서만 준다. */
         div.st-key-stco_nav div[data-testid="stExpanderDetails"] {{
             padding: 5px 0 2px 0 !important;
         }}
+        div.st-key-stco_nav div[data-testid="stExpanderDetails"] > div {{
+            padding-left: 0 !important;
+        }}
         div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
-        /* 소분류(페이지) — 그룹보다 한 단계 작게, 그룹 '글자'와 왼쪽 끝을 맞춘다.
-           그룹 글자 시작점 = 안쪽여백 11 + 아이콘 18 + 간격 7 = 36px.
-           항목은 왼쪽 막대 3px + 안쪽여백 33px = 36px 로 같은 선에 선다.
+        /* 소분류(페이지) — 그룹 띠의 왼쪽 끝에 맞춰 세운다.
+           그룹 머리에는 화살표+아이콘이 앞에 붙어 글자가 한참 안쪽에서 시작하는데,
+           거기에 맞추려고 하위 항목까지 밀면 오히려 오른쪽으로 튀어나와 보인다.
            (expander 화살표 버튼까지 잡히지 않게 .stButton 안쪽만 고른다) */
         div.st-key-stco_nav .stButton button {{
             background: transparent !important;
@@ -641,11 +647,11 @@ def inject_theme():
             align-items: center !important;
             justify-content: flex-start !important;
             text-align: left !important;
-            padding: 8px 12px 8px 33px !important;
+            padding: 9px 12px 9px 13px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
-            font-size: 14.5px !important;
+            font-size: 15px !important;
             color: {THEME_COLORS["body"]} !important;
             transition: background .12s ease, color .12s ease;
         }}
@@ -662,7 +668,7 @@ def inject_theme():
         }}
         div.st-key-stco_nav .stButton button p {{
             text-align: left !important; width: 100%; margin: 0 !important;
-            font-size: 14.5px !important; line-height: 1.45 !important;
+            font-size: 15px !important; line-height: 1.45 !important;
         }}
         /* 안 고른 항목은 배경 없이 완전히 비워둔다 — Streamlit 기본 버튼 배경이 옅게
            남아 있으면 고른 항목과 구분이 흐려진다. */
