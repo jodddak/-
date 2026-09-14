@@ -4212,6 +4212,133 @@ def detect_upload_kind(file) -> str:
     return "weekly"
 
 
+# 정액(보장형) 계약으로 사는 매체 — 광고비의 유일한 출처는 '정액 계약 광고비' 패널이다.
+# 매체 리포트에도 광고비 칸이 있지만 그건 계약금액을 리포트 일수로 나눈 값이라, 같이 넣으면
+# 이중 계상된다. 리포트에서는 노출·클릭만 가져온다.
+CONTRACT_MANAGED_CHANNELS = {
+    "네이버 맨즈탭_자사몰", "네이버 맨즈탭_외부몰", "네이버 맨즈탭",
+    "네이버 브랜드검색광고",
+}
+
+UPLOAD_KIND_LABELS = {
+    "weekly": "① 주간 리포트 (STCO_주간보고서)",
+    "ga": "② GA 유입 데이터 (유입·매출 / 매체별 유입 / UTM 매핑표)",
+    "budget": "③ 연간 예산 (◆26년 월별 예산 정리)",
+    "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
+    "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
+    "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat)",
+    "kakao_cash": "⑦ 카카오 비즈월렛 캐시 사용현황",
+}
+
+
+def save_uploaded_file(f, kind: str) -> str:
+    """업로드 파일 하나를 종류에 맞게 저장하고 결과 한 줄을 돌려준다.
+
+    파일을 여러 개 한 번에 올렸을 때 쓰는 경로다. 한 개만 올렸을 때의 화면(미리보기·옵션)은
+    그대로 두고, 여러 개일 때만 이 함수로 한 번에 처리한다.
+    """
+    name = getattr(f, "name", "파일")
+    if kind == "weekly":
+        as_of = report_date_from_name(name) or date.today()
+        result = parse_workbook(f, as_of)
+        creatives_df = result.get("creatives", pd.DataFrame())
+        if not creatives_df.empty:
+            try:
+                sheets_and_channels = [(s, _infer_channel_from_sheet(s))
+                                       for s in result.get("creative_sheets_found", [])]
+                images = extract_creative_images(f, sheets_and_channels)
+                image_urls, _ = upload_creative_images(images)
+                creatives_df = attach_creative_images(creatives_df, image_urls)
+                creatives_df = backfill_missing_creative_images(creatives_df)
+            except Exception:
+                pass       # 이미지가 실패해도 숫자는 저장돼야 한다
+        save_table("weekly_overview", result["weekly"], "week_start", name)
+        save_table("monthly_overview", result["monthly"], "report_month", name)
+        save_table("channel_monthly", result["channels"], "report_month,channel", name)
+        save_table("channel_weekly", result.get("channels_weekly", pd.DataFrame()),
+                   "channel,week_start", name)
+        save_table("channel_snapshot", result["channel_snapshot"], "as_of_month,channel", name)
+        save_table("ga_source", result["ga"], "as_of_date,source_medium", name)
+        save_table("daily_overview", result["daily"], "report_date", name)
+        delete_creative_performance_for_date(as_of)
+        n7 = save_table("creative_performance", creatives_df,
+                        "as_of_date,channel,creative", name)
+        delete_channel_audience_for_date(as_of)
+        n8 = save_table("channel_audience_snapshot",
+                        result.get("channel_audience", pd.DataFrame()),
+                        "as_of_date,channel,audience_type", name)
+        save_table("agency_notes", result.get("agency_notes", pd.DataFrame()),
+                   "as_of_date", name)
+        return f"기준일 {as_of} · 소재 {n7}건 · 타겟팅 {n8}건"
+
+    if kind == "ga":
+        xls = pd.ExcelFile(f)
+        inflow_df = parse_inflow_revenue_sheet(xls)
+        utm_map_df = parse_utm_channel_map(xls)
+        existing = load_table("utm_channel_map")
+        combined = (pd.concat([existing, utm_map_df], ignore_index=True)
+                    if not utm_map_df.empty else existing)
+        ga_channel_df = parse_ga_channel_inflow_sheet(
+            xls, channel_map=build_utm_channel_lookup(combined))
+        bits = []
+        if not inflow_df.empty:
+            bits.append(f"유입·매출 {save_table('inflow_revenue_daily', inflow_df, 'report_date', name)}일")
+        if not utm_map_df.empty:
+            bits.append(f"UTM 매핑 {save_table('utm_channel_map', utm_map_df, 'source_medium', name)}행")
+        if not ga_channel_df.empty:
+            bits.append(f"GA 유입경로 {save_table('ga_channel_inflow', ga_channel_df, 'report_date,source_medium', name)}행")
+        return " · ".join(bits) or "저장할 데이터 없음"
+
+    if kind == "budget":
+        df = parse_channel_budget_sheet(pd.ExcelFile(f))
+        if df.empty:
+            return "인식 실패"
+        return f"예산 {save_table('channel_budget', df, 'scope,channel,year,month', name)}행"
+
+    if kind == "mix":
+        df = parse_channel_mix_sheet(pd.ExcelFile(f), source_name=name)
+        if df.empty:
+            return "인식 실패"
+        return f"채널 믹스 {save_table('channel_mix_budget', df, 'channel,year,month', name)}행"
+
+    if kind == "media_report":
+        df = parse_media_report_file(f, vat_included=True)
+        if df.empty:
+            return "인식 실패"
+        df = df.copy()
+        # ⚠️ 맨즈탭·브랜드검색은 정액(보장형) 계약 매체다. 리포트의 '광고비'는 매체가
+        # 계약금액을 리포트 일수로 나눠 만든 값이라, 회차별 파일을 여러 개 올리면
+        # 정액 계약 패널에 넣어둔 금액과 이중으로 잡힌다. 그래서 광고비는 버리고
+        # 노출·클릭만 가져온다 (광고비는 '정액 계약 광고비' 패널이 유일한 출처).
+        _contract_rows = df["channel"].isin(CONTRACT_MANAGED_CHANNELS)
+        _zeroed = sorted(df.loc[_contract_rows, "channel"].unique())
+        df.loc[_contract_rows, "cost_incl_vat"] = 0.0
+        df["source"] = "manual"
+        n = save_table("ad_spend_daily", df, "report_date,channel,source", name)
+        _chs = " · ".join(sorted(df["channel"].unique()))
+        msg = (f"{_chs} · {df['report_date'].min()}~{df['report_date'].max()} · {n}행")
+        if _zeroed:
+            msg += f" (정액 계약 매체라 광고비는 제외: {', '.join(_zeroed)})"
+        return msg
+
+    if kind == "kakao_msg":
+        df = parse_kakao_channel_message_sheet(f)
+        if df.empty:
+            return "인식 실패"
+        n = save_table("kakao_channel_message", df, "sent_at", name)
+        n2 = save_table("ad_spend_daily", kakao_messages_to_daily(df),
+                        "report_date,channel,source", name)
+        return f"메시지 {n}건 · 일별 지표 {n2}행"
+
+    if kind == "kakao_cash":
+        df = parse_kakao_cash_file(f)
+        if df.empty:
+            return "인식 실패 (열 이름을 못 찾음)"
+        return f"캐시 사용액 {save_table('ad_spend_daily', df, 'report_date,channel,source', name)}행"
+
+    return "알 수 없는 종류"
+
+
 def render_upload_panel():
     st.sidebar.header("⚙️ 데이터 관리")
     client = get_supabase_client()
@@ -4219,21 +4346,76 @@ def render_upload_panel():
 
     # 업로더를 4개 두면 사이드바가 너무 길어져서 하나로 합쳤다. 파일을 넣으면 종류를 스스로
     # 알아내고, 잘못 잡히면 아래 셀렉트로 직접 고를 수 있게 한다.
-    up_file = st.sidebar.file_uploader(
+    up_files = st.sidebar.file_uploader(
         "데이터 파일 업로드", type=["xlsx", "xls", "csv"], key="unified_uploader",
-        help="주간 리포트 · GA 유입 데이터 · 연간 예산 · 채널 믹스 · 매체 리포트(GFA·맨즈탭 등) — "
-             "아무거나 넣으면 종류를 알아서 판단합니다.",
+        accept_multiple_files=True,
+        help="주간 리포트 · GA 유입 데이터 · 연간 예산 · 채널 믹스 · 매체 리포트(GFA·맨즈탭 등) · "
+             "카카오 메시지/캐시 — 아무거나, **여러 개 한 번에** 넣으면 종류를 알아서 판단합니다.",
     )
+    up_files = list(up_files or [])
 
-    KIND_LABELS = {
-        "weekly": "① 주간 리포트 (STCO_주간보고서)",
-        "ga": "② GA 유입 데이터 (유입·매출 / 매체별 유입 / UTM 매핑표)",
-        "budget": "③ 연간 예산 (◆26년 월별 예산 정리)",
-        "mix": "④ 채널 믹스 (26년 매체별 채널 믹스)",
-        "media_report": "⑤ 매체 리포트 (GFA·맨즈탭 등 일별 성과)",
-        "kakao_msg": "⑥ 카카오톡 채널 메시지 (MessageStat)",
-        "kakao_cash": "⑦ 카카오 비즈월렛 캐시 사용현황",
-    }
+    KIND_LABELS = UPLOAD_KIND_LABELS
+
+    # ── 여러 개를 한 번에 올린 경우 ──────────────────────────────────────
+    # 파일마다 종류를 자동 판단해 보여주고, 버튼 한 번으로 전부 저장한다.
+    # (한 개만 올렸을 때는 예전처럼 미리보기·옵션이 있는 화면을 그대로 쓴다)
+    if len(up_files) > 1:
+        st.sidebar.caption(f"파일 {len(up_files)}개 — 종류를 자동으로 판단했습니다. "
+                           "틀린 게 있으면 아래에서 바꿔주세요.")
+        st.sidebar.caption(
+            "맨즈탭처럼 **정액 계약 매체**는 회차별 파일을 몇 개 올리든 노출·클릭만 가져옵니다 — "
+            "광고비는 '정액 계약 광고비' 패널 값이 그대로 유지됩니다(이중 계상 방지). "
+            "파일명에 **자사몰 / 외부몰**이 들어 있어야 두 계정이 안 섞입니다."
+        )
+        _kind_opts = list(KIND_LABELS.keys())
+        _picked = []
+        for i, f in enumerate(up_files):
+            try:
+                _auto = detect_upload_kind(f)
+            except Exception:
+                _auto = "weekly"
+            _sel = st.sidebar.selectbox(
+                f"{i + 1}. {getattr(f, 'name', '파일')}",
+                [KIND_LABELS[k] for k in _kind_opts],
+                index=_kind_opts.index(_auto), key=f"batch_kind_{i}",
+            )
+            _picked.append(next(k for k in _kind_opts if KIND_LABELS[k] == _sel))
+
+        if st.sidebar.button(f"💾 {len(up_files)}개 전부 저장하기", type="primary",
+                             key="batch_save_all"):
+            # 주간 리포트는 기준일이 늦은 파일이 나중에 저장돼야 최신 스냅샷이 남는다.
+            order = sorted(
+                range(len(up_files)),
+                key=lambda i: (report_date_from_name(getattr(up_files[i], "name", "")) or date.min),
+            )
+            ok, fail = [], []
+            prog = st.sidebar.progress(0.0, text="저장 중...")
+            for n_done, i in enumerate(order, start=1):
+                f, k = up_files[i], _picked[i]
+                nm = getattr(f, "name", "파일")
+                prog.progress(n_done / len(order), text=f"{nm} 저장 중... ({n_done}/{len(order)})")
+                try:
+                    msg = save_uploaded_file(f, k)
+                    (fail if "실패" in msg or "없음" in msg else ok).append(f"{nm} — {msg}")
+                except Exception as e:
+                    fail.append(f"{nm} — 오류: {str(e)[:120]}")
+            prog.empty()
+            st.cache_data.clear()
+            if ok:
+                st.sidebar.success("저장 완료 " + f"{len(ok)}개\n\n" + "\n\n".join(f"· {m}" for m in ok))
+            for m in fail:
+                st.sidebar.error("· " + m)
+            if ok and not fail:
+                st.rerun()
+        st.sidebar.markdown("---")
+        wk = load_table("weekly_overview")
+        st.sidebar.metric("누적 주간 데이터", f"{len(wk):,} 주")
+        if st.sidebar.button("🔄 새로고침 (캐시 비우기)", key="refresh_batch"):
+            st.cache_data.clear()
+            st.rerun()
+        return
+
+    up_file = up_files[0] if up_files else None
     kind = None
     if up_file is not None:
         auto = detect_upload_kind(up_file)
