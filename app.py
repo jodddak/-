@@ -9882,7 +9882,9 @@ CP_CSS = """
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
 .cp-note{font-size:14px;color:#6E747C;margin-top:12px;line-height:1.85}
 .cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
-.cp-rec{background:#D9F27E;border-radius:12px;padding:22px 26px;margin-top:16px}
+/* NEXT BEST ACTION 카드 — 아래에 바로 다음 패널이 붙어 답답해서 여백을 뒀다 */
+.cp-rec{background:#D9F27E;border-radius:12px;padding:22px 26px 26px;
+  margin:16px 0 34px}
 .cp-rec-eyebrow{font-size:13px;letter-spacing:.14em;font-weight:800;color:#4A5A16;margin-bottom:7px}
 .cp-rec-head{font-size:23px;font-weight:800;letter-spacing:-.02em;color:#14181F;margin-bottom:5px}
 .cp-rec-sub{font-size:14.5px;color:#4A5A16;margin-bottom:14px}
@@ -10156,82 +10158,88 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     if start > end:
         start, end = end, start
 
-    # ── 정액(보장형) 계약 광고비 ─────────────────────────
-    # ── 카카오톡 채널 메시지 ──
-    # 카카오모먼트(유료 광고)와는 별개다. 채널 친구에게 보내는 소식·쿠폰 메시지의 발송·클릭인데,
-    # 카카오가 이 통계에 API를 안 열어둬서(2026-08 확인) 파트너센터 엑셀로만 받을 수 있다.
-    # 이 메시지 링크엔 UTM이 없어 메시지 단위 GA 매칭은 안 되지만, 채널 자체의 유입·매출은
-    # media_master의 '카카오톡 플친' 행이 이미 잡고 있어 아래 표에 들어온다.
-    _kko = load_table("kakao_channel_message")
-    if _kko is not None and not _kko.empty:
-        with st.expander("📨 카카오톡 채널 메시지 발송 성과", expanded=False):
-            k = _kko.copy()
-            k["report_date"] = pd.to_datetime(k["report_date"], errors="coerce").dt.date
-            k = k[(k["report_date"] >= start) & (k["report_date"] <= end)]
-            if k.empty:
-                st.info("선택한 기간에 발송한 메시지가 없습니다.")
-            else:
-                for c in ("sends", "clicks"):
-                    k[c] = pd.to_numeric(k[c], errors="coerce").fillna(0)
-                sends, clicks = float(k["sends"].sum()), float(k["clicks"].sum())
-                c1, c2, c3 = st.columns(3)
-                c1.metric("발송수 합계", f"{sends:,.0f}")
-                c2.metric("클릭수 합계", f"{clicks:,.0f}")
-                c3.metric("클릭률", f"{(clicks / sends * 100) if sends else 0:.2f} %")
-                view = k.sort_values("sent_at", ascending=False)[
-                    ["sent_at", "message", "sends", "clicks", "ctr"]].copy()
-                view["ctr"] = view["ctr"].map(lambda v: f"{float(v or 0):.2f}%")
-                view.columns = ["발송일시", "메시지", "발송수", "클릭수", "클릭률"]
-                st.dataframe(view, use_container_width=True, hide_index=True)
-                st.caption(
-                    "카카오는 이 통계에 API를 제공하지 않아, 파트너센터 [인사이트 > 메시지]에서 "
-                    "받은 엑셀을 사이드바에 올리면 채워집니다. 메시지 링크에 UTM이 없어 "
-                    "메시지별 매출은 붙지 않습니다 — 채널 전체 유입·매출은 아래 "
-                    "'카카오톡 플친' 줄에서 보세요."
-                )
+    # ── 입력·참고 패널 ──────────────────────────────────────────────────
+    # 매일 보는 건 숫자지 입력 폼이 아니다. 함수로만 정의해두고 페이지 맨 아래에서 그린다.
+    def _render_cp_tools():
+        st.markdown("---")
+        st.markdown("#### 🗂️ 자료 입력 · 참고")
+        st.caption("계약을 갱신했거나 카카오 메시지 실적을 확인할 때만 펼치세요.")
 
-    # 브랜드검색은 30일 단위로 선지불하고 연장하는 상품이라 '일별 집행액'이 없다.
-    # 계약 기간과 총액을 넣어두면 일할로 나눠 매일의 광고비를 만든다.
-    with st.expander("📄 정액 계약 광고비 (브랜드검색 등) — 갱신할 때마다 한 줄 추가"):
-        st.caption(
-            "계약 기간과 총액(VAT 포함)을 넣으면 기간으로 나눠 일별 광고비로 저장합니다. "
-            "월이 걸쳐 있어도(예: 8/7~9/5) 날짜 단위로 나누므로 월별 집계가 알아서 맞습니다."
-        )
-        saved_ct = load_table("ad_contract")
-        ct = saved_ct[CONTRACT_COLS].copy() if (saved_ct is not None and not saved_ct.empty
-                                                and "channel" in saved_ct.columns) else contract_seed()
-        for c in ("start_date", "end_date"):
-            ct[c] = pd.to_datetime(ct[c], errors="coerce").dt.date
-        ct = ct.sort_values(["channel", "start_date"]).reset_index(drop=True)
+        # 브랜드검색은 30일 단위로 선지불하고 연장하는 상품이라 '일별 집행액'이 없다.
+        # 계약 기간과 총액을 넣어두면 일할로 나눠 매일의 광고비를 만든다.
+        with st.expander("📄 정액 계약 광고비 (브랜드검색 등) — 갱신할 때마다 한 줄 추가"):
+            st.caption(
+                "계약 기간과 총액(VAT 포함)을 넣으면 기간으로 나눠 일별 광고비로 저장합니다. "
+                "월이 걸쳐 있어도(예: 8/7~9/5) 날짜 단위로 나누므로 월별 집계가 알아서 맞습니다."
+            )
+            saved_ct = load_table("ad_contract")
+            ct = saved_ct[CONTRACT_COLS].copy() if (saved_ct is not None and not saved_ct.empty
+                                                    and "channel" in saved_ct.columns) else contract_seed()
+            for c in ("start_date", "end_date"):
+                ct[c] = pd.to_datetime(ct[c], errors="coerce").dt.date
+            ct = ct.sort_values(["channel", "start_date"]).reset_index(drop=True)
 
-        ct_edit = st.data_editor(
-            ct, num_rows="dynamic", use_container_width=True, key="cp_contract_editor",
-            column_config={
-                "channel": st.column_config.SelectboxColumn("매체", options=CONTRACT_CHANNELS, required=True),
-                "start_date": st.column_config.DateColumn("계약 시작", format="YYYY-MM-DD", required=True),
-                "end_date": st.column_config.DateColumn("계약 종료", format="YYYY-MM-DD", required=True),
-                "amount_incl_vat": st.column_config.NumberColumn("계약 총액(VAT 포함)", format="%d", min_value=0),
-                "note": st.column_config.TextColumn("메모"),
-            },
-        )
-        prev = contracts_to_daily(ct_edit)
-        if not prev.empty:
-            g = prev.groupby("channel", as_index=False).agg(
-                일수=("report_date", "count"), 합계=("cost_incl_vat", "sum"))
-            g["일 광고비"] = (g["합계"] / g["일수"]).round(0)
-            st.caption("저장하면 이렇게 펼쳐집니다 (일할)")
-            st.dataframe(g, use_container_width=True, hide_index=True)
-        if st.button("저장하고 반영", key="cp_contract_save", type="primary"):
-            e = ct_edit.dropna(subset=["channel", "start_date", "end_date"])
-            if e.empty:
-                st.warning("저장할 계약이 없습니다.")
-            else:
-                save_table("ad_contract", e[CONTRACT_COLS], "channel,start_date", "정액 계약")
-                daily = contracts_to_daily(e)
-                n = save_table("ad_spend_daily", daily,
-                               "report_date,channel,source", "정액 계약 일할")
-                st.success(f"계약 {len(e)}건 → 일별 {n}행 저장했습니다.")
-                st.cache_data.clear()
+            ct_edit = st.data_editor(
+                ct, num_rows="dynamic", use_container_width=True, key="cp_contract_editor",
+                column_config={
+                    "channel": st.column_config.SelectboxColumn("매체", options=CONTRACT_CHANNELS, required=True),
+                    "start_date": st.column_config.DateColumn("계약 시작", format="YYYY-MM-DD", required=True),
+                    "end_date": st.column_config.DateColumn("계약 종료", format="YYYY-MM-DD", required=True),
+                    "amount_incl_vat": st.column_config.NumberColumn("계약 총액(VAT 포함)", format="%d", min_value=0),
+                    "note": st.column_config.TextColumn("메모"),
+                },
+            )
+            prev = contracts_to_daily(ct_edit)
+            if not prev.empty:
+                g = prev.groupby("channel", as_index=False).agg(
+                    일수=("report_date", "count"), 합계=("cost_incl_vat", "sum"))
+                g["일 광고비"] = (g["합계"] / g["일수"]).round(0)
+                st.caption("저장하면 이렇게 펼쳐집니다 (일할)")
+                st.dataframe(g, use_container_width=True, hide_index=True)
+            if st.button("저장하고 반영", key="cp_contract_save", type="primary"):
+                e = ct_edit.dropna(subset=["channel", "start_date", "end_date"])
+                if e.empty:
+                    st.warning("저장할 계약이 없습니다.")
+                else:
+                    save_table("ad_contract", e[CONTRACT_COLS], "channel,start_date", "정액 계약")
+                    daily = contracts_to_daily(e)
+                    n = save_table("ad_spend_daily", daily,
+                                   "report_date,channel,source", "정액 계약 일할")
+                    st.success(f"계약 {len(e)}건 → 일별 {n}행 저장했습니다.")
+                    st.cache_data.clear()
+
+        # ── 카카오톡 채널 메시지 ──
+        # 카카오모먼트(유료 광고)와는 별개다. 채널 친구에게 보내는 소식·쿠폰 메시지의 발송·클릭인데,
+        # 카카오가 이 통계에 API를 안 열어둬서(2026-08 확인) 파트너센터 엑셀로만 받을 수 있다.
+        # 이 메시지 링크엔 UTM이 없어 메시지 단위 GA 매칭은 안 되지만, 채널 자체의 유입·매출은
+        # media_master의 '카카오톡 플친' 행이 이미 잡고 있어 위 표에 들어온다.
+        _kko = load_table("kakao_channel_message")
+        if _kko is not None and not _kko.empty:
+            with st.expander("📨 카카오톡 채널 메시지 발송 성과", expanded=False):
+                k = _kko.copy()
+                k["report_date"] = pd.to_datetime(k["report_date"], errors="coerce").dt.date
+                k = k[(k["report_date"] >= start) & (k["report_date"] <= end)]
+                if k.empty:
+                    st.info("선택한 기간에 발송한 메시지가 없습니다.")
+                else:
+                    for c in ("sends", "clicks"):
+                        k[c] = pd.to_numeric(k[c], errors="coerce").fillna(0)
+                    sends, clicks = float(k["sends"].sum()), float(k["clicks"].sum())
+                    kc1, kc2, kc3 = st.columns(3)
+                    kc1.metric("발송수 합계", f"{sends:,.0f}")
+                    kc2.metric("클릭수 합계", f"{clicks:,.0f}")
+                    kc3.metric("클릭률", f"{(clicks / sends * 100) if sends else 0:.2f} %")
+                    view = k.sort_values("sent_at", ascending=False)[
+                        ["sent_at", "message", "sends", "clicks", "ctr"]].copy()
+                    view["ctr"] = view["ctr"].map(lambda v: f"{float(v or 0):.2f}%")
+                    view.columns = ["발송일시", "메시지", "발송수", "클릭수", "클릭률"]
+                    st.dataframe(view, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "카카오는 이 통계에 API를 제공하지 않아, 파트너센터 [인사이트 > 메시지]에서 "
+                        "받은 엑셀을 사이드바에 올리면 채워집니다. 메시지 링크에 UTM이 없어 "
+                        "메시지별 매출은 붙지 않습니다 — 채널 전체 유입·매출은 위 표의 "
+                        "'카카오톡 플친' 줄에서 보세요."
+                    )
 
     # ── 집계 ─────────────────────────────────────────────
     spend = _cp_spend_by_channel(ad_spend, start, end)
@@ -10543,6 +10551,10 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                     st.cache_data.clear()
         with mc2:
             st.caption("저장하면 위 표가 바로 이 정의대로 다시 그려집니다.")
+
+    # 정액 계약·카카오 메시지 패널은 맨 아래에 (데이터가 먼저)
+    _render_cp_tools()
+
 
 def force_resync_ad_spend(start: date, end: date):
     """기간을 지정해 광고비를 처음부터 다시 받아온다.
@@ -12429,35 +12441,45 @@ def render_ga_channel_funnel_page(
             st.cache_data.clear()
             st.rerun()
 
-    # 최초 연동 때 30일치만 받아와서 그 이전이 비어 있는 경우가 있다. 날짜 선택기는 비어 있는
-    # 기간도 그냥 고를 수 있게 해줘서, 숫자가 작게 나오는 걸 '성과가 나빴다'로 오해하기 쉽다.
-    # 그래서 '지금 저장된 첫 날짜'를 항상 보여주고, 그 이전을 채울 수단을 같이 둔다.
-    with st.expander("📥 과거 GA 데이터 채우기 — 예전 기간이 비어 보일 때", expanded=False):
-        _first = None
-        if ga_channel_inflow is not None and not ga_channel_inflow.empty:
-            _first = pd.to_datetime(ga_channel_inflow["report_date"]).min().date()
-        st.caption(
-            f"지금 저장된 GA 데이터: **{_first} ~ {ga_last_date}**"
-            if _first else "저장된 GA 데이터가 없습니다."
-        )
-        st.caption(
-            "이 시작일보다 앞선 기간을 골라도 화면에는 빈칸이 더해질 뿐입니다 — "
-            "아래에서 그 구간을 받아와야 채워집니다. 달 단위로 끊어서 받아오며, "
-            "1년치는 몇 분 걸릴 수 있습니다."
-        )
-        bc1, bc2, bc3 = st.columns([2, 2, 1])
-        _bs = bc1.date_input("받아올 시작일", value=date(date.today().year, 1, 1),
-                             key="fv4_bf_start")
-        _be = bc2.date_input("받아올 종료일", value=(_first - timedelta(days=1)) if _first
-                             else date.today() - timedelta(days=1), key="fv4_bf_end")
-        if bc3.button("받아오기", key="fv4_bf_btn", type="primary"):
-            n, e = backfill_ga4_range("channel", lookup, _bs, _be)
-            if e:
-                st.error(e)
-            else:
-                st.success(f"{n:,}행 채웠습니다.")
-                st.cache_data.clear()
-                st.rerun()
+    # ── 설정·진단 패널 ──────────────────────────────────────────────────
+    # 예전엔 이것들이 데이터보다 위에 있었다. 매일 보는 건 숫자인데 토큰 발급·진단 같은
+    # 가끔 쓰는 도구가 화면 위를 차지해서, 볼 때마다 스크롤을 내려야 했다.
+    # 여기서는 함수로만 정의해두고 실제로 그리는 건 페이지 맨 아래에서 한다.
+    def _render_setup_tools():
+        st.markdown("---")
+        st.markdown("#### ⚙️ 설정 · 진단 도구")
+        st.caption("평소에는 쓸 일이 없습니다. 연동이 끊겼거나 과거 데이터를 채울 때만 펼치세요.")
+        # 최초 연동 때 30일치만 받아와서 그 이전이 비어 있는 경우가 있다. 날짜 선택기는 비어 있는
+        # 기간도 그냥 고를 수 있게 해줘서, 숫자가 작게 나오는 걸 '성과가 나빴다'로 오해하기 쉽다.
+        # 그래서 '지금 저장된 첫 날짜'를 항상 보여주고, 그 이전을 채울 수단을 같이 둔다.
+        with st.expander("📥 과거 GA 데이터 채우기 — 예전 기간이 비어 보일 때", expanded=False):
+            _first = None
+            if ga_channel_inflow is not None and not ga_channel_inflow.empty:
+                _first = pd.to_datetime(ga_channel_inflow["report_date"]).min().date()
+            st.caption(
+                f"지금 저장된 GA 데이터: **{_first} ~ {ga_last_date}**"
+                if _first else "저장된 GA 데이터가 없습니다."
+            )
+            st.caption(
+                "이 시작일보다 앞선 기간을 골라도 화면에는 빈칸이 더해질 뿐입니다 — "
+                "아래에서 그 구간을 받아와야 채워집니다. 달 단위로 끊어서 받아오며, "
+                "1년치는 몇 분 걸릴 수 있습니다."
+            )
+            bc1, bc2, bc3 = st.columns([2, 2, 1])
+            _bs = bc1.date_input("받아올 시작일", value=date(date.today().year, 1, 1),
+                                 key="fv4_bf_start")
+            _be = bc2.date_input("받아올 종료일", value=(_first - timedelta(days=1)) if _first
+                                 else date.today() - timedelta(days=1), key="fv4_bf_end")
+            if bc3.button("받아오기", key="fv4_bf_btn", type="primary"):
+                n, e = backfill_ga4_range("channel", lookup, _bs, _be)
+                if e:
+                    st.error(e)
+                else:
+                    st.success(f"{n:,}행 채웠습니다.")
+                    st.cache_data.clear()
+                    st.rerun()
+        _render_setup_tools_rest()
+
     if sync_err:
         st.warning(
             f"GA4 자동 연동이 아직 안 됐습니다 — {sync_err} "
@@ -12465,42 +12487,6 @@ def render_ga_channel_funnel_page(
         )
     if ga_last_date and (date.today() - ga_last_date).days > 2:
         st.warning(f"GA 데이터가 {(date.today() - ga_last_date).days}일 지연돼 있습니다 — 최신 수치가 아닐 수 있습니다.")
-
-    if ga_source_label != "GA4 API(자동)" or sync_err:
-        with st.expander("🔍 GA4 연동 진단 (연동이 안 되면 이걸 펼쳐서 캡쳐해주세요)", expanded=bool(sync_err)):
-            st.caption("비밀값(private_key 등)은 출력하지 않습니다 — 형식이 맞는지만 검사합니다.")
-            if st.button("진단 실행", key="fv4_diag_btn"):
-                with st.spinner("확인 중..."):
-                    st.code(diagnose_ga4_setup(), language=None)
-
-    with st.expander("💰 광고비 연동 진단 (매체별 연동 상태)"):
-        st.caption("연동 안 된 매체는 채널믹스 예산 일할값으로 자동 대체됩니다 — 대시보드는 항상 동작합니다.")
-        if spend_errors:
-            _skipped = [k for k, v in spend_errors.items() if "시간" in str(v)]
-            for k, v in spend_errors.items():
-                st.warning(f"{k} 광고비 조회 실패: {v}")
-            if _skipped:
-                # '건너뜀'은 그 매체의 최근 며칠치가 안 채워졌다는 뜻이다. 이미 저장된 과거
-                # 데이터는 그대로 있지만, 놔두면 조용히 구멍이 남으므로 바로 다시 받게 한다.
-                st.info(
-                    f"**{', '.join(_skipped)}**는 {SYNC_PER_SOURCE_SEC}초 안에 응답이 없어 "
-                    "중단했습니다 — API가 정상이 아닐 가능성이 큽니다. "
-                    "이미 저장된 과거 데이터는 그대로 있고 **최근 며칠치만** 비어 있습니다. "
-                    "아래 버튼으로 다시 받아보세요 (이번엔 끝까지 기다립니다)."
-                )
-                if st.button(f"⏱️ 건너뛴 매체 다시 받기 ({len(_skipped)}개)",
-                             key="fv4_retry_skipped", type="primary"):
-                    with st.spinner("건너뛴 매체를 받는 중... 최대 몇 분 걸릴 수 있습니다"):
-                        _n, _saved, _err = sync_ad_spend(ad_spend, only=_skipped, unlimited=True)
-                    if _saved:
-                        st.success("받아왔습니다: " + ", ".join(f"{k} {v}행" for k, v in _saved.items()))
-                    for k, v in _err.items():
-                        st.error(f"{k}: {v}")
-                    st.cache_data.clear()
-                    st.rerun()
-        if st.button("광고비 진단 실행", key="fv4_spend_diag_btn"):
-            with st.spinner("확인 중..."):
-                st.code(diagnose_ad_spend_setup(), language=None)
 
     # OAuth에서 돌아오면(?code=...) 해당 패널이 저절로 펼쳐지게 한다.
     # 접힌 채로 돌아오면 "눌렀는데 아무 반응이 없다"로 보이기 때문.
@@ -12514,25 +12500,65 @@ def render_ga_channel_funnel_page(
     _back_kko = bool(_oauth_code) and _oauth_state == "stcokakao"
     if _back_gfa or _back_gads or _back_kko:
         _who = "네이버" if _back_gfa else ("구글" if _back_gads else "카카오")
-        st.success(f"{_who} 로그인에서 돌아왔습니다 — 아래 토큰 발급 패널에서 ② 버튼을 눌러주세요.")
+        st.success(f"{_who} 로그인에서 돌아왔습니다 — 맨 아래 '설정 · 진단 도구'의 "
+                   "토큰 발급 패널에서 ② 버튼을 눌러주세요.")
 
-    with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)", expanded=_back_gfa):
-        render_gfa_token_helper()
+    def _render_setup_tools_rest():
+        if ga_source_label != "GA4 API(자동)" or sync_err:
+            with st.expander("🔍 GA4 연동 진단 (연동이 안 되면 이걸 펼쳐서 캡쳐해주세요)",
+                             expanded=bool(sync_err)):
+                st.caption("비밀값(private_key 등)은 출력하지 않습니다 — 형식이 맞는지만 검사합니다.")
+                if st.button("진단 실행", key="fv4_diag_btn"):
+                    with st.spinner("확인 중..."):
+                        st.code(diagnose_ga4_setup(), language=None)
 
-    with st.expander("🔑 구글애즈 토큰 발급 (refresh token 만들기)", expanded=_back_gads):
-        render_google_token_helper()
+        with st.expander("💰 광고비 연동 진단 (매체별 연동 상태)"):
+            st.caption("연동 안 된 매체는 채널믹스 예산 일할값으로 자동 대체됩니다 — 대시보드는 항상 동작합니다.")
+            if spend_errors:
+                _skipped = [k for k, v in spend_errors.items() if "시간" in str(v)]
+                for k, v in spend_errors.items():
+                    st.warning(f"{k} 광고비 조회 실패: {v}")
+                if _skipped:
+                    # '건너뜀'은 그 매체의 최근 며칠치가 안 채워졌다는 뜻이다. 이미 저장된 과거
+                    # 데이터는 그대로 있지만, 놔두면 조용히 구멍이 남으므로 바로 다시 받게 한다.
+                    st.info(
+                        f"**{', '.join(_skipped)}**는 {SYNC_PER_SOURCE_SEC}초 안에 응답이 없어 "
+                        "중단했습니다 — API가 정상이 아닐 가능성이 큽니다. "
+                        "이미 저장된 과거 데이터는 그대로 있고 **최근 며칠치만** 비어 있습니다. "
+                        "아래 버튼으로 다시 받아보세요 (이번엔 끝까지 기다립니다)."
+                    )
+                    if st.button(f"⏱️ 건너뛴 매체 다시 받기 ({len(_skipped)}개)",
+                                 key="fv4_retry_skipped", type="primary"):
+                        with st.spinner("건너뛴 매체를 받는 중... 최대 몇 분 걸릴 수 있습니다"):
+                            _n, _saved, _err = sync_ad_spend(ad_spend, only=_skipped, unlimited=True)
+                        if _saved:
+                            st.success("받아왔습니다: " + ", ".join(f"{k} {v}행" for k, v in _saved.items()))
+                        for k, v in _err.items():
+                            st.error(f"{k}: {v}")
+                        st.cache_data.clear()
+                        st.rerun()
+            if st.button("광고비 진단 실행", key="fv4_spend_diag_btn"):
+                with st.spinner("확인 중..."):
+                    st.code(diagnose_ad_spend_setup(), language=None)
 
-    with st.expander("🔑 카카오모먼트 토큰 발급 (refresh token 만들기)", expanded=_back_kko):
-        render_kakao_token_helper()
+        with st.expander("🔑 네이버 GFA 토큰 발급 (refresh token 만들기)", expanded=_back_gfa):
+            render_gfa_token_helper()
 
-    with st.expander("✍️ 광고비 직접 입력 (API가 막힌 매체용)"):
-        render_manual_spend_panel(ad_spend)
+        with st.expander("🔑 구글애즈 토큰 발급 (refresh token 만들기)", expanded=_back_gads):
+            render_google_token_helper()
+
+        with st.expander("🔑 카카오모먼트 토큰 발급 (refresh token 만들기)", expanded=_back_kko):
+            render_kakao_token_helper()
+
+        with st.expander("✍️ 광고비 직접 입력 (API가 막힌 매체용)"):
+            render_manual_spend_panel(ad_spend)
 
     if audience.empty and ga_channel_inflow.empty and inflow_revenue.empty:
         st.info(
             "아직 데이터가 없습니다. 사이드바 '① 주간 리포트 업로드'(캠페인 신규/리타겟 분류) · "
             "'② GA 유입 데이터 업로드'를 먼저 진행해주세요."
         )
+        _render_setup_tools()      # 데이터가 없을 때야말로 설정 도구가 필요하다
         return
 
     date_pool = []
@@ -13072,6 +13098,9 @@ def render_ga_channel_funnel_page(
                         st.cache_data.clear()
                         st.success("기록했습니다. 다음 기간에 결과를 자동으로 되짚어드립니다.")
                         st.rerun()
+
+    # 설정·진단 도구는 여기, 맨 아래에 그린다 (데이터가 먼저)
+    _render_setup_tools()
 
 
 def render_ga4_page():
