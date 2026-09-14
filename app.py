@@ -613,8 +613,27 @@ def inject_theme():
             margin: 0 !important;
             padding: 0 !important;
         }}
-        /* 기본 화살표(svg) 숨기고 */
-        div.st-key-stco_nav div[data-testid="stExpander"] summary svg {{
+        /* 기본 화살표 숨기기.
+           Streamlit 버전에 따라 svg일 때도 있고 아이콘 폰트(span)일 때도 있다.
+           svg만 숨겼더니 왼쪽에 폰트 화살표가 그대로 남아 화살표가 두 개로 보였고,
+           그 폭만큼 그룹 글자가 밀려서 하위 항목과 계속 어긋났다. 전부 지운다. */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary svg,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary i,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary [data-testid="stExpanderToggleIcon"],
+        div.st-key-stco_nav div[data-testid="stExpander"] summary [data-testid="stIconMaterial"],
+        div.st-key-stco_nav div[data-testid="stExpander"] summary .material-icons,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary .material-icons-outlined,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary .material-symbols-rounded,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary .material-symbols-outlined {{
+            display: none !important;
+            width: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary {{
+            list-style: none !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary::-webkit-details-marker {{
             display: none !important;
         }}
         /* 오른쪽에 흰색 꺾쇠를 직접 그린다 (펼치면 뒤집힌다) */
