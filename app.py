@@ -581,25 +581,27 @@ def inject_theme():
             border: none !important;
             background: transparent !important;
         }}
+        /* 대분류 머리는 검정 띠 + 흰 글씨 — 소분류(흰 바탕)와 확실히 갈라진다. */
         div.st-key-stco_nav div[data-testid="stExpander"] summary {{
-            background: {THEME_COLORS["surface"]} !important;
+            background: {THEME_COLORS["foreground"]} !important;
             border-radius: 9px !important;
             padding: 10px 11px !important;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
-            background: #E5E8EB !important;
+            background: #2B323C !important;
         }}
-        div.st-key-stco_nav div[data-testid="stExpander"] summary p {{
+        div.st-key-stco_nav div[data-testid="stExpander"] summary p,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary span {{
             font-size: 15px !important;
             font-weight: 800 !important;
             letter-spacing: -.01em;
-            color: {THEME_COLORS["foreground"]} !important;
+            color: #FFFFFF !important;
             margin: 0 !important;
         }}
-        /* 펼침/접힘 화살표 색 */
+        /* 펼침/접힘 화살표도 흰색으로 (검정 띠 위라 안 그러면 안 보인다) */
         div.st-key-stco_nav div[data-testid="stExpander"] summary svg {{
-            fill: {THEME_COLORS["body"]} !important;
-            color: {THEME_COLORS["body"]} !important;
+            fill: #FFFFFF !important;
+            color: #FFFFFF !important;
         }}
         /* 그룹명 왼쪽 아이콘 (이모지 대신 SVG) */
         div.st-key-stco_nav div[data-testid="stExpander"] summary p::before {{
