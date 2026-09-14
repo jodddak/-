@@ -4009,11 +4009,13 @@ def parse_kakao_cash_file(file) -> pd.DataFrame:
     if isinstance(raw, str):
         raw = raw.encode("utf-8", "ignore")
 
+    # 날짜 열 이름이 파일마다 '거래일시' / '거래일' 로 달라서, 둘 중 아무거나 있으면 받아들인다.
+    # (예전엔 '거래일시'만 찾아서 '거래일'로 내려온 파일이 통째로 인식 실패했다.)
     text = None
     for enc in ("utf-16", "utf-8-sig", "cp949", "euc-kr", "utf-8"):
         try:
             t = raw.decode(enc)
-            if "거래일시" in t:
+            if "거래일" in t or "캐시" in t:
                 text = t
                 break
         except Exception:
@@ -4023,15 +4025,27 @@ def parse_kakao_cash_file(file) -> pd.DataFrame:
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
     sep = "\t" if "\t" in lines[0] else ","
-    rows = [[c.strip().strip('"') for c in ln.split(sep)] for ln in lines]
-    header = rows[0]
+    rows = [[c.strip().strip('"').strip() for c in ln.split(sep)] for ln in lines]
+    header = [h for h in rows[0]]
     body = [r for r in rows[1:] if len(r) == len(header)]
     if not body:
         return pd.DataFrame(columns=KKO_CASH_COLS)
     df = pd.DataFrame(body, columns=header)
+    # 어떤 열을 봤는지 화면에서 확인할 수 있게 남긴다(인식 실패 원인 추적용)
+    try:
+        st.session_state["kcash_headers"] = list(df.columns)
+    except Exception:
+        pass
 
-    date_col = next((c for c in df.columns if "거래일" in c), None)
-    use_cols = [c for c in df.columns if c.startswith("캐시 사용") and "유상" in c]
+    def _flat(s):
+        return re.sub(r"[\s()]+", "", str(s))
+
+    date_col = next((c for c in df.columns if "거래일" in _flat(c)), None)
+    # '캐시 사용' / '캐시사용' / '사용' 표기가 섞여 있어 공백을 지우고 부분일치로 찾는다.
+    # 충전·환불·잔액 열이 섞여 들어오면 광고비가 몇 배로 뻥튀기되므로 그건 확실히 배제한다.
+    use_cols = [c for c in df.columns
+                if "사용" in _flat(c) and "유상" in _flat(c)
+                and not any(k in _flat(c) for k in ("충전", "환불", "잔액", "남은", "소멸"))]
     if not date_col or not use_cols:
         return pd.DataFrame(columns=KKO_CASH_COLS)
 
@@ -4153,7 +4167,7 @@ def detect_upload_kind(file) -> str:
         return "weekly"
     if any(k in flat for k in ("맨즈탭", "맨즈텝", "소재별", "일일성과", "result.csv")):
         return "media_report"
-    if "캐시사용현황" in flat or "비즈월렛" in flat:
+    if "캐시사용현황" in flat or "비즈월렛" in flat or "캐시관리" in flat:
         return "kakao_cash"
     if "messagestat" in flat or ("카카오" in flat and "메시지" in flat):
         return "kakao_msg"
@@ -4243,7 +4257,14 @@ def render_upload_panel():
             kc = parse_kakao_cash_file(kcash_file)
             if kc.empty:
                 status.update(label="인식 실패", state="error")
-                st.write("'캐시 사용_유상캐시' 열을 못 찾았습니다.")
+                st.write("유상캐시 '사용' 열을 못 찾았습니다.")
+                # 어떤 열 이름으로 내려왔는지 그대로 보여준다 — 이것만 알려주시면 바로 맞춥니다.
+                _hs = st.session_state.get("kcash_headers")
+                if _hs:
+                    st.write("파일에서 읽은 열 이름:")
+                    st.code("\n".join(f"{i+1}. {h}" for i, h in enumerate(_hs)), language=None)
+                else:
+                    st.write("파일을 아예 못 읽었습니다(인코딩 문제일 수 있습니다).")
             else:
                 st.write(f"💳 사용 내역 {len(kc)}일")
                 st.write(f"기간 {kc['report_date'].min()} ~ {kc['report_date'].max()}")
