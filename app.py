@@ -588,16 +588,29 @@ def inject_theme():
              '안쪽여백 11 + 아이콘 18 + 간격 7 = 36px'에서 정확히 시작하고,
              하위 항목(막대 3 + 여백 33 = 36px)과 딱 맞는다. */
         div.st-key-stco_nav div[data-testid="stExpander"] summary {{
-            background: {THEME_COLORS["foreground"]} !important;
+            background-color: {THEME_COLORS["foreground"]} !important;
+            /* 아이콘을 글자 앞에 '끼워 넣지' 않고 배경으로 깐다.
+               안쪽 div가 제각각 여백을 갖고 있어서 글자 위치를 계산할 수 없었기 때문이다.
+               이렇게 하면 글자는 무조건 padding-left(36px)에서 시작한다. */
+            background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}") !important;
+            background-repeat: no-repeat !important;
+            background-position: 11px center !important;
+            background-size: 18px 18px !important;
             border-radius: 9px !important;
-            padding: 10px 11px !important;
+            padding: 10px 11px 10px 36px !important;
             display: flex !important;
             align-items: center !important;
             justify-content: space-between !important;
             gap: 8px;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
-            background: #2B323C !important;
+            background-color: #2B323C !important;
+        }}
+        /* 안쪽 컨테이너의 자체 여백을 전부 없앤다 — 이게 남아 있으면 글자가 또 밀린다 */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary > *,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary > * > * {{
+            margin: 0 !important;
+            padding: 0 !important;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary p,
         div.st-key-stco_nav div[data-testid="stExpander"] summary span {{
@@ -650,26 +663,15 @@ def inject_theme():
         div.st-key-stco_nav div[data-testid="stExpander"] details[open] > summary::after {{
             transform: rotate(-135deg) translate(-2px, -2px);
         }}
-        /* 그룹명 왼쪽 아이콘 (이모지 대신 SVG) */
-        div.st-key-stco_nav div[data-testid="stExpander"] summary p::before {{
-            content: "";
-            display: inline-block;
-            width: 18px; height: 18px;
-            margin-right: 7px;
-            vertical-align: -4px;
-            background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}");
-            background-size: contain;
-            background-repeat: no-repeat;
-            background-position: center;
+        /* 그룹별 아이콘 — summary 배경으로 깔린 것만 바꿔 끼운다 */
+        div.st-key-navgrp_report div[data-testid="stExpander"] summary {{
+            background-image: url("data:image/svg+xml;base64,{NAV_ICON_PERFORMANCE_B64}") !important;
         }}
-        div.st-key-navgrp_report div[data-testid="stExpander"] summary p::before {{
-            background-image: url("data:image/svg+xml;base64,{NAV_ICON_PERFORMANCE_B64}");
+        div.st-key-navgrp_ops div[data-testid="stExpander"] summary {{
+            background-image: url("data:image/svg+xml;base64,{NAV_ICON_OPERATIONS_B64}") !important;
         }}
-        div.st-key-navgrp_ops div[data-testid="stExpander"] summary p::before {{
-            background-image: url("data:image/svg+xml;base64,{NAV_ICON_OPERATIONS_B64}");
-        }}
-        div.st-key-navgrp_guide div[data-testid="stExpander"] summary p::before {{
-            background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}");
+        div.st-key-navgrp_guide div[data-testid="stExpander"] summary {{
+            background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}") !important;
         }}
         /* expander 본문이 기본으로 왼쪽 여백을 갖고 있어서, 여기에 버튼 여백까지 더해지면
            하위 항목이 그룹 글자보다 더 오른쪽으로 튀어나온다. 본문 여백을 0으로 만들고
