@@ -935,6 +935,98 @@ def inject_theme():
             background: {SIDEBAR["accent_soft"]} !important;
             background-color: {SIDEBAR["accent_soft"]} !important;
         }}
+
+        /* ── 가독성 보정 ────────────────────────────────────────────────
+           어두운 바탕으로 바꾸면서 묻힌 곳들을 밝게 올린다. */
+
+        /* 파일 업로더 — 안내 문구와 Upload 버튼이 배경에 묻혔다 */
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            border: 1px dashed #4A4A78 !important;
+            padding: 14px 12px !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] span,
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] div {{
+            color: #D7DAEA !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] small {{
+            color: #9098B8 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {{
+            background: #33335E !important;
+            color: #FFFFFF !important;
+            border: 1px solid #52528A !important;
+            font-weight: 600 !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button:hover {{
+            background: {SIDEBAR["accent"]} !important;
+            border-color: {SIDEBAR["accent"]} !important;
+        }}
+        /* 올린 파일 목록 */
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"] * {{
+            color: #D7DAEA !important;
+        }}
+
+        /* 지표 카드(누적 주간 데이터) — 본문용 흰 카드 스타일이 그대로 와서 튀었다 */
+        section[data-testid="stSidebar"] [data-testid="stMetric"] {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            border: 1px solid {SIDEBAR["line"]} !important;
+            border-radius: 12px !important;
+            padding: 13px 15px !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stMetricValue"],
+        section[data-testid="stSidebar"] [data-testid="stMetricValue"] * {{
+            color: #FFFFFF !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stMetricLabel"],
+        section[data-testid="stSidebar"] [data-testid="stMetricLabel"] * {{
+            color: {SIDEBAR["text_dim"]} !important;
+        }}
+
+        /* 메뉴 항목 글씨를 한 단계 밝게 — 회색이 너무 어두워 안 읽혔다 */
+        div.st-key-stco_nav .stButton button,
+        div.st-key-stco_nav .stButton button p {{
+            color: #BFC5DE !important;
+        }}
+        div.st-key-stco_nav .stButton button:hover,
+        div.st-key-stco_nav .stButton button:hover p {{
+            color: #FFFFFF !important;
+        }}
+        div.st-key-stco_nav .stButton button[kind="primary"],
+        div.st-key-stco_nav .stButton button[kind="primary"] p,
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"],
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"] p {{
+            color: #FFFFFF !important;
+        }}
+        /* 그룹 머리 글씨도 또렷하게 */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary p {{
+            color: #FFFFFF !important;
+        }}
+        /* 사이드바 본문 글씨 전반을 한 단계 밝게 */
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] li {{
+            color: #D2D6E8 !important;
+        }}
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] h4 {{
+            color: #FFFFFF !important;
+        }}
+        /* 알림 상자(성공·경고·오류)도 어두운 바탕용으로 */
+        section[data-testid="stSidebar"] [data-testid="stAlert"] {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            border: 1px solid {SIDEBAR["line"]} !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stAlert"] * {{
+            color: #D7DAEA !important;
+        }}
+        /* 표(미리보기) */
+        section[data-testid="stSidebar"] [data-testid="stDataFrame"] {{
+            border: 1px solid {SIDEBAR["line"]} !important;
+            border-radius: 10px !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
