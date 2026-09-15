@@ -85,6 +85,19 @@ THEME_COLORS = {
     "weak_fg": "#1b64da",
     "danger": "#e42939",
 }
+
+# 사이드바는 본문과 반대로 '어두운 패널'로 간다(MoneyFlow 스타일 참고).
+# 본문은 흰 배경 그대로 두고 사이드바만 짙은 남색으로 깔아, 메뉴와 데이터가 시각적으로 분리된다.
+SIDEBAR = {
+    "bg": "#15152B",          # 사이드바 바탕 (짙은 남색)
+    "bg_soft": "#1E1E3A",     # 그 위에 얹는 카드·그룹 띠
+    "line": "#2A2A4A",        # 구분선
+    "text": "#C7CBDD",        # 기본 글자
+    "text_dim": "#7C82A0",    # 설명·라벨
+    "text_on": "#FFFFFF",     # 강조 글자
+    "accent": "#7C5CFF",      # 현재 메뉴·포인트 (보라)
+    "accent_soft": "#9B84FF",
+}
 px.defaults.color_discrete_sequence = ["#3182f6", "#191f28", "#8b95a1", "#1b64da"]
 
 # 사이드바 '메뉴' 그룹 헤더 아이콘(사용자가 준 SVG, 초록 폴더+막대그래프)을 base64로 인라인 임베드.
@@ -768,6 +781,159 @@ def inject_theme():
             background: {THEME_COLORS["primary_hover"]} !important;
             background-color: {THEME_COLORS["primary_hover"]} !important;
             color: #FFFFFF !important;
+        }}
+
+        /* ══════════════════════════════════════════════════════════════════
+           사이드바 — 짙은 남색 패널 (본문은 흰 배경 그대로)
+           메뉴와 데이터를 색으로 갈라놓아, 왼쪽은 '길찾기' 오른쪽은 '읽기'가 된다.
+           ══════════════════════════════════════════════════════════════════ */
+        section[data-testid="stSidebar"] {{
+            background: {SIDEBAR["bg"]} !important;
+            border-right: 1px solid {SIDEBAR["line"]} !important;
+        }}
+        section[data-testid="stSidebar"] > div {{
+            background: transparent !important;
+        }}
+        /* 사이드바 안의 글자는 기본을 밝은 색으로 (어두운 바탕이라) */
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] li,
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] h4 {{
+            color: {SIDEBAR["text"]} !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+        section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+        section[data-testid="stSidebar"] small {{
+            color: {SIDEBAR["text_dim"]} !important;
+        }}
+        section[data-testid="stSidebar"] hr {{
+            border-color: {SIDEBAR["line"]} !important;
+        }}
+        /* 접기 화살표(«) */
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg {{
+            fill: {SIDEBAR["text_dim"]} !important;
+        }}
+
+        /* ── 브랜드 블록 (맨 위 로고) ── */
+        .stco-brand {{
+            display: flex; align-items: center; gap: 11px;
+            padding: 4px 2px 18px;
+        }}
+        .stco-brand-mark {{
+            width: 38px; height: 38px; flex: none;
+            border-radius: 11px;
+            background: linear-gradient(135deg, {SIDEBAR["accent"]}, {SIDEBAR["accent_soft"]});
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 4px 14px rgba(124, 92, 255, .35);
+        }}
+        .stco-brand-mark img {{
+            width: 21px; height: 21px;
+            filter: brightness(0) invert(1);   /* 검정 아이콘을 흰색으로 */
+        }}
+        .stco-brand-name {{
+            color: #FFFFFF; font-size: 21px; font-weight: 800;
+            letter-spacing: .14em; line-height: 1.1;
+        }}
+        .stco-brand-sub {{
+            color: {SIDEBAR["accent_soft"]}; font-size: 11.5px; font-weight: 600;
+            letter-spacing: .01em; margin-top: 3px;
+        }}
+
+        /* ── 어두운 바탕에 맞춘 위젯들 ── */
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            border: 1px dashed {SIDEBAR["line"]} !important;
+            color: {SIDEBAR["text"]} !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] svg {{
+            fill: {SIDEBAR["text_dim"]} !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stFileUploaderFile"] {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            border-radius: 8px !important;
+        }}
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            border-color: {SIDEBAR["line"]} !important;
+            color: {SIDEBAR["text"]} !important;
+        }}
+        section[data-testid="stSidebar"] [data-baseweb="input"],
+        section[data-testid="stSidebar"] input {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            color: {SIDEBAR["text"]} !important;
+            border-color: {SIDEBAR["line"]} !important;
+        }}
+        /* 사이드바의 일반 버튼(업로드·저장·새로고침 등) — 메뉴 버튼은 아래에서 따로 */
+        section[data-testid="stSidebar"] .stButton button {{
+            background: {SIDEBAR["bg_soft"]} !important;
+            color: {SIDEBAR["text"]} !important;
+            border: 1px solid {SIDEBAR["line"]} !important;
+        }}
+        section[data-testid="stSidebar"] .stButton button[kind="primary"],
+        section[data-testid="stSidebar"] .stButton button[data-testid="stBaseButton-primary"] {{
+            background: {SIDEBAR["accent"]} !important;
+            border-color: {SIDEBAR["accent"]} !important;
+            color: #FFFFFF !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stMetricValue"] {{
+            color: #FFFFFF !important;
+        }}
+        section[data-testid="stSidebar"] [data-testid="stMetricLabel"] p {{
+            color: {SIDEBAR["text_dim"]} !important;
+        }}
+        /* 사이드바 안 expander(설정 패널 등) */
+        section[data-testid="stSidebar"] div[data-testid="stExpander"] summary {{
+            color: {SIDEBAR["text"]} !important;
+        }}
+
+        /* ── 메뉴: 어두운 패널 위 버전으로 덮어쓰기 ──
+           (위쪽 밝은 테마 규칙보다 뒤에 와서 이 값이 이긴다) */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary {{
+            background-color: {SIDEBAR["bg_soft"]} !important;
+        }}
+        div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
+            background-color: #26264A !important;
+        }}
+        div.st-key-stco_nav .stButton button {{
+            background: transparent !important;
+            border: none !important;
+            border-left: 3px solid transparent !important;
+            color: {SIDEBAR["text_dim"]} !important;
+        }}
+        div.st-key-stco_nav .stButton button p {{
+            color: {SIDEBAR["text_dim"]} !important;
+        }}
+        div.st-key-stco_nav .stButton button:hover {{
+            background: rgba(255,255,255,.06) !important;
+            background-color: rgba(255,255,255,.06) !important;
+            color: #FFFFFF !important;
+        }}
+        div.st-key-stco_nav .stButton button:hover p {{
+            color: #FFFFFF !important;
+        }}
+        /* 현재 페이지 — 보라 알약 */
+        div.st-key-stco_nav .stButton button[kind="primary"],
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"] {{
+            background: {SIDEBAR["accent"]} !important;
+            background-color: {SIDEBAR["accent"]} !important;
+            border: none !important;
+            border-left: 3px solid transparent !important;
+            border-radius: 10px !important;
+            color: #FFFFFF !important;
+            box-shadow: 0 4px 14px rgba(124, 92, 255, .35) !important;
+        }}
+        div.st-key-stco_nav .stButton button[kind="primary"] p,
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"] p {{
+            color: #FFFFFF !important;
+        }}
+        div.st-key-stco_nav .stButton button[kind="primary"]:hover,
+        div.st-key-stco_nav .stButton button[data-testid="stBaseButton-primary"]:hover {{
+            background: {SIDEBAR["accent_soft"]} !important;
+            background-color: {SIDEBAR["accent_soft"]} !important;
         }}
         </style>
         """,
@@ -4451,7 +4617,22 @@ def save_uploaded_file(f, kind: str) -> str:
     return "알 수 없는 종류"
 
 
+def render_sidebar_brand():
+    """사이드바 맨 위 로고 블록. 어두운 패널 위에 STCO 워드마크와 한 줄 설명을 얹는다."""
+    st.sidebar.markdown(
+        '<div class="stco-brand">'
+        '<div class="stco-brand-mark">'
+        f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" />'
+        '</div>'
+        '<div><div class="stco-brand-name">STCO</div>'
+        '<div class="stco-brand-sub">온라인팀 성과 대시보드</div></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_upload_panel():
+    render_sidebar_brand()
     st.sidebar.header("⚙️ 데이터 관리")
     client = get_supabase_client()
     st.sidebar.caption(f"저장소: {'Supabase (Postgres)' if client else '로컬 세션 (테스트용, 새로고침 시 초기화)'}")
@@ -5590,7 +5771,10 @@ def render_utm_builder_page(utm_map: pd.DataFrame, master: pd.DataFrame = None,
 
 
 def render_nav() -> str:
-    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        '<div style="height:1px;background:#2A2A4A;margin:6px 0 10px"></div>',
+        unsafe_allow_html=True,
+    )
     # 매일 처음 보는 화면이 '채널 퍼널 리포트'라서 기본 페이지를 여기로 둔다.
     default_page = NAV_GROUPS["GA 유입 리포트"][0]
     if "nav_page" not in st.session_state:
