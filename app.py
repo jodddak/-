@@ -597,11 +597,11 @@ def inject_theme():
             background-position: 11px center !important;
             background-size: 18px 18px !important;
             border-radius: 9px !important;
-            padding: 10px 11px 10px 36px !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: space-between !important;
-            gap: 8px;
+            padding: 10px 32px 10px 36px !important;
+            /* flex + gap 을 쓰면 숨긴 화살표 자리와 글자 사이에 간격이 남아 글자가 밀린다.
+               block으로 두고 화살표는 absolute로 오른쪽에 박아서, 글자 x = padding-left 뿐이게 한다. */
+            display: block !important;
+            position: relative !important;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
             background-color: #2B323C !important;
@@ -651,19 +651,26 @@ def inject_theme():
         div.st-key-stco_nav div[data-testid="stExpander"] summary::-webkit-details-marker {{
             display: none !important;
         }}
-        /* 오른쪽에 흰색 꺾쇠를 직접 그린다 (펼치면 뒤집힌다) */
+        /* 오른쪽에 흰색 꺾쇠를 절대 위치로 그린다 — 글자 흐름에 안 끼어든다 (펼치면 뒤집힌다) */
         div.st-key-stco_nav div[data-testid="stExpander"] summary::after {{
             content: "";
-            flex: none;
+            position: absolute;
+            right: 15px;
+            top: 50%;
             width: 7px; height: 7px;
-            margin-right: 3px;
             border-right: 2px solid #FFFFFF;
             border-bottom: 2px solid #FFFFFF;
-            transform: rotate(45deg) translate(-2px, -2px);
+            transform: translateY(-70%) rotate(45deg);
             transition: transform .15s ease;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] details[open] > summary::after {{
-            transform: rotate(-135deg) translate(-2px, -2px);
+            transform: translateY(-30%) rotate(-135deg);
+        }}
+        /* summary 안의 글자 컨테이너를 인라인 흐름으로 — 이래야 padding-left가 곧 글자 시작점이다 */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary > div,
+        div.st-key-stco_nav div[data-testid="stExpander"] summary div[data-testid="stMarkdownContainer"] {{
+            display: block !important;
+            width: auto !important;
         }}
         /* 그룹별 아이콘 — summary 배경으로 깔린 것만 바꿔 끼운다 */
         div.st-key-navgrp_report div[data-testid="stExpander"] summary {{
