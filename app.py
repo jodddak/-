@@ -606,11 +606,13 @@ def inject_theme():
         div.st-key-stco_nav div[data-testid="stExpander"] summary:hover {{
             background-color: #2B323C !important;
         }}
-        /* 안쪽 컨테이너의 자체 여백을 전부 없앤다 — 이게 남아 있으면 글자가 또 밀린다 */
-        div.st-key-stco_nav div[data-testid="stExpander"] summary > *,
-        div.st-key-stco_nav div[data-testid="stExpander"] summary > * > * {{
-            margin: 0 !important;
-            padding: 0 !important;
+        /* summary 안쪽 '모든' 요소의 좌우 여백을 없앤다.
+           직계 자식(> *)만 잡았더니 더 깊은 div가 여백을 갖고 있어서 글자가 계속 밀렸다. */
+        div.st-key-stco_nav div[data-testid="stExpander"] summary * {{
+            margin-left: 0 !important;
+            margin-right: 0 !important;
+            padding-left: 0 !important;
+            padding-right: 0 !important;
         }}
         div.st-key-stco_nav div[data-testid="stExpander"] summary p,
         div.st-key-stco_nav div[data-testid="stExpander"] summary span {{
@@ -673,20 +675,26 @@ def inject_theme():
         div.st-key-navgrp_guide div[data-testid="stExpander"] summary {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}") !important;
         }}
-        /* expander 본문이 기본으로 왼쪽 여백을 갖고 있어서, 여기에 버튼 여백까지 더해지면
-           하위 항목이 그룹 글자보다 더 오른쪽으로 튀어나온다. 본문 여백을 0으로 만들고
-           들여쓰기는 버튼 쪽에서만 준다. */
+        /* ★ 하위 항목 정렬 — expander 본문 '안쪽 전부'의 좌우 여백을 0으로 눕힌다.
+           Streamlit이 본문 안에 감싸는 div가 버전마다 다르고 각자 여백을 갖고 있어서,
+           몇 겹인지 세어 맞추는 방식으로는 계속 어긋났다(네 번 틀림).
+           전부 0으로 만든 뒤, 들여쓰기는 **버튼 한 곳에서만** 준다.
+           이 규칙이 아래 버튼 규칙보다 **먼저** 와야 버튼 여백이 살아남는다. */
         div.st-key-stco_nav div[data-testid="stExpanderDetails"] {{
             padding: 5px 0 2px 0 !important;
+            margin: 0 !important;
         }}
-        div.st-key-stco_nav div[data-testid="stExpanderDetails"] > div {{
+        div.st-key-stco_nav div[data-testid="stExpanderDetails"] * {{
             padding-left: 0 !important;
+            padding-right: 0 !important;
+            margin-left: 0 !important;
+            margin-right: 0 !important;
         }}
-        div.st-key-stco_nav .stButton {{ margin-bottom: 1px; }}
-        /* 소분류(페이지) — 그룹 띠의 왼쪽 끝에 맞춰 세운다.
-           그룹 머리에는 화살표+아이콘이 앞에 붙어 글자가 한참 안쪽에서 시작하는데,
-           거기에 맞추려고 하위 항목까지 밀면 오히려 오른쪽으로 튀어나와 보인다.
-           (expander 화살표 버튼까지 잡히지 않게 .stButton 안쪽만 고른다) */
+        div.st-key-stco_nav .stButton {{ margin-bottom: 1px !important; }}
+        /* 소분류(페이지) — 그룹 글자와 같은 세로선에 세운다.
+           그룹 글자 : summary padding-left 36px (아이콘은 배경이라 자리를 안 먹음)
+           하위 항목 : 왼쪽 막대 3px + padding-left 33px = 36px
+           위에서 안쪽 여백을 전부 0으로 눕혔기 때문에 이 두 값만 남는다. */
         div.st-key-stco_nav .stButton button {{
             background: transparent !important;
             border: none !important;
