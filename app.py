@@ -7653,8 +7653,8 @@ FUNNEL_V4_CSS = """
 .fv4-signal-sub { color:#96968a; font-size:13.5px; line-height:1.5; }
 
 /* ── KPI 카드 ──────────────────────────────────────────────────────────
-   한 덩어리 띠에서 '카드 여러 장'으로 바꿨다. 카드마다 위쪽에 색 띠를 두고,
-   첫 카드(총 방문자)는 통짜 파랑으로 채워 시선이 먼저 가게 한다. */
+   흰 카드 + 위쪽 얇은 색 띠로 통일했다. 예전엔 첫 카드를 통짜 파랑으로 채웠는데,
+   그 자리가 '광고비'라 정작 강조할 필요 없는 숫자가 제일 눈에 띄었다. */
 /* 카드가 6장이라 최소폭을 크게 잡으면 화면 밖으로 밀려 가로 스크롤이 생긴다.
    min-width:0 + 작은 기준폭으로 두면 좁은 화면에서 알아서 줄바꿈된다. */
 .fv4-kpis { display:flex; gap:11px; margin-bottom:26px; flex-wrap:wrap; width:100%;
@@ -7670,17 +7670,6 @@ FUNNEL_V4_CSS = """
 .fv4-kpi-label { color:#8a8a7c; font-size:13.5px; margin-bottom:9px; }
 .fv4-kpi-value { color:#17170f; font-size:26px; font-weight:800; letter-spacing:-.02em; display:flex; align-items:baseline; gap:8px; }
 .fv4-kpi-value.money { font-size:21px; letter-spacing:-.03em; flex-wrap:wrap; gap:6px; }
-/* 첫 카드 = 통짜 파랑. 안쪽 글자색을 전부 뒤집는다(증감 색도 포함). */
-.fv4-kpi:first-child { background:#3D5AFE; border-color:#3D5AFE; }
-.fv4-kpi:first-child::after { background:rgba(255,255,255,.45); }
-.fv4-kpi:first-child .fv4-kpi-label { color:rgba(255,255,255,.78); }
-.fv4-kpi:first-child .fv4-kpi-value { color:#fff; }
-.fv4-kpi:first-child .fv4-kpi-sub   { color:rgba(255,255,255,.72); }
-.fv4-kpi:first-child .fv4-kpi-delta,
-.fv4-kpi:first-child .fv4-up,
-.fv4-kpi:first-child .fv4-down { color:#fff !important;
-  background:rgba(255,255,255,.18); padding:2px 7px; border-radius:999px; }
-.fv4-kpi:first-child .fv4-stack { background:rgba(255,255,255,.25); }
 .fv4-chg-note { margin-top:10px; padding-top:9px; border-top:1px dashed #DEDCCF;
                 color:#8a8a7c; font-size:14px; line-height:1.6; }
 .fv4-chg-p   { color:#8a8a7c; font-weight:500; }
@@ -10455,7 +10444,7 @@ CP_CSS = """
 .cp-title{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:0 0 14px}
 /* 칸 개수가 화면마다 달라서 grid를 고정 칸수로 잡으면 빈 칸이 생기고 칸막이가 끊긴다.
    flex로 두고 칸막이를 왼쪽 테두리로 그리면 몇 개든 알아서 맞는다. */
-/* 채널 성과 KPI — 퍼널 화면과 같은 카드 규칙(흰 카드 + 위쪽 색 띠, 첫 장은 통짜 파랑) */
+/* 채널 성과 KPI — 퍼널 화면과 같은 카드 규칙(흰 카드 + 위쪽 얇은 색 띠) */
 .cp-kpis{display:flex;gap:11px;flex-wrap:wrap;margin-bottom:14px;width:100%;
   background:none;border:none;border-radius:0;overflow:visible}
 .cp-kpi{flex:1 1 144px;min-width:0;padding:16px 18px;position:relative;overflow:hidden;
@@ -10464,11 +10453,6 @@ CP_CSS = """
 .cp-kpi::after{content:"";position:absolute;left:0;top:0;width:100%;height:3px;background:#3D5AFE}
 .cp-kpi:nth-child(3n+2)::after{background:#7C4DFF}
 .cp-kpi:nth-child(3n)::after{background:#63C132}
-.cp-kpi:first-child{background:#3D5AFE;border-color:#3D5AFE}
-.cp-kpi:first-child::after{background:rgba(255,255,255,.45)}
-.cp-kpi:first-child .k{color:rgba(255,255,255,.78)}
-.cp-kpi:first-child .v{color:#FFF}
-.cp-kpi:first-child .s{color:rgba(255,255,255,.72)}
 .cp-kpi .k{font-size:14px;color:#6E747C;font-weight:600;margin-bottom:6px}
 .cp-kpi .v{font-size:22px;font-weight:800;letter-spacing:-.02em}
 .cp-kpi .s{font-size:13.5px;color:#7A8088;margin-top:5px}
