@@ -594,10 +594,11 @@ def inject_theme():
                이렇게 하면 글자는 무조건 padding-left(36px)에서 시작한다. */
             background-image: url("data:image/svg+xml;base64,{NAV_GROUP_ICON_B64}") !important;
             background-repeat: no-repeat !important;
-            background-position: 11px center !important;
+            background-position: 6px center !important;
             background-size: 18px 18px !important;
             border-radius: 9px !important;
-            padding: 10px 32px 10px 36px !important;
+            /* 그룹 글자를 왼쪽으로 당김 (36 → 28). 아이콘도 같이 6px로. */
+            padding: 10px 32px 10px 28px !important;
             /* flex + gap 을 쓰면 숨긴 화살표 자리와 글자 사이에 간격이 남아 글자가 밀린다.
                block으로 두고 화살표는 absolute로 오른쪽에 박아서, 글자 x = padding-left 뿐이게 한다. */
             display: block !important;
@@ -711,7 +712,8 @@ def inject_theme():
             align-items: center !important;
             justify-content: flex-start !important;
             text-align: left !important;
-            padding: 9px 12px 9px 33px !important;
+            /* 하위 항목을 오른쪽으로 밀어 그룹 글자와 맞춤 (33 → 44, 막대 3 포함 47px) */
+            padding: 9px 12px 9px 44px !important;
             min-height: 0 !important;
             border-radius: 0 8px 8px 0 !important;
             font-weight: 500 !important;
