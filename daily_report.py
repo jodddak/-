@@ -31,25 +31,47 @@ import pandas as pd
 # ──────────────────────────────────────────────────────────────
 # 설정 — 전부 환경변수(GitHub Secrets)에서 읽는다. 코드에 비밀값을 적지 않는다.
 # ──────────────────────────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+def env(name: str, default: str = "") -> str:
+    """환경변수를 읽되 '빈 값'도 없는 것으로 친다.
+
+    GitHub Actions는 Secret을 안 넣어도 변수 자체는 **빈 문자열로** 만들어 넘긴다.
+    그래서 os.environ.get(name, 기본값) 을 쓰면 기본값이 안 먹고 빈 문자열이 온다
+    (int("") 에서 터졌던 원인). 앞뒤 공백과 따옴표도 같이 털어낸다 —
+    Streamlit Secrets에서 복사하면 따옴표가 딸려오는 일이 흔하다.
+    """
+    v = os.environ.get(name, "")
+    v = str(v).strip().strip('"').strip("'").strip()
+    return v if v else default
+
+
+def env_int(name: str, default: int) -> int:
+    v = env(name)
+    try:
+        return int(v)
+    except ValueError:
+        print(f"[경고] {name} 값이 숫자가 아닙니다({v!r}). {default} 로 진행합니다.", file=sys.stderr)
+        return default
+
+
+SUPABASE_URL = env("SUPABASE_URL")
+SUPABASE_KEY = env("SUPABASE_KEY")
 
 # 보내는 계정은 Gmail을 기본으로 둔다.
 # 사내 SMTP는 보통 외부(GitHub) 서버에서의 발송을 막아둬서 못 쓴다.
 # '어디서 보내느냐'와 '어디로 받느냐'는 별개다 — Gmail로 보내고 회사 주소로 받으면 된다.
-# 사내 서버를 쓸 수 있게 되면 SMTP_HOST만 바꾸면 그대로 동작한다.
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-SMTP_SECURITY = os.environ.get("SMTP_SECURITY", "starttls").lower()  # starttls | ssl | none
+# 사내 서버를 쓸 수 있게 되면 SMTP_HOST만 채우면 그대로 동작한다.
+SMTP_HOST = env("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = env_int("SMTP_PORT", 587)
+SMTP_USER = env("SMTP_USER")
+SMTP_PASS = env("SMTP_PASS").replace(" ", "")   # 앱 비밀번호는 4자리씩 띄어서 보여준다
+SMTP_SECURITY = env("SMTP_SECURITY", "starttls").lower()  # starttls | ssl | none
 
-MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USER)
-MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "STCO 성과 대시보드")
-MAIL_TO = [a.strip() for a in os.environ.get("MAIL_TO", "").split(",") if a.strip()]
-MAIL_CC = [a.strip() for a in os.environ.get("MAIL_CC", "").split(",") if a.strip()]
+MAIL_FROM = env("MAIL_FROM", SMTP_USER)
+MAIL_FROM_NAME = env("MAIL_FROM_NAME", "STCO 성과 대시보드")
+MAIL_TO = [a.strip() for a in env("MAIL_TO").split(",") if a.strip()]
+MAIL_CC = [a.strip() for a in env("MAIL_CC").split(",") if a.strip()]
 
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "")
+DASHBOARD_URL = env("DASHBOARD_URL")
 
 # ── 판정 기준 (app.py와 같은 값) ───────────────────────────────
 KPI_ROAS_LOW = 200        # 목표 하단(%)
@@ -74,8 +96,11 @@ PAGE = 1000               # Supabase(PostgREST)는 응답당 1000행으로 자�
 # Supabase 읽기
 # ──────────────────────────────────────────────────────────────
 def get_client():
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise SystemExit("SUPABASE_URL / SUPABASE_KEY 가 없습니다. GitHub Secrets를 확인해주세요.")
+    missing = [n for n, v in (("SUPABASE_URL", SUPABASE_URL), ("SUPABASE_KEY", SUPABASE_KEY)) if not v]
+    if missing:
+        raise SystemExit(
+            f"{' / '.join(missing)} 가 비어 있습니다.\n"
+            "GitHub → Settings → Secrets and variables → Actions 에서 값이 들어 있는지 확인해주세요.")
     from supabase import create_client
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -532,6 +557,9 @@ def main():
     day = (datetime.strptime(args.date, "%Y-%m-%d").date() if args.date
            else kst_now.date() - timedelta(days=1))
 
+    print(f"집계 날짜: {day}  ·  받는 사람: {', '.join(MAIL_TO) or '(없음)'}  ·  "
+          f"보내는 곳: {SMTP_HOST}:{SMTP_PORT} ({SMTP_SECURITY})")
+
     client = get_client()
     since = day - timedelta(days=3)          # 하루치만 쓰지만 경계 여유를 둔다
     ad_spend = load_table(client, "ad_spend_daily", since,
@@ -546,9 +574,12 @@ def main():
         if c not in master.columns:
             master[c] = "" if c != "sort_order" else 100
 
+    print(f"읽은 행: 광고비 {len(ad_spend):,} · GA {len(ga_daily):,} · 매체정의 {len(master):,}")
+
     df = build_rows(ad_spend, ga_daily, master, day)
     if df.empty:
-        print(f"[알림] {day} 에 집계할 데이터가 없습니다. 메일을 보내지 않습니다.")
+        print(f"[알림] {day} 에 집계할 데이터가 없습니다. 메일을 보내지 않습니다.\n"
+              "       (대시보드에서 그 날짜에 데이터가 있는지 확인해주세요)")
         return
 
     head, items = build_actions(df)
