@@ -2666,6 +2666,13 @@ GFA_MO_EXT = "네이버 GFA MO (외부몰)"
 GFA_TABS = [GFA_PC_OWN, GFA_MO_OWN, GFA_PC_EXT, GFA_MO_EXT]
 GFA_EXT_TABS = {GFA_PC_EXT, GFA_MO_EXT}
 
+# 메타도 자사몰/외부몰을 다른 광고 계정으로 돌린다(STCO_AD / STCO_스마트스토어).
+META_OWN_TAB = "메타 (자사몰)"
+META_EXT_TAB = "메타 (외부몰)"
+
+# 외부몰 탭 — GA4가 못 보는 영역이라 구매·매출을 '매체가 신고한 값'으로 본다.
+EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB}
+
 
 def gfa_tab_of(text) -> str | None:
     """GFA 문자열(캠페인명 또는 옛 채널명)에서 탭 이름을 읽는다. 기기를 못 가르면 None.
@@ -2996,7 +3003,7 @@ CREATIVE_IMAGE_BUCKET = "creative-images"
 
 # 소재별 성과 화면의 매체탭(기기 분리 후) → 이미지가 들어있는 원본 채널명 역매핑
 TAB_TO_ORIGIN_CHANNEL = {
-    "메타": "페이스북",
+    "메타": "페이스북", META_OWN_TAB: "페이스북", META_EXT_TAB: "페이스북",
     "구글(P-MAX)": "구글",
     "크리테오": "크리테오",
     # GFA는 기기×몰 네 갈래지만 이미지는 한 폴더에 같이 들어 있다.
@@ -5716,7 +5723,8 @@ def render_channel_mix(fc: pd.DataFrame):
 # 소재별 성과 (신규 페이지)
 # ──────────────────────────────────────────────────────────────
 # 현재 실제로 운영 중인 매체 탭만 고정 순서로 노출 (TOTAL이 맨 왼쪽)
-CREATIVE_TABS = ["TOTAL"] + GFA_TABS + ["메타", "구글(P-MAX)", "크리테오"]
+CREATIVE_TABS = (["TOTAL"] + GFA_TABS
+                 + [META_OWN_TAB, META_EXT_TAB, "구글(P-MAX)", "크리테오"])
 
 
 def _render_creative_table(fc: pd.DataFrame, channel_name: str = None):
@@ -6377,9 +6385,11 @@ TARGETING_STORE_CHANNELS = {"네이버 쇼핑검색광고"}
 
 # 사용자가 정리해준 리포트 순서(비용순 정렬이 아니라 매체 관례상 고정 순서) — 목록에 없는
 # 채널은 뒤에 광고비 내림차순으로 붙는다.
-TARGETING_NEW_CHANNEL_ORDER = GFA_TABS + ["메타", "구글(P-MAX)", "네이버 맨즈탭"]
+TARGETING_NEW_CHANNEL_ORDER = GFA_TABS + [META_OWN_TAB, META_EXT_TAB,
+                                          "구글(P-MAX)", "네이버 맨즈탭"]
 TARGETING_RETARGET_OWN_CHANNEL_ORDER = (
-    ["네이버 검색광고", "네이버 브랜드검색광고"] + GFA_TABS + ["메타", "크리테오"])
+    ["네이버 검색광고", "네이버 브랜드검색광고"] + GFA_TABS
+    + [META_OWN_TAB, META_EXT_TAB, "크리테오"])
 
 TARGETING_CORE_COLS = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
                         "signups", "signup_rate", "conversions", "revenue", "roas"]
@@ -7903,6 +7913,9 @@ FUNNEL_CANON_RULES = [
     ("네이버 GFA_외부몰", ["gfa_외부몰", "gfa 외부몰", "gfa pc (외부몰)", "gfa mo (외부몰)",
                         "gfa (외부몰)"]),
     ("네이버 GFA", ["gfa"]),
+    # 메타 외부몰(STCO_스마트스토어 계정)은 메타보다 먼저 봐야 한다 —
+    # '메타' 규칙이 먼저 걸리면 자사몰과 합쳐진다.
+    ("메타_외부몰", ["메타_외부몰", "메타 (외부몰)", "메타외부몰", "meta_ext"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
     ("카카오톡 플친", ["카카오", "kakao", "플친"]),
@@ -8754,45 +8767,82 @@ def _meta_link_clicks(row: dict) -> float:
     return float(row.get("clicks") or 0)
 
 
-def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
-    """Meta Marketing API에서 일별 광고비를 받아온다(계정 단위). 인증이 없으면 빈 결과."""
-    cfg = _secrets_section("meta_ads")
-    if not cfg or not cfg.get("access_token") or not cfg.get("ad_account_id"):
-        return pd.DataFrame()
-    import requests
+# 메타는 자사몰과 외부몰(스마트스토어)을 **다른 광고 계정**으로 돌린다.
+# 계정이 다르니 한 번에 못 받고, 계정마다 따로 받아서 매체명을 다르게 붙여야 한다.
+#   [meta_ads]
+#   ad_account_id     = "1107344179655310"   ← STCO_AD (자사몰)
+#   ad_account_id_ext = "1932624177545739"   ← STCO_스마트스토어 (외부몰)
+META_CHANNEL = "메타"
+META_EXT_CHANNEL = "메타_외부몰"
 
-    acct = str(cfg["ad_account_id"]).strip()
-    if not acct.startswith("act_"):
-        acct = f"act_{acct}"
+
+def _meta_accounts() -> list:
+    """[(매체명, act_계정ID)]. 외부몰 계정이 없으면 자사몰만 돌려준다."""
+    cfg = _secrets_section("meta_ads") or {}
+    if not cfg.get("access_token"):
+        return []
+
+    def _act(v):
+        v = str(v or "").strip()
+        if not v:
+            return None
+        return v if v.startswith("act_") else f"act_{v}"
+
+    out = []
+    own = _act(cfg.get("ad_account_id"))
+    if own:
+        out.append((META_CHANNEL, own))
+    for k in ("ad_account_id_ext", "ad_account_id_외부몰", "ad_account_id_smartstore"):
+        ext = _act(cfg.get(k))
+        if ext:
+            out.append((META_EXT_CHANNEL, ext))
+            break
+    return out
+
+
+def _meta_insights(acct: str, params: dict, timeout: int = 60):
+    """메타 insights를 페이지 끝까지 읽어 원본 행을 그대로 돌려준다."""
+    import requests
+    cfg = _secrets_section("meta_ads") or {}
     ver = str(cfg.get("api_version", "v21.0")).strip()
     url = f"https://graph.facebook.com/{ver}/{acct}/insights"
-    params = {
-        # clicks는 좋아요·프로필 클릭까지 포함한 '전체 클릭'이라 광고관리자 화면(링크 클릭)과
-        # 숫자가 다르다. actions에서 link_click을 꺼내 쓴다.
-        "fields": "spend,impressions,clicks,actions",
-        "level": "account",
-        "time_increment": 1,
-        "time_range": json.dumps({"since": str(start), "until": str(end)}),
-        "access_token": cfg["access_token"],
-        "limit": 500,
-    }
+    p = dict(params, access_token=cfg["access_token"], limit=500)
     rows = []
     while url:
-        resp = requests.get(url, params=params, timeout=60)
+        resp = requests.get(url, params=p, timeout=timeout)
         payload = resp.json()
         if "error" in payload:
             raise RuntimeError(payload["error"].get("message", str(payload["error"])))
-        for d in payload.get("data", []):
+        rows.extend(payload.get("data", []))
+        nxt = (payload.get("paging") or {}).get("next")
+        url, p = (nxt, None) if nxt else (None, None)
+    return rows
+
+
+def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
+    """Meta Marketing API에서 일별 광고비를 받아온다(계정 단위). 인증이 없으면 빈 결과."""
+    accounts = _meta_accounts()
+    if not accounts:
+        return pd.DataFrame()
+
+    rows = []
+    for ch, acct in accounts:
+        for d in _meta_insights(acct, {
+            # clicks는 좋아요·프로필 클릭까지 포함한 '전체 클릭'이라 광고관리자 화면(링크 클릭)과
+            # 숫자가 다르다. actions에서 link_click을 꺼내 쓴다.
+            "fields": "spend,impressions,clicks,actions",
+            "level": "account",
+            "time_increment": 1,
+            "time_range": json.dumps({"since": str(start), "until": str(end)}),
+        }):
             rows.append({
-                "report_date": d.get("date_start"), "channel": "메타",
+                "report_date": d.get("date_start"), "channel": ch,
                 # 메타도 국내는 VAT 별도 청구라 insights의 spend는 VAT 제외 금액이다.
                 # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
                 "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
                 "impressions": float(d.get("impressions") or 0),
                 "clicks": _meta_link_clicks(d),
             })
-        nxt = (payload.get("paging") or {}).get("next")
-        url, params = (nxt, None) if nxt else (None, None)
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
@@ -9542,46 +9592,111 @@ def _empty_creative():
 
 
 def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
-    """메타 광고(ad) 단위 일별 실적. 광고 이름이 곧 소재명이다."""
-    cfg = _secrets_section("meta_ads")
-    if not cfg or not cfg.get("access_token") or not cfg.get("ad_account_id"):
-        return _empty_creative()
-    import requests
-
-    acct = str(cfg["ad_account_id"]).strip()
-    if not acct.startswith("act_"):
-        acct = f"act_{acct}"
-    ver = str(cfg.get("api_version", "v21.0")).strip()
-    url = f"https://graph.facebook.com/{ver}/{acct}/insights"
-    params = {
-        "fields": "ad_name,spend,impressions,clicks,actions,action_values",
-        "level": "ad",                     # ← 계정이 아니라 광고 단위
-        "time_increment": 1,
-        "time_range": json.dumps({"since": str(start), "until": str(end)}),
-        "access_token": cfg["access_token"],
-        "limit": 500,
-    }
+    """메타 광고(ad) 단위 일별 실적. 광고 이름이 곧 소재명이다.
+    자사몰·외부몰 계정을 둘 다 받아 매체명을 나눠 붙인다."""
     rows = []
-    while url:
-        resp = requests.get(url, params=params, timeout=90)
-        payload = resp.json()
-        if "error" in payload:
-            raise RuntimeError(payload["error"].get("message", str(payload["error"])))
-        for d in payload.get("data", []):
+    for ch, acct in _meta_accounts():
+        for d in _meta_insights(acct, {
+            "fields": "ad_name,spend,impressions,clicks,actions,action_values",
+            "level": "ad",                     # ← 계정이 아니라 광고 단위
+            "time_increment": 1,
+            "time_range": json.dumps({"since": str(start), "until": str(end)}),
+        }, timeout=90):
             rows.append({
-                "report_date": d.get("date_start"), "channel": "메타",
+                "report_date": d.get("date_start"), "channel": ch,
                 "creative": str(d.get("ad_name") or "").strip(),
                 "impressions": float(d.get("impressions") or 0),
                 "clicks": _meta_link_clicks(d),
                 # 메타 spend는 VAT 별도라 다른 매체와 단위를 맞추려면 1.1을 곱한다
                 "cost_incl_vat": float(d.get("spend") or 0) * 1.1,
+                # 구매(purchase)만 센다 — 장바구니·콘텐츠뷰까지 더하면 매출이 몇 배로 커진다
                 "conversions": _meta_action_value(d, "actions", "purchase"),
                 "revenue": _meta_action_value(d, "action_values", "purchase"),
                 "source": "meta_api",
             })
-        nxt = (payload.get("paging") or {}).get("next")
-        url, params = (nxt, None) if nxt else (None, None)
     return _creative_frame(rows)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_meta_creative_images(days: int = 60) -> dict:
+    """메타 광고의 배너 이미지를 {정규화 소재명: 이미지 URL}로 받아온다.
+
+    광고(ad)마다 creative가 달려 있고 거기에 썸네일 주소가 있다. 메타 썸네일 URL은
+    서명이 들어가 있어 시간이 지나면 만료되므로, 화면에 바로 쓰지 않고
+    Storage에 올려서 쓴다(그래야 다음에 열어도 그대로 보인다).
+    """
+    out = {}
+    accounts = _meta_accounts()
+    if not accounts:
+        return out
+    import requests
+    cfg = _secrets_section("meta_ads") or {}
+    ver = str(cfg.get("api_version", "v21.0")).strip()
+    for _ch, acct in accounts:
+        url = f"https://graph.facebook.com/{ver}/{acct}/ads"
+        params = {
+            "fields": "name,creative{thumbnail_url,image_url,object_story_spec}",
+            "limit": 200,
+            "access_token": cfg["access_token"],
+            # 최근에 돌린 광고만 — 계정에 광고가 수천 개씩 쌓여 있으면 다 받을 이유가 없다
+            "date_preset": "last_90d" if days > 30 else "last_30d",
+        }
+        try:
+            while url:
+                r = requests.get(url, params=params, timeout=60)
+                p = r.json()
+                if "error" in p:
+                    break
+                for ad in p.get("data", []):
+                    nm = _creative_image_key(str(ad.get("name") or "").strip())
+                    cr = ad.get("creative") or {}
+                    src = cr.get("image_url") or cr.get("thumbnail_url")
+                    if not src:
+                        spec = (cr.get("object_story_spec") or {})
+                        for k in ("link_data", "video_data", "photo_data"):
+                            src = (spec.get(k) or {}).get("picture")
+                            if src:
+                                break
+                    if nm and src and nm not in out:
+                        out[nm] = src
+                nxt = (p.get("paging") or {}).get("next")
+                url, params = (nxt, None) if nxt else (None, None)
+        except Exception:
+            continue
+    return out
+
+
+def sync_meta_creative_images(progress=None) -> tuple:
+    """메타 배너를 받아 Storage에 올린다. (올린 수, 건너뛴 수, 오류목록)
+
+    이미 올라가 있는 소재는 건너뛴다 — 매번 수백 장을 다시 올릴 이유가 없다.
+    """
+    client = get_supabase_client()
+    if client is None:
+        return 0, 0, ["Supabase에 연결되어 있지 않습니다."]
+    import requests
+    have = set(_gc_stored_image_index().keys())
+    found = fetch_meta_creative_images()
+    done, skip, errs = 0, 0, []
+    for i, (name_key, src) in enumerate(found.items(), start=1):
+        stem = _safe_storage_name(name_key)
+        if stem in have:
+            skip += 1
+            continue
+        try:
+            raw = requests.get(src, timeout=30).content
+            path = f"{GC_IMAGE_FOLDER}/{stem}.jpeg"
+            client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
+                path, raw, {"content-type": "image/jpeg", "upsert": "true"})
+            done += 1
+        except Exception as e:
+            if len(errs) < 3:
+                errs.append(f"{name_key}: {str(e)[:80]}")
+        if progress and i % 10 == 0:
+            progress(f"메타 배너 {i}/{len(found)}장 처리 중...")
+    if done:
+        _gc_stored_image_index.clear()
+    return done, skip, errs
 
 
 def _meta_action_value(row: dict, field: str, action_type: str) -> float:
@@ -10516,6 +10631,8 @@ MEDIA_MASTER_DEFAULT = [
     # GFA 계정 안에서 외부몰(스마트스토어)로 보내는 캠페인 — STCO_외부몰_데일리_전환_PC/MO.
     # 자사몰 캠페인과 한 파일로 내려오는데 예전엔 같이 GFA_자사몰로 들어가 있었다.
     ("GFA_외부몰",         "외부몰", 130, "네이버 GFA_외부몰",   "",                  0.0, "", 0),
+    # 메타는 아예 광고 계정이 다르다 — STCO_스마트스토어(1932624177545739).
+    ("메타_외부몰",         "외부몰", 140, "메타_외부몰",         "",                  0.0, "", 0),
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
                      "budget_line", "budget_share", "utm_match", "budget_override", "note"]
@@ -11356,6 +11473,28 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             budget_map[k] = budget_map.get(k, 0.0) + float(v or 0)
     n_months = len(_months)
 
+    # ── 외부몰 구매·매출은 매체가 신고한 값을 쓴다 ───────────────
+    # 외부몰(스마트스토어)로 보낸 광고는 자사몰 GA4에 매출이 아예 안 잡혀서 GA 기준으로는
+    # 늘 0원이다. 광고비만 더해지고 매출이 0이면 '부진'으로 읽히는데, 실제로는 '모르는 것'이다.
+    # 매체 API/리포트가 주는 구매·매출(메타는 purchase, GFA는 구매완료)을 대신 쓴다.
+    # 기준이 GA와 달라 자사몰 숫자와 그대로 더하면 안 되므로 표에 출처를 따로 적는다.
+    _ext_media_perf = {}
+    try:
+        _acd = load_table("ad_creative_daily")
+    except Exception:
+        _acd = None
+    if _acd is not None and not _acd.empty:
+        _a = _acd.copy()
+        _a["_d"] = pd.to_datetime(_a.get("report_date"), errors="coerce").dt.date
+        _a = _a[(_a["_d"] >= start) & (_a["_d"] <= end)]
+        for c in ("conversions", "revenue"):
+            _a[c] = pd.to_numeric(_a.get(c), errors="coerce").fillna(0)
+        if not _a.empty:
+            _a["_canon"] = _a["channel"].map(_v4_canon_channel)
+            for _c, _sub in _a.groupby("_canon"):
+                _ext_media_perf[_c] = {"conv": float(_sub["conversions"].sum()),
+                                       "rev": float(_sub["revenue"].sum())}
+
     recs = []
     for _, r in mst.iterrows():
         sc = str(r.get("spend_channel") or "").strip()
@@ -11368,8 +11507,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             pass
         g = ga_map.get(r["media"], {"conv": 0.0, "rev": 0.0})
         cost = float(sp.get("cost_incl_vat", 0) or 0)
+        _scope = r.get("scope", "자사몰")
+        _basis = "GA4"
+        if _scope == "외부몰" and float(g["rev"] or 0) <= 0:
+            _mp = _ext_media_perf.get(_v4_canon_channel(sc)) or {}
+            if float(_mp.get("rev", 0) or 0) > 0 or float(_mp.get("conv", 0) or 0) > 0:
+                g = {"conv": float(_mp.get("conv", 0)), "rev": float(_mp.get("rev", 0))}
+                _basis = "매체"
         recs.append({
-            "구분": r.get("scope", "자사몰"), "매체": r["media"],
+            "구분": _scope, "매체": r["media"],
             "노출": float(sp.get("impressions", 0) or 0),
             "클릭": float(sp.get("clicks", 0) or 0),
             "비용": cost,
@@ -11377,9 +11523,18 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "GA ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
             "월예산": budget,
             "예산 소진율": (cost / budget * 100) if budget > 0 else None,
-            "_src": sp.get("source", ""), "_order": int(r.get("sort_order") or 100),
+            "_src": sp.get("source", ""), "_basis": _basis,
+            "_order": int(r.get("sort_order") or 100),
         })
     df = pd.DataFrame(recs)
+    _ext_basis = sorted(df.loc[df["_basis"] == "매체", "매체"].unique()) if not df.empty else []
+    if _ext_basis:
+        st.caption(
+            "ℹ️ " + ", ".join(_ext_basis) + " 의 구매·매출은 **매체가 신고한 값**입니다 — "
+            "외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. "
+            "어트리뷰션 기준이 GA와 달라(보통 더 후합니다) 자사몰 매체와 나란히 "
+            "비교하진 마세요."
+        )
 
     _spend_gap_warning(ga_daily, ad_spend, start, end)
     _contract_gap_warning(ad_spend, start, end)
@@ -12117,13 +12272,20 @@ def diagnose_ad_spend_setup() -> str:
         if miss:
             ng(f"1. 메타: 빠진 항목 {', '.join(miss)}")
         else:
-            info(f"메타 광고계정: {meta.get('ad_account_id')}")
+            for _ch, _ac in _meta_accounts():
+                info(f"메타 광고계정 — {_ch}: {_ac}")
+            if not any(ch == META_EXT_CHANNEL for ch, _ in _meta_accounts()):
+                ng("1-2. 메타 외부몰 계정이 없습니다 — Secrets [meta_ads] 에 "
+                   'ad_account_id_ext = "1932624177545739" (STCO_스마트스토어) 를 '
+                   "추가하면 외부몰도 같이 받습니다.")
             try:
                 df = fetch_meta_spend(test_start, test_end)
                 if df.empty:
                     ng(f"1. 메타: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
                 else:
-                    ok(f"1. 메타 연동 성공: {len(df)}일, 합계 {df['cost_incl_vat'].sum():,.0f}원")
+                    _by = df.groupby("channel")["cost_incl_vat"].sum()
+                    ok("1. 메타 연동 성공: "
+                       + " · ".join(f"{c} {v:,.0f}원" for c, v in _by.items()))
             except Exception as e:
                 ng(f"1. 메타 조회 실패: {str(e)[:220]}")
 
@@ -12296,7 +12458,13 @@ def _gc_channel(name) -> str:
         # 기기를 못 가른 GFA — 몰 구분만이라도 살린다
         if ("외부몰" in s) or ("스마트스토어" in s):
             return "네이버 GFA (외부몰)"
-    return _v4_canon_channel(name)
+    canon = _v4_canon_channel(name)
+    # 메타도 자사몰/외부몰이 다른 계정이라 탭을 나눈다.
+    # 옛 데이터는 그냥 '메타'로 저장돼 있는데, 그때는 외부몰 계정을 안 받았으니 자사몰이 맞다.
+    if canon in ("메타", META_EXT_CHANNEL):
+        return META_EXT_TAB if (canon == META_EXT_CHANNEL
+                                or "외부몰" in s or "스마트스토어" in s) else META_OWN_TAB
+    return canon
 
 
 # 탭 정렬 키. GFA는 **PC를 MO보다 앞에** 둔다 — 운영도 PC부터 보기 때문이고,
@@ -12304,6 +12472,8 @@ def _gc_channel(name) -> str:
 _GC_TAB_ORDER_FIX = {
     GFA_PC_OWN: "네이버 GFA 1 (자사몰)", GFA_MO_OWN: "네이버 GFA 2 (자사몰)",
     GFA_PC_EXT: "네이버 GFA 1 (외부몰)", GFA_MO_EXT: "네이버 GFA 2 (외부몰)",
+    # 메타도 자사몰 → 외부몰 순으로
+    META_OWN_TAB: "메타 1 (자사몰)", META_EXT_TAB: "메타 2 (외부몰)",
 }
 
 
@@ -13105,6 +13275,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             st.write("② 매체 API — 노출·클릭·광고비 (GFA는 리포트 업로드)")
             n2, saved2, err2 = sync_ad_creative(ad_creative, progress=st.write,
                                                 unlimited=unlimited)
+            # ③ 메타 배너 이미지 — 광고(ad)에 붙은 크리에이티브 썸네일을 받아 Storage에 넣는다.
+            #    메타가 주는 썸네일 URL은 서명이 들어 있어 시간이 지나면 만료되므로
+            #    화면에 바로 쓰지 않고 우리 쪽에 복사해둔다.
+            st.write("③ 메타 배너 이미지")
+            try:
+                _im_new, _im_skip, _im_err = sync_meta_creative_images(progress=st.write)
+                st.write(f"   ✅ 새로 {_im_new}장 · 이미 있음 {_im_skip}장"
+                         + (f" · ⚠️ {_im_err[0]}" if _im_err else ""))
+            except Exception as _e:
+                st.write(f"   ⚠️ 건너뜀 — {str(_e)[:100]}")
             _st2.update(label=f"소재 데이터 동기화 완료 (GA {n:,}행 · 매체 {n2:,}행)",
                         state="complete")
         # 바로 아래에서 st.rerun()을 하면 지금 그린 경고가 통째로 사라진다.
@@ -13355,7 +13535,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 뒤로 미는 탭 — 맨즈탭은 별도 시트로 관리하고, 외부몰은 기준(매체 신고)이 달라서
     # 자사몰 탭들과 나란히 두면 헷갈린다. 순서만 뒤로 보낸다.
     sep = [c for c in all_ch
-           if c in GC_DEFAULT_EXCLUDE or c in GFA_EXT_TABS or c == "네이버 GFA (외부몰)"]
+           if c in GC_DEFAULT_EXCLUDE or c in EXT_TABS or c == "네이버 GFA (외부몰)"]
     order = [c for c in all_ch if c not in sep and c not in folded] + sep
     if not order:
         st.warning(
@@ -13579,7 +13759,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
             # 외부몰은 GA4가 못 보는 영역이라 매체 신고 전환·매출로 본다.
-            _media_basis = (label in GFA_EXT_TABS) or (label == "네이버 GFA (외부몰)")
+            _media_basis = (label in EXT_TABS) or (label == "네이버 GFA (외부몰)")
             if _media_basis:
                 st.info(
                     "외부몰 광고는 **스마트스토어로 보내기 때문에 자사몰 GA4에 방문·매출이 "
