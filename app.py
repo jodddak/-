@@ -4414,21 +4414,36 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
     c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
     c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
-    # 전환·매출은 '값' 열만 봐야 한다. 리포트에는 같은 단어가 들어간 **비율·단가** 열이
-    # 같이 온다 — `전환당 비용` · `전환율` · `ROAS`. 부분일치로 찾으면 그게 먼저 걸린다.
-    _NOT_A_VALUE = ("비용", "단가", "유형", "률", "율", "cost", "cpa", "cpc", "cpm",
-                    "rate", "roas", "평균")
-    # 전환수를 찾을 땐 금액 열도 빼야 한다. '전환매출액'은 '전환'을 품고 있어서
-    # 전환수 열이 없는 파일에서는 매출이 전환 건수로 들어가 버린다(ROAS가 통째로 망가진다).
-    _NOT_A_COUNT = _NOT_A_VALUE + ("매출", "금액", "revenue", "value", "sales")
+    # ── 전환은 '구매완료'만 쓴다 ────────────────────────────────
+    # GFA 리포트는 전환 종류를 전부 따로 준다 — 구매완료·장바구니 담기·회원가입·
+    # 위시리스트·컨텐츠보기… 그리고 그걸 다 더한 '총 전환매출액'도 같이 준다.
+    # 총합을 쓰면 장바구니에 담기만 한 금액까지 매출로 잡혀 ROAS가 터무니없이 커진다.
+    # 실제로 외부몰 2026-09-01~16: 총 전환매출액 4,856,930원 중 4,734,100원이
+    # 장바구니였다 — ROAS 3,941%로 보이지만 구매완료만 보면 122,830원 · 100%다.
+    # '앱 내 구매완료'도 앱 지표라 웹 매출과 섞으면 안 된다.
+    _EXCLUDE_CONV = (
+        "총", "앱", "장바구니", "위시", "회원가입", "신청", "구독", "소식받기",
+        "예약", "컨텐츠", "사용자정의", "레벨", "튜토리얼", "설치",
+        "비용", "단가", "유형", "률", "율", "광고수익", "roas", "cpa", "cpc", "cpm",
+        "rate", "cost", "평균",
+    )
+    # 건수를 찾을 땐 금액 열도 빼야 한다 — '구매완료 전환매출액'이 '구매완료'를 품고
+    # 있어서, 그걸 건수로 잡으면 매출이 구매 건수로 들어간다.
+    _EXCLUDE_COUNT = _EXCLUDE_CONV + ("매출", "금액", "revenue", "value", "sales")
 
     def _cols_without(bad):
         return [c for c in cols if not any(b in str(c).lower() for b in bad)]
 
-    c_cv = _mr_pick(_cols_without(_NOT_A_COUNT), MEDIA_REPORT_COLS["conv"])
-    c_rv = _mr_pick(_cols_without(_NOT_A_VALUE), MEDIA_REPORT_COLS["rev"])
-    # 네이버 GFA 리포트는 '전환수'라는 열이 없다. 대신 **'결과' + '결과 유형'** 꼴로 준다
-    # (결과 유형이 '전환'/'앱설치'/'동영상 재생' 등으로 바뀌고, 결과는 그 유형의 건수).
+    # 앞에 있는 후보가 먼저 이긴다. 구매완료 > (그냥) 전환수 순.
+    c_cv = _mr_pick(_cols_without(_EXCLUDE_COUNT),
+                    ["구매완료 수", "구매 완료 수", "구매완료수", "purchase"]
+                    + MEDIA_REPORT_COLS["conv"])
+    c_rv = _mr_pick(_cols_without(_EXCLUDE_CONV),
+                    ["구매완료 전환매출액", "구매완료 매출액", "구매완료전환매출액"]
+                    + MEDIA_REPORT_COLS["rev"])
+    # 구매완료·전환수 열이 아예 없는 옛 형식(지표를 안 붙이고 받은 파일)용 마지막 수단.
+    # 네이버 GFA는 '결과' + '결과 유형' 꼴로도 주는데, 이 '결과'는 **총 전환**이라
+    # 장바구니까지 섞여 있다. 그래서 구매완료 열이 있으면 절대 이걸 쓰지 않는다.
     # '결과당 비용' 같은 열에 잘못 붙지 않도록 이름이 정확히 '결과'인 열만 본다.
     c_result = next((c for c in cols if str(c).strip() == "결과"), None)
     c_rtype = next((c for c in cols if str(c).strip().replace(" ", "") == "결과유형"), None)
@@ -13779,8 +13794,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 f'<span class="fv4-badge-dark">{level}별</span>'
                 f'<div class="fv4-card-title">{label} · {level}별 '
                 f'{"매체 신고" if _media_basis else "GA"} 성과</div>'
-                + ('<div class="fv4-card-sub">구매·매출은 <b>매체(GFA)가 신고한 값</b>입니다 — '
-                   '외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. '
+                + ('<div class="fv4-card-sub">구매·매출은 <b>매체(GFA)가 신고한 '
+                   '&lt;구매완료&gt; 값</b>입니다 — 외부몰은 스마트스토어로 보내서 자사몰 GA4에 '
+                   '안 잡히기 때문입니다. GFA가 주는 <b>총 전환매출액은 쓰지 않습니다</b> — '
+                   '장바구니 담기·회원가입까지 매출로 더해져 실제보다 몇 배로 커집니다. '
                    '어트리뷰션 기준이 GA와 달라 다른 탭 숫자와 그대로 더하면 안 됩니다.</div>'
                    if _media_basis else
                    '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
