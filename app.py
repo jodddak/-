@@ -8819,35 +8819,64 @@ def _meta_insights(acct: str, params: dict, timeout: int = 60):
     return rows
 
 
+def _meta_note_error(ch: str, acct: str, err: str):
+    """계정 하나가 막혔을 때 화면에 띄울 안내를 세션에 남긴다."""
+    msg = str(err)
+    if "(#200)" in msg or "permission" in msg.lower():
+        msg = (f"이 토큰에 **{ch}** 광고계정({acct}) 접근 권한이 없습니다.\n\n"
+               "메타 비즈니스 관리자 → **비즈니스 설정 → 계정 → 광고 계정**에서 "
+               "해당 계정을 고르고, 토큰을 만든 사용자(또는 시스템 사용자)에게 "
+               "**광고 계정 관리** 권한을 주세요. 권한을 준 뒤에는 토큰을 새로 "
+               "발급받아야 반영됩니다.")
+    st.session_state.setdefault("meta_account_errors", {})[ch] = msg
+
+
 def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
-    """Meta Marketing API에서 일별 광고비를 받아온다(계정 단위). 인증이 없으면 빈 결과."""
+    """Meta Marketing API에서 일별 광고비를 받아온다(계정 단위). 인증이 없으면 빈 결과.
+
+    계정마다 따로 받고, **한 계정이 막혀도 나머지는 그대로 가져온다.**
+    (외부몰 계정 권한이 없다고 자사몰 광고비까지 같이 못 받으면 안 된다.)
+    """
     accounts = _meta_accounts()
     if not accounts:
         return pd.DataFrame()
 
-    rows = []
+    rows, errs = [], []
     for ch, acct in accounts:
-        for d in _meta_insights(acct, {
-            # clicks는 좋아요·프로필 클릭까지 포함한 '전체 클릭'이라 광고관리자 화면(링크 클릭)과
-            # 숫자가 다르다. actions에서 link_click을 꺼내 쓴다.
-            "fields": "spend,impressions,clicks,actions",
-            "level": "account",
-            "time_increment": 1,
-            "time_range": json.dumps({"since": str(start), "until": str(end)}),
-        }):
-            rows.append({
-                "report_date": d.get("date_start"), "channel": ch,
-                # 메타도 국내는 VAT 별도 청구라 insights의 spend는 VAT 제외 금액이다.
-                # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
-                "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
-                "impressions": float(d.get("impressions") or 0),
-                "clicks": _meta_link_clicks(d),
-            })
+        try:
+            rows.extend(_meta_account_spend_rows(ch, acct, start, end))
+        except Exception as e:
+            errs.append((ch, acct, str(e)))
+            _meta_note_error(ch, acct, e)
+    if not rows and errs:
+        raise RuntimeError(" / ".join(f"{c}: {m[:160]}" for c, _a, m in errs))
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
     return out.dropna(subset=["report_date"]).reset_index(drop=True)
+
+
+def _meta_account_spend_rows(ch: str, acct: str, start: date, end: date) -> list:
+    """계정 하나의 일별 광고비 행. 실패하면 예외를 그대로 올린다(호출부가 계정별로 잡는다)."""
+    rows = []
+    for d in _meta_insights(acct, {
+        # clicks는 좋아요·프로필 클릭까지 포함한 '전체 클릭'이라 광고관리자 화면(링크 클릭)과
+        # 숫자가 다르다. actions에서 link_click을 꺼내 쓴다.
+        "fields": "spend,impressions,clicks,actions",
+        "level": "account",
+        "time_increment": 1,
+        "time_range": json.dumps({"since": str(start), "until": str(end)}),
+    }):
+        rows.append({
+            "report_date": d.get("date_start"), "channel": ch,
+            # 메타도 국내는 VAT 별도 청구라 insights의 spend는 VAT 제외 금액이다.
+            # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
+            "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
+            "impressions": float(d.get("impressions") or 0),
+            "clicks": _meta_link_clicks(d),
+        })
+    return rows
 
 
 # 구글애즈 API 버전 탐색 범위. 구글은 대략 분기마다 버전을 올리고 1년 남짓 지나면 폐기한다.
@@ -9594,26 +9623,34 @@ def _empty_creative():
 def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
     """메타 광고(ad) 단위 일별 실적. 광고 이름이 곧 소재명이다.
     자사몰·외부몰 계정을 둘 다 받아 매체명을 나눠 붙인다."""
-    rows = []
+    rows, errs = [], []
     for ch, acct in _meta_accounts():
-        for d in _meta_insights(acct, {
-            "fields": "ad_name,spend,impressions,clicks,actions,action_values",
-            "level": "ad",                     # ← 계정이 아니라 광고 단위
-            "time_increment": 1,
-            "time_range": json.dumps({"since": str(start), "until": str(end)}),
-        }, timeout=90):
-            rows.append({
-                "report_date": d.get("date_start"), "channel": ch,
-                "creative": str(d.get("ad_name") or "").strip(),
-                "impressions": float(d.get("impressions") or 0),
-                "clicks": _meta_link_clicks(d),
-                # 메타 spend는 VAT 별도라 다른 매체와 단위를 맞추려면 1.1을 곱한다
-                "cost_incl_vat": float(d.get("spend") or 0) * 1.1,
-                # 구매(purchase)만 센다 — 장바구니·콘텐츠뷰까지 더하면 매출이 몇 배로 커진다
-                "conversions": _meta_action_value(d, "actions", "purchase"),
-                "revenue": _meta_action_value(d, "action_values", "purchase"),
-                "source": "meta_api",
-            })
+        try:
+            for d in _meta_insights(acct, {
+                "fields": "ad_name,spend,impressions,clicks,actions,action_values",
+                "level": "ad",                     # ← 계정이 아니라 광고 단위
+                "time_increment": 1,
+                "time_range": json.dumps({"since": str(start), "until": str(end)}),
+            }, timeout=90):
+                rows.append({
+                    "report_date": d.get("date_start"), "channel": ch,
+                    "creative": str(d.get("ad_name") or "").strip(),
+                    "impressions": float(d.get("impressions") or 0),
+                    "clicks": _meta_link_clicks(d),
+                    # 메타 spend는 VAT 별도라 다른 매체와 단위를 맞추려면 1.1을 곱한다
+                    "cost_incl_vat": float(d.get("spend") or 0) * 1.1,
+                    # 구매(purchase)만 센다 — 장바구니·콘텐츠뷰까지 더하면 매출이 몇 배로 커진다
+                    "conversions": _meta_action_value(d, "actions", "purchase"),
+                    "revenue": _meta_action_value(d, "action_values", "purchase"),
+                    "source": "meta_api",
+                })
+        except Exception as e:
+            # 한 계정이 막혀도 나머지는 살린다. 외부몰 권한이 없다고 자사몰 소재까지
+            # 통째로 못 받으면 안 된다(실제로 그렇게 만들어놨었다).
+            errs.append((ch, str(e)))
+            _meta_note_error(ch, acct, e)
+    if not rows and errs:
+        raise RuntimeError(" / ".join(f"{c}: {m[:160]}" for c, m in errs))
     return _creative_frame(rows)
 
 
@@ -11569,6 +11606,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 
     _spend_gap_warning(ga_daily, ad_spend, start, end)
     _contract_gap_warning(ad_spend, start, end)
+    for _k, _v in (st.session_state.get("meta_account_errors") or {}).items():
+        st.warning(f"**{_k}** — {_v}")
 
     # 구글에서 제외한 캠페인이 있으면 알려준다 (마케팅팀 캠페인 등).
     _gx = st.session_state.get("google_excluded_last")
@@ -13345,6 +13384,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         st.warning(f"GA4 소재 동기화 실패 — {_prev_ga_err}")
     for _k, _v in (_prev_err or {}).items():
         st.error(f"**{_k}** 소재 실적을 못 받았습니다 — {_v}")
+    # 메타는 계정이 둘이라, 어느 계정이 막힌 건지 따로 알려준다.
+    for _k, _v in (st.session_state.get("meta_account_errors") or {}).items():
+        st.warning(f"**{_k}** — {_v}")
 
     c1, c2 = st.columns([3, 1])
     with c2:
