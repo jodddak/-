@@ -4414,12 +4414,38 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
     c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
     c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
-    c_cv = _mr_pick(cols, MEDIA_REPORT_COLS["conv"])
-    c_rv = _mr_pick(cols, MEDIA_REPORT_COLS["rev"])
+    # 전환·매출은 '값' 열만 봐야 한다. 리포트에는 같은 단어가 들어간 **비율·단가** 열이
+    # 같이 온다 — `전환당 비용` · `전환율` · `ROAS`. 부분일치로 찾으면 그게 먼저 걸린다.
+    _NOT_A_VALUE = ("비용", "단가", "유형", "률", "율", "cost", "cpa", "cpc", "cpm",
+                    "rate", "roas", "평균")
+    # 전환수를 찾을 땐 금액 열도 빼야 한다. '전환매출액'은 '전환'을 품고 있어서
+    # 전환수 열이 없는 파일에서는 매출이 전환 건수로 들어가 버린다(ROAS가 통째로 망가진다).
+    _NOT_A_COUNT = _NOT_A_VALUE + ("매출", "금액", "revenue", "value", "sales")
+
+    def _cols_without(bad):
+        return [c for c in cols if not any(b in str(c).lower() for b in bad)]
+
+    c_cv = _mr_pick(_cols_without(_NOT_A_COUNT), MEDIA_REPORT_COLS["conv"])
+    c_rv = _mr_pick(_cols_without(_NOT_A_VALUE), MEDIA_REPORT_COLS["rev"])
+    # 네이버 GFA 리포트는 '전환수'라는 열이 없다. 대신 **'결과' + '결과 유형'** 꼴로 준다
+    # (결과 유형이 '전환'/'앱설치'/'동영상 재생' 등으로 바뀌고, 결과는 그 유형의 건수).
+    # '결과당 비용' 같은 열에 잘못 붙지 않도록 이름이 정확히 '결과'인 열만 본다.
+    c_result = next((c for c in cols if str(c).strip() == "결과"), None)
+    c_rtype = next((c for c in cols if str(c).strip().replace(" ", "") == "결과유형"), None)
 
     def num(s):
         return pd.to_numeric(
             s.astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0)
+
+    if c_cv is not None:
+        conv = num(df[c_cv])
+    elif c_result is not None:
+        conv = num(df[c_result])
+        if c_rtype is not None:
+            # 전환이 아닌 결과(앱설치·재생수 등)를 구매로 세면 안 된다.
+            conv = conv.where(df[c_rtype].astype(str).str.contains("전환", na=False), 0.0)
+    else:
+        conv = 0.0
 
     # 소재 화면의 탭 이름으로 바로 맞춰 넣는다(네이버 GFA PC (외부몰) 등).
     # 그래야 _gc_api_by_key가 그대로 읽어서 탭에 붙는다.
@@ -4441,7 +4467,7 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
         "impressions": num(df[c_imp]) if c_imp else 0.0,
         "clicks": num(df[c_clk]) if c_clk else 0.0,
         "cost_incl_vat": num(df[c_cost]) if c_cost else 0.0,
-        "conversions": num(df[c_cv]) if c_cv else 0.0,
+        "conversions": conv,
         "revenue": num(df[c_rv]) if c_rv else 0.0,
         "source": MEDIA_REPORT_CREATIVE_SOURCE,
     })
@@ -12604,6 +12630,10 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
         c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
     g = c.groupby(["channel", "creative"], as_index=False)[
         ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
+    _src_of = {}
+    if "source" in c.columns:
+        for _, r in c.drop_duplicates(subset=["channel", "creative"], keep="last").iterrows():
+            _src_of[(r["channel"], r["creative"])] = str(r["source"])
     for _, r in g.iterrows():
         k = (_gc_channel(r["channel"]), _creative_image_key(r["creative"]))
         out[k] = {"impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
@@ -12611,7 +12641,10 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                   # 매체가 신고한 매출. 평소엔 안 쓰지만 외부몰은 GA4에 매출이
                   # 아예 안 잡혀서 이 값이 유일한 근거다.
                   "media_rev": float(r["revenue"]),
-                  "channel": r["channel"], "name": str(r["creative"]), "src": "api"}
+                  "channel": r["channel"], "name": str(r["creative"]),
+                  # 어디서 온 값인지 남긴다. 'API'로 뭉뚱그리면 GFA처럼 파일로
+                  # 올린 것까지 API라고 표시돼 화면 설명이 틀려진다.
+                  "src": _src_of.get((r["channel"], r["creative"]), "api")}
     return out
 
 
@@ -13343,11 +13376,23 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             st.cache_data.clear()
             st.rerun()
     if _api_channels:
+        # 같은 ad_creative_daily 안에도 출처가 둘이다 — 매체 API로 받은 것과,
+        # 매체 리포트 파일(GFA)을 올려서 들어온 것. 섞어서 'API'라고 적으면
+        # 나중에 'GFA는 API 없는데?' 하고 헷갈린다.
+        _upl = sorted({k[0] for k, v in _api_map.items()
+                       if v.get("src") == MEDIA_REPORT_CREATIVE_SOURCE})
+        _api_only = sorted(_api_channels - set(_upl))
         _rep_only = sorted({ch for ch, _ in _report_map} - _api_channels)
+        _bits = []
+        if _api_only:
+            _bits.append("**매체 API**: " + ", ".join(_api_only))
+        if _upl:
+            _bits.append("**업로드한 매체 리포트**: " + ", ".join(_upl))
+        if _rep_only:
+            _bits.append("**대행사 리포트**: " + ", ".join(_rep_only))
         st.caption(
-            "노출·클릭·광고비 출처 — **매체 API**: " + ", ".join(sorted(_api_channels))
-            + ((" · **대행사 리포트**: " + ", ".join(_rep_only)) if _rep_only else "")
-            + " (API가 있는 매체는 리포트를 쓰지 않습니다)"
+            "노출·클릭·광고비 출처 — " + " · ".join(_bits)
+            + " (한 매체에 여러 출처가 있으면 위쪽 것 하나만 씁니다 — 섞으면 이중 계상됩니다)"
         )
     show_img = (level == "소재")
     head = list(GC_HEAD)
