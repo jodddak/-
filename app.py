@@ -4200,6 +4200,13 @@ MEDIA_REPORT_COLS = {
     "imp": ["노출수", "노출", "impression", "imp"],
     "click": ["클릭수", "클릭", "click", "clk"],
     "campaign": ["캠페인 이름", "캠페인명", "캠페인", "campaign"],
+    # 아래 셋은 '소재별'로 받은 파일에만 있다. 있으면 소재 단위 실적까지 같이 저장한다.
+    # (GFA 외부몰은 스마트스토어로 보내서 GA4에 안 잡히므로, 매체가 주는 이 값이
+    #  유일한 전환 데이터다.)
+    "creative": ["소재 이름", "소재명", "광고소재", "소재", "크리에이티브", "creative", "ad name"],
+    "conv": ["전환수", "총 전환수", "전환 수", "전환", "conversions", "conversion"],
+    "rev": ["전환매출액", "전환 매출액", "전환매출", "전환 매출", "매출액", "매출",
+            "conversion value", "revenue"],
 }
 
 
@@ -4372,6 +4379,80 @@ def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
         cost_incl_vat=("cost_incl_vat", "sum"),
         impressions=("impressions", "sum"), clicks=("clicks", "sum"))
     return out[out[["cost_incl_vat", "impressions", "clicks"]].sum(axis=1) > 0]
+
+
+def media_report_headers(file) -> list:
+    """업로드한 파일에서 인식한 열 이름들. 인식이 틀렸을 때 화면에 보여주려고 쓴다."""
+    try:
+        return [str(c) for c in _mr_read(file).columns]
+    except Exception:
+        return []
+
+
+MEDIA_REPORT_CREATIVE_SOURCE = "media_report"
+
+
+def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFrame:
+    """같은 매체 리포트 파일에서 **소재 단위** 실적을 뽑는다.
+
+    파일에 소재 열이 있을 때만 동작하고, 없으면 빈 표를 돌려준다(일별 광고비는
+    parse_media_report_file이 따로 처리하므로 여기서 실패해도 잃는 게 없다).
+
+    전환수·전환매출도 같이 가져온다. 평소에는 매체 신고 전환을 안 쓰지만
+    (매체마다 기준이 달라 서로 못 더한다), **외부몰은 예외**다 — 스마트스토어로
+    보내서 자사몰 GA4에 매출이 아예 안 잡히기 때문에 매체가 주는 값이 유일한
+    전환 데이터다. 화면에서는 'GA 기준'이 아니라 '매체 기준'이라고 따로 표시한다.
+    """
+    df = _mr_read(file)
+    fname = getattr(file, "name", "") or ""
+    cols = list(df.columns)
+    c_date = _mr_pick(cols, MEDIA_REPORT_COLS["date"])
+    c_cre = _mr_pick(cols, MEDIA_REPORT_COLS["creative"])
+    if c_date is None or c_cre is None:
+        return _empty_creative()
+    c_cost = _mr_pick(cols, MEDIA_REPORT_COLS["cost"])
+    c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
+    c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
+    c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
+    c_cv = _mr_pick(cols, MEDIA_REPORT_COLS["conv"])
+    c_rv = _mr_pick(cols, MEDIA_REPORT_COLS["rev"])
+
+    def num(s):
+        return pd.to_numeric(
+            s.astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0)
+
+    # 소재 화면의 탭 이름으로 바로 맞춰 넣는다(네이버 GFA PC (외부몰) 등).
+    # 그래야 _gc_api_by_key가 그대로 읽어서 탭에 붙는다.
+    ch_raw = (df[c_cmp].astype(str) if c_cmp else pd.Series([""] * len(df), index=df.index))
+    channels = []
+    for v in ch_raw:
+        base = _mr_channel_of(v, fname)
+        if base.startswith("네이버 GFA"):
+            ext = base.endswith("_외부몰")
+            tab = gfa_tab_of(f"{v} {'외부몰' if ext else '자사몰'}")
+            channels.append(tab or ("네이버 GFA (외부몰)" if ext else "네이버 GFA"))
+        else:
+            channels.append(base)
+
+    rows = pd.DataFrame({
+        "report_date": _mr_dates(df[c_date]),
+        "channel": channels,
+        "creative": df[c_cre].astype(str).str.strip(),
+        "impressions": num(df[c_imp]) if c_imp else 0.0,
+        "clicks": num(df[c_clk]) if c_clk else 0.0,
+        "cost_incl_vat": num(df[c_cost]) if c_cost else 0.0,
+        "conversions": num(df[c_cv]) if c_cv else 0.0,
+        "revenue": num(df[c_rv]) if c_rv else 0.0,
+        "source": MEDIA_REPORT_CREATIVE_SOURCE,
+    })
+    if not vat_included:
+        rows["cost_incl_vat"] = rows["cost_incl_vat"] * 1.1
+    # 정액 계약 매체는 리포트 광고비가 '계약금액 ÷ 리포트 일수'라 계약 패널 값과
+    # 이중 계상된다. 일별 광고비와 같은 규칙으로 여기서도 버린다.
+    rows.loc[rows["channel"].isin(CONTRACT_MANAGED_CHANNELS), "cost_incl_vat"] = 0.0
+    rows = rows[rows["creative"].astype(str).str.strip().ne("")]
+    rows = rows[rows["creative"].astype(str).str.lower().ne("nan")]
+    return _creative_frame(rows.to_dict("records"))
 
 
 KKO_MSG_COLS = ["sent_at", "report_date", "message", "sends", "clicks", "ctr"]
@@ -4735,6 +4816,22 @@ def save_uploaded_file(f, kind: str) -> str:
         msg = (f"{_chs} · {df['report_date'].min()}~{df['report_date'].max()} · {n}행")
         if _zeroed:
             msg += f" (정액 계약 매체라 광고비는 제외: {', '.join(_zeroed)})"
+
+        # 같은 파일에 소재 열이 있으면 소재 단위 실적도 같이 저장한다.
+        # 외부몰은 GA4에 매출이 안 잡혀서, 이 경로 말고는 소재별로 볼 방법이 없다.
+        try:
+            cre = parse_media_report_creatives(f, vat_included=True)
+        except Exception:
+            cre = _empty_creative()
+        if cre is not None and not cre.empty:
+            n2 = save_table("ad_creative_daily", cre,
+                            "report_date,channel,creative,source", name)
+            msg += f" · 소재별 {n2}행 ({cre['creative'].nunique()}개 소재)"
+        else:
+            _hdrs = media_report_headers(f)
+            if _hdrs:
+                msg += (" · 소재 열이 없어 소재별 성과는 못 넣었습니다 "
+                        f"(파일의 열: {', '.join(_hdrs[:12])})")
         return msg
 
     if kind == "kakao_msg":
@@ -12499,6 +12596,9 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
         k = (_gc_channel(r["channel"]), _creative_image_key(r["creative"]))
         out[k] = {"impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
                   "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
+                  # 매체가 신고한 매출. 평소엔 안 쓰지만 외부몰은 GA4에 매출이
+                  # 아예 안 잡혀서 이 값이 유일한 근거다.
+                  "media_rev": float(r["revenue"]),
                   "channel": r["channel"], "name": str(r["creative"]), "src": "api"}
     return out
 
@@ -12585,12 +12685,14 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
         # 대행사 채널명은 'GFA PC/MO'처럼 기기까지 나뉘어 있다 — 소재 화면은 그 구분을 살린다.
         k = (_gc_channel(r.get("channel")), _creative_image_key(r["creative"]))
         cur = out.setdefault(k, {"impressions": 0.0, "clicks": 0.0, "cost": 0.0,
-                                 "media_conv": 0.0, "channel": r.get("channel"),
+                                 "media_conv": 0.0, "media_rev": 0.0,
+                                 "channel": r.get("channel"),
                                  "name": str(r["creative"])})
         cur["impressions"] += float(r["impressions"])
         cur["clicks"] += float(r["clicks"])
         cur["cost"] += float(r["cost_incl_vat"])
         cur["media_conv"] += float(r["conversions"])
+        cur["media_rev"] += float(r["revenue"])
     return out
 
 
@@ -12603,6 +12705,13 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     clk = float((media or {}).get("clicks", 0) or 0)
     cost = float((media or {}).get("cost", 0) or 0)
 
+    # 외부몰은 GA4에 매출이 안 잡히므로 매체가 신고한 전환·매출을 쓴다.
+    # (평소엔 안 쓴다 — 매체마다 기준이 달라 서로 못 더하기 때문. 여기선 대안이 없다.)
+    _basis = bool((media or {}).get("_media_basis"))
+    if _basis:
+        conv = float((media or {}).get("media_conv", 0) or 0)
+        rev = float((media or {}).get("media_rev", 0) or 0)
+
     ctr = (clk / imp * 100) if imp else 0.0
     aov = (rev / conv) if conv else 0.0
     roas = (rev / cost * 100) if cost > 0 else 0.0
@@ -12613,7 +12722,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     label, cls = _v4_verdict(roas, judge_cost, conv, clk)
     if cost <= 0:
         label, cls = "광고비 없음", "hold"
-    if (media or {}).get("_unmatched"):
+    if (media or {}).get("_unmatched") and not _basis:
         # GA에서 이 소재를 못 찾았으니 매출이 0인 게 아니라 '알 수 없음'이다.
         # 성과가 나쁘다고 단정하면 안 된다 — UTM을 붙여야 판단이 가능해진다.
         label, cls = "UTM 없음", "hold"
@@ -12685,6 +12794,10 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
     imp = float((media or {}).get("impressions", 0) or 0)
     clk = float((media or {}).get("clicks", 0) or 0)
     cost = float((media or {}).get("cost", 0) or 0)
+    _basis = bool((media or {}).get("_media_basis"))
+    if _basis:                      # 외부몰 — 매체 신고 전환·매출 (화면과 같은 규칙)
+        conv = float((media or {}).get("media_conv", 0) or 0)
+        rev = float((media or {}).get("media_rev", 0) or 0)
     ctr = (clk / imp * 100) if imp else 0.0
     aov = (rev / conv) if conv else 0.0
     roas = (rev / cost * 100) if cost > 0 else 0.0
@@ -12693,7 +12806,7 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
     label, _cls = _v4_verdict(roas, judge_cost, conv, clk)
     if cost <= 0:
         label = "광고비 없음"
-    if (media or {}).get("_unmatched"):
+    if (media or {}).get("_unmatched") and not _basis:
         label, roas = "UTM 없음", None
     if is_total:
         label = _ops_kpi_status(roas) if cost > 0 else ""
@@ -12705,8 +12818,10 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         "_img": img_url,
         "노출": imp, "클릭": clk, "CTR(%)": ctr,
         "광고비(VAT+)": cost, "방문(세션)": ses,
-        "GA 구매": conv, "GA 매출": rev, "객단가": aov,
+        "구매": conv, "매출": rev, "객단가": aov,
         "ROAS(%)": roas, "판정": label,
+        # 구매·매출이 어디서 온 값인지. 외부몰만 매체 기준이라 섞어 더하면 안 된다.
+        "기준": "매체(GFA)" if _basis else "GA4",
     }
 
 
@@ -12762,13 +12877,13 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
 
     cols = ["이름", "구분"] + (["이미지"] if with_images else []) + [
         "노출", "클릭", "CTR(%)", "광고비(VAT+)", "방문(세션)",
-        "GA 구매", "GA 매출", "객단가", "ROAS(%)", "판정"]
+        "구매", "매출", "객단가", "ROAS(%)", "판정", "기준"]
     numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": "0.00",
-              "광고비(VAT+)": "#,##0", "방문(세션)": "#,##0", "GA 구매": "#,##0",
-              "GA 매출": "#,##0", "객단가": "#,##0", "ROAS(%)": "#,##0"}
+              "광고비(VAT+)": "#,##0", "방문(세션)": "#,##0", "구매": "#,##0",
+              "매출": "#,##0", "객단가": "#,##0", "ROAS(%)": "#,##0"}
     width = {"이름": 34, "구분": 22, "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
-             "CTR(%)": 9, "광고비(VAT+)": 14, "방문(세션)": 11, "GA 구매": 9,
-             "GA 매출": 14, "객단가": 11, "ROAS(%)": 10, "판정": 12}
+             "CTR(%)": 9, "광고비(VAT+)": 14, "방문(세션)": 11, "구매": 9,
+             "매출": 14, "객단가": 11, "ROAS(%)": 10, "판정": 12, "기준": 11}
 
     head_fill = PatternFill("solid", fgColor="14181F")
     head_font = Font(color="FFFFFF", bold=True, size=10)
@@ -13086,7 +13201,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     folded = [c for c in ("네이버 GFA", "네이버 GFA (외부몰)")
               if _gfa_split and c in all_ch]
 
-    sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE]
+    # TOTAL에서 빼는 탭.
+    # 외부몰을 TOTAL에 넣으면 기준이 섞인다 — 광고비는 더해지는데 매출은 GA에 안 잡혀
+    # 0으로 들어가서 전체 ROAS가 실제보다 낮게 나오고, 그렇다고 매체 신고 매출을
+    # 같이 더하면 GA 기준 매출과 어트리뷰션이 달라 합계 자체가 말이 안 된다.
+    # 그래서 맨즈탭과 같이 자기 탭에서만 본다.
+    sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE or c in GFA_EXT_TABS]
     order = [c for c in all_ch if c not in sep and c not in folded] + sep
     if not order:
         st.warning(
@@ -13222,12 +13342,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if rows.empty and not _has_media:
                 st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
-            if rows.empty and label in GFA_EXT_TABS:
+            # 외부몰은 GA4가 못 보는 영역이라 매체 신고 전환·매출로 본다.
+            _media_basis = (label in GFA_EXT_TABS)
+            if _media_basis:
                 st.info(
                     "외부몰 광고는 **스마트스토어로 보내기 때문에 자사몰 GA4에 방문·매출이 "
-                    "안 잡힙니다.** 그래서 이 탭은 매체 리포트가 주는 노출·클릭·광고비와 "
-                    "소재 이미지까지만 보여줍니다. ROAS는 스마트스토어 데이터를 붙이기 "
-                    "전까지 '판단 제외'입니다."
+                    "안 잡힙니다.** 그래서 이 탭만 구매·매출을 **매체(GFA)가 신고한 값**으로 "
+                    "보여줍니다 — 다른 탭의 GA 기준 숫자와 그대로 더하면 안 됩니다. "
+                    "매체 신고 전환은 어트리뷰션 기준이 GA와 달라 보통 더 후하게 잡힙니다."
                 )
             if label == "네이버 GFA" and not _gfa_split:
                 st.caption(
@@ -13235,6 +13357,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     "합니다. 지금 GA 유입에는 그 표시가 없어 PC+MO를 합쳐서 보여줍니다."
                 )
 
+            if _media_basis:
+                for k, m in media_map.items():
+                    if k[0] in ch_keep:
+                        m["_media_basis"] = True
             _matched = set()
             rows["_media"] = _gc_attach_media(rows, media_map, _matched)
             # 매체에는 있는데 GA에서 못 찾은 소재 — 소재 탭에서는 줄로 세우고,
@@ -13402,13 +13528,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "cost": tot_cost,
                 "_total": True,
             }
+            if _media_basis:
+                # 합계도 같은 기준으로 — GA 0원 + 매체 매출이 섞이면 합계가 말이 안 된다
+                tot_media["_media_basis"] = True
+                tot_media["media_conv"] = sum(
+                    float((m or {}).get("media_conv", 0) or 0) for m in rows["_media"]
+                ) + sum(float(m.get("media_conv", 0) or 0) for _, m in leftovers)
+                tot_media["media_rev"] = sum(
+                    float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"]
+                ) + sum(float(m.get("media_rev", 0) or 0) for _, m in leftovers)
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
             export_sheets[label] = [_gc_row_record(tot_r, tot_media, is_total=True)] + recs
 
+            # 머리글에서 출처를 못 박는다 — 'GA 매출'이라고 적어두면 GA가 준 값으로
+            # 읽혀서, 나중에 다른 리포트와 안 맞을 때 원인을 못 찾는다.
+            # head 자체를 바꾸면 다음 탭까지 따라가므로 이 탭용 사본을 쓴다.
+            _head = (["매체 구매" if h == "GA 구매" else
+                      ("매체 매출" if h == "GA 매출" else h) for h in head]
+                     if _media_basis else head)
             tid = f"gctbl{ti}"
             th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
                          f'<span class="fv4-ar">&#8645;</span></th>'
-                         for i, h in enumerate(head))
+                         for i, h in enumerate(_head))
             table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
                      f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
 
