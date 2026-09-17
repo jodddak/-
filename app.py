@@ -4845,19 +4845,33 @@ def save_uploaded_file(f, kind: str) -> str:
 
         # 같은 파일에 소재 열이 있으면 소재 단위 실적도 같이 저장한다.
         # 외부몰은 GA4에 매출이 안 잡혀서, 이 경로 말고는 소재별로 볼 방법이 없다.
+        #
+        # 실패를 조용히 삼키지 않는다. 예전엔 예외를 먹고 '소재 열이 없다'고만 적어서,
+        # 저장이 안 된 건지 파일이 문제인 건지 화면만 봐서는 구분이 안 됐다.
         try:
             cre = parse_media_report_creatives(f, vat_included=True)
-        except Exception:
-            cre = _empty_creative()
-        if cre is not None and not cre.empty:
-            n2 = save_table("ad_creative_daily", cre,
-                            "report_date,channel,creative,source", name)
-            msg += f" · 소재별 {n2}행 ({cre['creative'].nunique()}개 소재)"
+        except Exception as e:
+            cre, _cre_err = _empty_creative(), str(e)[:160]
+        else:
+            _cre_err = None
+
+        if _cre_err:
+            msg += f" · ⚠️ 소재별 읽기 실패: {_cre_err}"
+        elif cre is not None and not cre.empty:
+            try:
+                n2 = save_table("ad_creative_daily", cre,
+                                "report_date,channel,creative,source", name)
+                _chs2 = ", ".join(sorted(cre["channel"].unique()))
+                msg += (f" · 소재별 {n2}행 · {cre['creative'].nunique()}개 소재 "
+                        f"({_chs2})")
+                if float(cre["revenue"].sum()) <= 0:
+                    msg += " · 매출 열이 없어 ROAS는 안 나옵니다"
+            except Exception as e:
+                msg += f" · ⚠️ 소재별 저장 실패: {str(e)[:160]}"
         else:
             _hdrs = media_report_headers(f)
-            if _hdrs:
-                msg += (" · 소재 열이 없어 소재별 성과는 못 넣었습니다 "
-                        f"(파일의 열: {', '.join(_hdrs[:12])})")
+            msg += (" · 소재 열을 못 찾아 소재별 성과는 못 넣었습니다"
+                    + (f" (파일의 열: {', '.join(_hdrs[:14])})" if _hdrs else ""))
         return msg
 
     if kind == "kakao_msg":
@@ -12628,6 +12642,12 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
         return out
     for col in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue"):
         c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+    # 제외 대상(마케팅팀 등)은 저장돼 있던 옛 행도 걸러낸다.
+    # 필터는 '받아올 때'만 걸어놔서, 그 전에 들어온 행은 계속 남아 화면에 나온다
+    # (0911_마케팅팀_A_2가 구글 소재 코멘트에 계속 뜨던 이유). 볼 때도 한 번 더 건다.
+    c = c[~c["creative"].map(_google_campaign_excluded)]
+    if c.empty:
+        return out
     g = c.groupby(["channel", "creative"], as_index=False)[
         ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
     _src_of = {}
@@ -12718,6 +12738,9 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
         return out
     c["as_of_date"] = pd.to_datetime(c["as_of_date"], errors="coerce").dt.date
     c = c[(c["as_of_date"] >= start) & (c["as_of_date"] <= end)]
+    if c.empty:
+        return out
+    c = c[~c["creative"].map(_google_campaign_excluded)]      # 마케팅팀 등 제외 대상
     if c.empty:
         return out
     c = c.sort_values("as_of_date").drop_duplicates(subset=["channel", "creative"], keep="last")
