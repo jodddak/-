@@ -2670,8 +2670,12 @@ GFA_EXT_TABS = {GFA_PC_EXT, GFA_MO_EXT}
 META_OWN_TAB = "메타 (자사몰)"
 META_EXT_TAB = "메타 (외부몰)"
 
+# 맨즈탭도 자사몰/외부몰을 따로 돌린다(외부몰은 2026-09 기준 아직 미집행, 곧 시작 예정).
+MANS_OWN_TAB = "네이버 맨즈탭 (자사몰)"
+MANS_EXT_TAB = "네이버 맨즈탭 (외부몰)"
+
 # 외부몰 탭 — GA4가 못 보는 영역이라 구매·매출을 '매체가 신고한 값'으로 본다.
-EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB}
+EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB, MANS_EXT_TAB}
 
 
 def gfa_tab_of(text) -> str | None:
@@ -7902,6 +7906,8 @@ def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
 # 해서, 대표 채널명 → 매칭 키워드 목록으로 정규화한다. 위에서부터 먼저 걸리는 규칙을 쓰므로
 # 더 구체적인 규칙(네이버 맨즈탭)을 일반 규칙(네이버 검색광고)보다 앞에 둔다.
 FUNNEL_CANON_RULES = [
+    # 맨즈탭 외부몰은 맨즈탭보다 먼저 봐야 한다 — 일반 규칙이 먼저 걸리면 자사몰과 합쳐진다.
+    ("네이버 맨즈탭_외부몰", ["맨즈탭_외부몰", "맨즈_외부몰", "맨즈탭 (외부몰)", "맨즈탭외부몰"]),
     ("네이버 맨즈탭", ["맨즈탭", "맨즈", "mens"]),
     ("네이버 브랜드검색광고", ["브랜드검색", "브검"]),
     ("네이버 쇼핑검색광고", ["쇼핑검색", "ssp"]),
@@ -11797,7 +11803,28 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 })();
 </script>"""
     )
-    st.components.v1.html(html, height=260 + 46 * len(view), scrolling=True)
+    # 표는 **스크롤 없이 통째로** 보이게 한다. 매체가 14개뿐인데 안쪽 스크롤바로 내려 보면
+    # 위아래를 같이 못 봐서 비교가 안 된다.
+    #
+    # 높이는 CSS에서 역산한다 — 한 줄이 두 행(매체명 + 출처)이라 td 위아래 여백 12+12에
+    # 본문 20 + 보조 19를 더해 약 63px. 머리글 41, 아래 설명글 약 100.
+    # 조금 넉넉하게 잡고 scrolling=False로 둬서, 어긋나도 스크롤바 대신 여백만 생기게 한다.
+    # (아래 스크립트가 실제 높이를 재서 다시 맞춰준다 — 되면 여백도 사라진다.)
+    _h = 41 + 63 * (len(view) + 1) + 110
+    html += """
+<script>
+(function(){
+  function fit(){
+    try{
+      var h = document.documentElement.scrollHeight;
+      window.parent.postMessage({type:'streamlit:setFrameHeight', height:h+8}, '*');
+    }catch(e){}
+  }
+  window.addEventListener('load', fit);
+  setTimeout(fit, 80); setTimeout(fit, 400);
+})();
+</script>"""
+    st.components.v1.html(html, height=_h, scrolling=False)
 
     # 어느 매체에도 안 잡힌 GA 유입을 드러낸다. 조용히 사라지면 합계가 안 맞는 걸 눈치채기 어렵다.
     un = ga_map.get("_미매칭", {})
@@ -12555,7 +12582,7 @@ GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
 # 소재별 화면에서 기본으로 빼는 매체.
 # 맨즈탭은 소재 운영·정산을 별도 시트로 관리해서, 여기 섞이면 오히려 헷갈린다.
 # 화면의 '제외할 매체'에서 언제든 넣었다 뺐다 할 수 있다.
-GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭"]
+GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭", MANS_OWN_TAB, MANS_EXT_TAB]
 
 # 지금은 운영하지 않는 매체. 탭 자체를 안 만든다 — 옛날 데이터만 남아 있어서 탭이 있으면
 # 오히려 헷갈린다. 다시 집행을 시작하면(선택 기간에 광고비가 잡히면) 자동으로 다시 나온다.
@@ -12584,11 +12611,13 @@ def _gc_channel(name) -> str:
         if ("외부몰" in s) or ("스마트스토어" in s):
             return "네이버 GFA (외부몰)"
     canon = _v4_canon_channel(name)
-    # 메타도 자사몰/외부몰이 다른 계정이라 탭을 나눈다.
-    # 옛 데이터는 그냥 '메타'로 저장돼 있는데, 그때는 외부몰 계정을 안 받았으니 자사몰이 맞다.
+    # 메타·맨즈탭도 자사몰/외부몰을 따로 돌린다. 옛 데이터는 구분 없이 저장돼 있는데,
+    # 그때는 외부몰을 안 받았으니 전부 자사몰로 보는 게 맞다.
+    _ext = ("외부몰" in s) or ("스마트스토어" in s)
     if canon in ("메타", META_EXT_CHANNEL):
-        return META_EXT_TAB if (canon == META_EXT_CHANNEL
-                                or "외부몰" in s or "스마트스토어" in s) else META_OWN_TAB
+        return META_EXT_TAB if (canon == META_EXT_CHANNEL or _ext) else META_OWN_TAB
+    if canon in ("네이버 맨즈탭", "네이버 맨즈탭_외부몰"):
+        return MANS_EXT_TAB if (canon == "네이버 맨즈탭_외부몰" or _ext) else MANS_OWN_TAB
     return canon
 
 
@@ -12599,6 +12628,7 @@ _GC_TAB_ORDER_FIX = {
     GFA_PC_EXT: "네이버 GFA 1 (외부몰)", GFA_MO_EXT: "네이버 GFA 2 (외부몰)",
     # 메타도 자사몰 → 외부몰 순으로
     META_OWN_TAB: "메타 1 (자사몰)", META_EXT_TAB: "메타 2 (외부몰)",
+    MANS_OWN_TAB: "네이버 맨즈탭 1 (자사몰)", MANS_EXT_TAB: "네이버 맨즈탭 2 (외부몰)",
 }
 
 
@@ -13629,12 +13659,24 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
     _media_ch = {k[0] for k in media_map}
-    all_ch = sorted(_ga_ch | _media_ch, key=_gc_tab_sort_key)
+
+    # **광고비가 잡힌 매체는 소재 데이터가 없어도 탭을 만든다.**
+    # 예전엔 'GA에 줄이 있거나 소재 실적이 있는 매체'만 탭이 됐다. 그러면 새로 붙인 매체는
+    # (메타 외부몰처럼) 광고비가 멀쩡히 들어와 있는데도 탭 자체가 안 생겨서 '왜 안 나오지'가
+    # 된다. 탭은 만들고, 비어 있으면 왜 비었는지 그 자리에서 알려준다.
+    _spend_tabs = set()
+    for _c, _v in spend_by_ch.items():
+        if float(_v or 0) <= 0:
+            continue
+        _t = _gc_channel(_c)
+        if _t in GC_NON_CREATIVE or _t in ("기타", ""):
+            continue
+        _spend_tabs.add(_t)
+
+    all_ch = sorted(_ga_ch | _media_ch | _spend_tabs, key=_gc_tab_sort_key)
 
     # 외부몰은 광고비가 잡히는데(채널 성과에는 나온다) 소재 데이터가 아직 없을 수 있다.
-    # 그럴 때 탭을 아예 안 만들면 '왜 안 나오지'가 된다 — 탭은 만들고 왜 비었는지,
-    # 무엇을 올려야 채워지는지 그 자리에서 알려준다.
-    # 탭은 **항상 PC / MO 두 개**로 만든다. 광고를 그렇게 운영하니까 화면도 그래야 한다.
+    # GFA 외부몰만은 탭을 **항상 PC / MO 두 개**로 만든다. 광고를 그렇게 운영하니까 그래야 한다.
     # 채널 광고비(ad_spend_daily)에는 PC/MO 구분이 없어서(캠페인 단위로 접혀 저장된다)
     # 숫자는 소재 파일을 올려야 채워지지만, 그렇다고 탭을 하나로 합쳐 보여주면
     # 화면과 운영이 어긋난다.
@@ -13840,6 +13882,24 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # GA 줄이 아예 없다. 여기서 끊으면 노출·클릭·광고비도 못 보게 된다.
             _has_media = any(k[0] in ch_keep for k in media_map)
             if rows.empty and not _has_media:
+                # 광고비는 잡혀 있는데 소재 데이터만 없는 경우 — 무엇을 하면 채워지는지 알려준다.
+                _sp_here = {c: v for c, v in spend_row_by_ch.items()
+                            if _gc_channel(c) == label and float(v.get("cost", 0) or 0) > 0}
+                if _sp_here and label not in _ext_placeholders:
+                    _i = sum(v["impressions"] for v in _sp_here.values())
+                    _c2 = sum(v["clicks"] for v in _sp_here.values())
+                    _co = sum(v["cost"] for v in _sp_here.values())
+                    st.warning(
+                        f"**이 기간 집행은 잡혀 있습니다** — 노출 {_i:,.0f} · 클릭 {_c2:,.0f} · "
+                        f"광고비 {_co:,.0f}원. 그런데 **소재별로 쪼갠 데이터가 없습니다.**\n\n"
+                        "위 **🔄 소재 데이터 동기화**를 눌러주세요. API가 없는 매체(GFA·맨즈탭)는 "
+                        "매체 리포트를 **소재 단위로** 받아 사이드바에 올리시면 채워집니다."
+                    )
+                    if label in EXT_TABS:
+                        st.caption(
+                            "외부몰은 스마트스토어로 보내서 자사몰 GA4에 방문·매출이 안 잡히므로, "
+                            "채워지면 구매·매출은 매체가 신고한 값으로 보여드립니다.")
+                    continue
                 if label in _ext_placeholders:
                     _s = spend_row_by_ch.get(_EXT_SPEND_CH, {})
                     _dev = "PC" if label == GFA_PC_EXT else "모바일"
