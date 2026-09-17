@@ -21,15 +21,24 @@
 #    그래서 아무도 안 쓰는 분(:07)으로 옮겼습니다. 시간을 바꾸실 땐 :00, :15, :30, :45는
 #    피하고 :07 / :23 / :41 같은 어정쩡한 분을 쓰세요.
 #
-# ⚠️ 그래도 5~20분 늦게 시작할 수 있습니다. 이건 못 고칩니다.
-#    메일이 하루 안 왔으면 Run workflow 로 손수 한 번 돌리면 됩니다(아래 안내).
+# ⚠️ 그래도 밀리거나 아예 안 도는 날이 있습니다. 이건 GitHub 사정이라 못 고칩니다.
+#    그래서 **하루에 세 번** 시도합니다(10:07 / 11:07 / 12:07).
+#    이미 보낸 리포트는 Supabase의 mail_log 표를 보고 건너뛰므로 메일은 한 통만 옵니다.
+#    → mail_log 표를 먼저 만들어야 합니다. 같이 드린 mail_log.sql 참고.
+#      (표가 없어도 메일은 가지만, 그날 세 통이 옵니다.)
 
 name: 성과 메일 (일별·주간)
 
 on:
   schedule:
-    - cron: "7 1 * * 2-5"   # 화~금 한국 10:07 — 전일 성과
-    - cron: "7 4 * * 1"     # 월요일 한국 13:07 — 전주(월~일) 성과
+    # 화~금 전일 성과 — 한국 10:07 에 보내고, 못 보냈으면 11:07 / 12:07 에 다시 시도
+    - cron: "7 1 * * 2-5"
+    - cron: "7 2 * * 2-5"
+    - cron: "7 3 * * 2-5"
+    # 월요일 주간 성과 — 한국 13:07, 못 보냈으면 14:07 / 15:07
+    - cron: "7 4 * * 1"
+    - cron: "7 5 * * 1"
+    - cron: "7 6 * * 1"
   # 손으로도 돌려볼 수 있게 (Actions 탭 → 이 워크플로 → Run workflow)
   workflow_dispatch:
     inputs:
@@ -82,6 +91,7 @@ jobs:
           IN_MODE: ${{ github.event.inputs.mode }}
           IN_DATE: ${{ github.event.inputs.date }}
           IN_DRY: ${{ github.event.inputs.dry_run }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           ARGS="--mode ${IN_MODE:-auto}"
           if [ -n "$IN_DATE" ]; then
@@ -89,6 +99,12 @@ jobs:
           fi
           if [ "$IN_DRY" = "true" ]; then
             ARGS="$ARGS --dry-run"
+          fi
+          # 예약 실행일 때만 중복 검사를 켠다. 하루에 세 번 시도하므로 이게 없으면
+          # 메일이 세 통 온다. 손으로 Run workflow 를 누른 경우엔 '지금 보내달라'는
+          # 뜻이므로 이미 보냈더라도 그대로 보낸다.
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            ARGS="$ARGS --dedupe"
           fi
           echo "실행: python daily_report.py $ARGS"
           python daily_report.py $ARGS
