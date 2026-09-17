@@ -11623,7 +11623,11 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "클릭": float(sp.get("clicks", 0) or 0),
             "비용": cost,
             "GA구매": g["conv"], "GA매출": g["rev"],
-            "GA ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
+            # 외부몰인데 매출이 0이면 ROAS를 0%가 아니라 '—'(모름)으로 둔다.
+            # 스마트스토어는 외부 스크립트를 못 붙여서 메타 픽셀도, GA4도 매출을 못 본다.
+            # 0%로 찍으면 '성과가 없다'로 읽히는데 실제로는 '측정이 안 된다'이다.
+            "GA ROAS": (None if (_scope == "외부몰" and float(g["rev"] or 0) <= 0)
+                        else ((g["rev"] / cost * 100) if cost > 0 else None)),
             "월예산": budget,
             "예산 소진율": (cost / budget * 100) if budget > 0 else None,
             "_src": sp.get("source", ""), "_basis": _basis,
