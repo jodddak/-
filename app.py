@@ -13720,7 +13720,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 자사몰 탭들과 나란히 두면 헷갈린다. 순서만 뒤로 보낸다.
     sep = [c for c in all_ch
            if c in GC_DEFAULT_EXCLUDE or c in EXT_TABS or c == "네이버 GFA (외부몰)"]
-    order = [c for c in all_ch if c not in sep and c not in folded] + sep
+    # folded(접기로 정한 탭)는 sep에도 들어 있을 수 있다. 뒤에 sep을 통째로 붙이면
+    # 접어둔 탭이 도로 살아난다 — GFA PC/MO (외부몰)가 있는데도 기기 미상인
+    # '네이버 GFA (외부몰)' 탭이 같이 뜨던 이유다.
+    order = ([c for c in all_ch if c not in sep and c not in folded]
+             + [c for c in sep if c not in folded])
     if not order:
         st.warning(
             "UTM 매핑이 비어 있어 광고 매체를 가려낼 수 없습니다. "
