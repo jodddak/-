@@ -8055,7 +8055,7 @@ FUNNEL_V4_CSS = """
 .fv4-card { border:1px solid #e6e4da; border-radius:12px; background:#fffef9; padding:22px 24px; margin-bottom:16px; }
 .fv4-badge-dark { display:inline-block; background:#17170f; color:#fdfdf7; font-size:13px; font-weight:700;
   letter-spacing:.1em; padding:4px 9px; border-radius:4px; margin-bottom:11px; }
-.fv4-card-title { color:#17170f; font-size:18px; font-weight:800; margin-bottom:4px; }
+.fv4-card-title { color:#C0273A; font-size:18px; font-weight:800; margin-bottom:4px; }
 .fv4-card-sub { color:#8a8a7c; font-size:14px; margin-bottom:18px; }
 
 .fv4-funnel { display:flex; align-items:stretch; background:#f0efe6; border-radius:10px; padding:6px; }
@@ -12582,11 +12582,18 @@ GC_DATE_TOKEN = re.compile(r"^(?:\d{6}|\d{8})$")
 # 소재별 화면에서 기본으로 빼는 매체.
 # 맨즈탭은 소재 운영·정산을 별도 시트로 관리해서, 여기 섞이면 오히려 헷갈린다.
 # 화면의 '제외할 매체'에서 언제든 넣었다 뺐다 할 수 있다.
-GC_DEFAULT_EXCLUDE = ["네이버 맨즈탭", MANS_OWN_TAB, MANS_EXT_TAB]
+# 맨즈탭 자사몰은 다른 자사몰 매체와 같이 본다(뒤로 빼지 않는다).
+# 외부몰만 기준이 달라서(매체 신고) 뒤로 보낸다 — 그건 EXT_TABS가 처리한다.
+GC_DEFAULT_EXCLUDE = []
 
 # 지금은 운영하지 않는 매체. 탭 자체를 안 만든다 — 옛날 데이터만 남아 있어서 탭이 있으면
 # 오히려 헷갈린다. 다시 집행을 시작하면(선택 기간에 광고비가 잡히면) 자동으로 다시 나온다.
 GC_HIDE_IF_IDLE = ["(DA) ADN", "카카오톡 플친", "네이버 트렌드픽"]
+
+# 아예 운영을 접은 매체 — 광고비가 남아 있어도 탭을 만들지 않는다.
+# 위 GC_HIDE_IF_IDLE은 '집행이 없을 때만' 숨기는데, 옛 데이터가 남아 있으면 계속 뜬다.
+# 다시 집행하게 되면 여기서 이름만 빼면 된다.
+GC_RETIRED = ["모비온"]
 
 # 배너 소재가 없는 매체 — 검색광고는 키워드·확장소재라 '소재별' 비교 대상이 아니다(담당자 확인).
 # 탭에 두면 (미설정) 한 줄만 나와서 헷갈리고 TOTAL도 흐려지므로 이 화면에서는 뺀다.
@@ -12628,7 +12635,9 @@ _GC_TAB_ORDER_FIX = {
     GFA_PC_EXT: "네이버 GFA 1 (외부몰)", GFA_MO_EXT: "네이버 GFA 2 (외부몰)",
     # 메타도 자사몰 → 외부몰 순으로
     META_OWN_TAB: "메타 1 (자사몰)", META_EXT_TAB: "메타 2 (외부몰)",
-    MANS_OWN_TAB: "네이버 맨즈탭 1 (자사몰)", MANS_EXT_TAB: "네이버 맨즈탭 2 (외부몰)",
+    # 맨즈탭 자사몰은 자사몰 매체 중 **맨 끝**(크리테오 다음)에 온다.
+    # 가나다순이면 GFA와 애드부스트 사이로 끼어들어서, 'ㅎ'으로 시작하는 키를 줘 뒤로 민다.
+    MANS_OWN_TAB: "하 네이버 맨즈탭 (자사몰)", MANS_EXT_TAB: "네이버 맨즈탭 2 (외부몰)",
 }
 
 
@@ -13688,7 +13697,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         all_ch = [c for c in all_ch if c != "네이버 GFA (외부몰)"]
         all_ch += sorted(_ext_placeholders, key=_gc_tab_sort_key)
 
-    hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
+    hidden = [c for c in all_ch if c in GC_RETIRED]
+    hidden += [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
     hidden += [c for c in all_ch if c in GC_NON_CREATIVE]
     all_ch = [c for c in all_ch if c not in hidden]
 
