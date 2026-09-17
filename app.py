@@ -13196,16 +13196,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # GFA 기기 분리가 됐으면, 접미사가 없어 기기를 못 가른 잔여 줄(옛 소재의 UTM 링크가
     # 아직 살아 있는 경우)은 탭을 따로 만들지 않는다. 탭이 GFA / GFA PC / GFA MO 넷으로
-    # 보여서 오해를 낳는다. 대신 TOTAL에는 그대로 넣어 합계가 새지 않게 한다.
+    # 보여서 오해를 낳는다.
     _gfa_split = any(c in GFA_TABS for c in all_ch)
     folded = [c for c in ("네이버 GFA", "네이버 GFA (외부몰)")
               if _gfa_split and c in all_ch]
 
-    # TOTAL에서 빼는 탭.
-    # 외부몰을 TOTAL에 넣으면 기준이 섞인다 — 광고비는 더해지는데 매출은 GA에 안 잡혀
-    # 0으로 들어가서 전체 ROAS가 실제보다 낮게 나오고, 그렇다고 매체 신고 매출을
-    # 같이 더하면 GA 기준 매출과 어트리뷰션이 달라 합계 자체가 말이 안 된다.
-    # 그래서 맨즈탭과 같이 자기 탭에서만 본다.
+    # 뒤로 미는 탭 — 맨즈탭은 별도 시트로 관리하고, 외부몰은 기준(매체 신고)이 달라서
+    # 자사몰 탭들과 나란히 두면 헷갈린다. 순서만 뒤로 보낸다.
     sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE or c in GFA_EXT_TABS]
     order = [c for c in all_ch if c not in sep and c not in folded] + sep
     if not order:
@@ -13214,7 +13211,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             "사이드바에서 **UTM 리스트 파일**을 먼저 올려주세요 (소스/매체 → 매체명 대응표)."
         ) if not lookup else st.info("선택한 기간에 광고 유입 데이터가 없습니다.")
         return
-    tab_labels = ["TOTAL"] + order
+    # TOTAL 탭은 두지 않는다.
+    # 소재는 매체끼리 비교하는 물건이 아니라 '이 매체 안에서 어느 소재를 끌지'를 보는
+    # 거라, 매체를 섞은 합계는 판단에 안 쓰인다. 게다가 맨즈탭·외부몰은 기준이 달라
+    # 애초에 빠져 있어서, TOTAL이 '전부'도 아니면서 전부인 척해 오해만 키웠다.
+    # 매체별 합계는 각 표 맨 윗줄(TOTAL 행)에 그대로 있다.
+    tab_labels = list(order)
     # 엑셀 버튼은 표보다 위에 있어야 찾기 쉬운데, 담을 내용은 탭을 다 그려봐야 안다.
     # 자리만 먼저 잡아두고 맨 아래에서 채운다.
     export_slot = st.container()
@@ -13225,8 +13227,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         st.caption("검색광고(" + " · ".join(_non_cre) + ")는 배너 소재가 없어 이 화면에서 뺐습니다 — "
                    "채널 성과 탭에서 보세요.")
     if folded:
-        st.caption("GFA 중 utm_campaign에 `_PC`/`_MO`가 없는 옛 소재는 탭을 따로 만들지 않았습니다 "
-                   "(TOTAL에는 포함). 대개 예전 링크가 아직 살아 있어 방문이 한두 건 찍히는 것입니다.")
+        # 어디에도 안 들어가는 줄이 생기므로, 얼마나 되는지는 반드시 보여준다.
+        # 조용히 빠지면 나중에 합계가 안 맞을 때 원인을 못 찾는다.
+        _fold = _in_period[_in_period["_gc_ch"].isin(folded)]
+        _f_ses = float(pd.to_numeric(_fold.get("sessions"), errors="coerce").fillna(0).sum())
+        _f_rev = float(pd.to_numeric(_fold.get("revenue"), errors="coerce").fillna(0).sum()) \
+            if "revenue" in _fold.columns else 0.0
+        st.caption(
+            f"GFA 중 utm_campaign에 `_PC`/`_MO`가 없어 기기를 못 가른 줄은 탭을 만들지 "
+            f"않았습니다 — 방문 {_f_ses:,.0f}건 · 매출 {_f_rev:,.0f}원. 대개 예전 링크가 "
+            "아직 살아 있어 찍히는 것이라 무시하셔도 됩니다. 규모가 크면 지금 돌고 있는 "
+            "광고의 utm_campaign에 `_PC`/`_MO`가 빠진 것이니 UTM을 고쳐주세요."
+        )
 
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
@@ -13332,7 +13344,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         with tabs[ti]:
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
-            keep = ([c for c in order if c not in sep] + folded) if label == "TOTAL" else [label]
+            keep = [label]
             ch_keep = keep
             rows = rows_all[rows_all["channel"].isin(keep)].copy()
             # GA 줄이 없어도 매체 리포트에 실적이 있으면 표를 그린다.
@@ -13437,8 +13449,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             avg_roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0.0
 
             # (미설정) 비중 경고 — 이 탭에 해당하는 것만
-            sub = (per[per["_gc_ch"].isin(keep)] if label == "TOTAL"
-                   else per[per["_gc_ch"] == label])
+            sub = per[per["_gc_ch"] == label]
             t_ses = float(sub["sessions"].sum())
             unset = float(sub[sub["creative"] == "(미설정)"]["sessions"].sum())
             if t_ses > 0 and unset / t_ses > 0.2:
@@ -13452,7 +13463,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 매체엔 있는데 GA에 못 붙은 소재(UTM 없음)와, GA엔 있는데 소재명이 없는 구매((미설정)·
             # (규칙 외))가 같은 매체에 동시에 있으면 십중팔구 같은 광고다 — 크리테오 다이나믹처럼
             # utm_id에 소재명 대신 숫자나 빈값이 들어간 경우. 합계는 맞지만 줄이 둘로 갈라진다.
-            if level == "소재" and label != "TOTAL" and leftovers:
+            if level == "소재" and leftovers:
                 _noname = rows[rows["cre_name"].isin(["(미설정)"]) | (rows["target"] == "(규칙 외)")]
                 _nn_conv = float(pd.to_numeric(_noname["conv"], errors="coerce").fillna(0).sum())
                 _nn_rev = float(pd.to_numeric(_noname["rev"], errors="coerce").fillna(0).sum())
@@ -13478,7 +13489,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
                 # 실제로는 '알 수 없음'이라 '부진'이라고 단정하면 틀린 판단이 된다.
                 try:
-                    cmt = _gc_comment(rows, label if label != "TOTAL" else "전체", avg_roas)
+                    cmt = _gc_comment(rows, label, avg_roas)
                 except Exception:
                     cmt = None
             if cmt:
@@ -13557,15 +13568,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 FUNNEL_V4_CSS
                 + '<div class="fv4-wrap"><div class="fv4-card">'
                 f'<span class="fv4-badge-dark">{level}별</span>'
-                f'<div class="fv4-card-title">{label} · {level}별 GA 성과</div>'
-                + (f'<div class="fv4-card-sub">{" · ".join(sep)}은 별도 관리라 TOTAL에서 '
-                   f'빠져 있습니다 — 각자 탭에서 보세요.</div>'
-                   if label == "TOTAL" and sep else "")
-                + '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
-                '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
-                '소재끼리 비교가 됩니다. <b>UTM 매핑된 광고 매체만</b> 셉니다 — '
-                '자연유입·레퍼럴·(not set)은 소재가 없어서 제외합니다.</div>'
-                '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. TOTAL은 맨 위 고정입니다.<br>'
+                f'<div class="fv4-card-title">{label} · {level}별 '
+                f'{"매체 신고" if _media_basis else "GA"} 성과</div>'
+                + ('<div class="fv4-card-sub">구매·매출은 <b>매체(GFA)가 신고한 값</b>입니다 — '
+                   '외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. '
+                   '어트리뷰션 기준이 GA와 달라 다른 탭 숫자와 그대로 더하면 안 됩니다.</div>'
+                   if _media_basis else
+                   '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
+                   '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
+                   '소재끼리 비교가 됩니다. <b>UTM 매핑된 광고 매체만</b> 셉니다 — '
+                   '자연유입·레퍼럴·(not set)은 소재가 없어서 제외합니다.</div>')
+                + '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. 합계(TOTAL) 줄은 맨 위 고정입니다.<br>'
                 '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 '
                 '것입니다 — 같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
                 '<b>(규칙 외)</b>로 모아 보여주니, 그게 많으면 UTM 작명을 맞춰주세요.<br>'
