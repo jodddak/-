@@ -4276,19 +4276,40 @@ def _mr_channel_of(campaign: str, filename: str) -> str:
     """캠페인명·파일명으로 어느 매체인지 가른다.
 
     GFA 계정 안에 GFA(웹사이트 전환)와 애드부스트(ADVoost 쇼핑)가 같이 있고,
-    맨즈탭은 자사몰/외부몰로 갈라 보기 때문에 이름으로 구분해야 한다.
+    맨즈탭·GFA 둘 다 자사몰/외부몰로 갈라 보기 때문에 이름으로 구분해야 한다.
+
+    자사몰/외부몰 판정은 **캠페인 이름을 먼저** 본다. 파일 하나에 두 계정이 같이
+    들어오기 때문이다 — GFA 리포트를 통째로 받으면 'STCO_자사몰_데일리_전환_MO'와
+    'STCO_외부몰_데일리_전환_PC'가 한 파일에 섞여 있다. 파일명으로 일괄 판정하면
+    외부몰 캠페인이 자사몰로 딸려 들어간다. (예전에 실제로 그래서 GFA 자사몰
+    광고비에 외부몰 54,794원·노출 15,013이 섞여 있었다.)
+    캠페인 이름에 단서가 없을 때만 파일명을 본다.
     """
-    blob = f"{campaign} {filename}".lower()
-    ext = ("외부몰" in blob) or ("스마트스토어" in blob)
+    camp = str(campaign or "").lower()
+    fn = str(filename or "").lower()
+    blob = f"{camp} {fn}"
+
+    def _is_ext(s: str) -> bool:
+        return ("외부몰" in s) or ("스마트스토어" in s)
+
+    def _is_own(s: str) -> bool:
+        return "자사몰" in s
+
+    # 캠페인 → 파일명 순으로 자사몰/외부몰을 확정한다. 둘 다 단서가 없으면 자사몰로 본다.
+    if _is_ext(camp):
+        ext = True
+    elif _is_own(camp):
+        ext = False
+    else:
+        ext = _is_ext(fn)
+
     if any(k in blob for k in ("advoost", "adboost", "애드부스트", "ad voost")):
         return "네이버 애드부스트"
     # 파일명이 '네이버 맨즈_18_자사몰'처럼 '탭'이 빠져 오는 경우가 있어 '맨즈'만으로도 잡는다.
     # (예전엔 여기서 안 걸려서 맨즈탭 파일이 통째로 GFA로 들어갔다)
     if any(k in blob for k in ("맨즈탭", "맨즈텝", "맨즈", "manstab", "n.box", "핫아이템")):
         return "네이버 맨즈탭_외부몰" if ext else "네이버 맨즈탭_자사몰"
-    if "gfa" in blob or "자사몰" in blob or "전환" in blob:
-        return "네이버 GFA"
-    return "네이버 GFA"
+    return "네이버 GFA_외부몰" if ext else "네이버 GFA"
 
 
 def parse_media_report_file(file, vat_included: bool = True) -> pd.DataFrame:
@@ -6440,23 +6461,44 @@ def render_inflow_revenue_page(df: pd.DataFrame, ga_channel_inflow: pd.DataFrame
 
     # ── ① 방문자 추이 (GA 기준) ──
     st.markdown("##### ① 방문자 추이 (GA 기준)")
-    users_sum = fd["users"].sum()
-    new_users_sum = fd["new_users"].sum()
-    returning_users_sum = fd["returning_users"].sum()
+    users_sum = float(fd["users"].sum())
+    new_users_sum = float(fd["new_users"].sum())
+    returning_users_sum = float(fd["returning_users"].sum())
+    _summed = users_sum
+    # 사이트 전체 사람 수는 GA4에 이 기간을 통째로 물어본다. 소스/매체별로 나뉜 값을
+    # 더하면 한 사람이 여러 경로로 들어온 만큼 중복해서 세어진다(9/1: 합계 8,188명 vs
+    # GA4 실제 7,330명). 아래 매체별 표는 매체끼리 비교하는 용도라 합계 그대로 둔다.
+    _site = ga4_site_totals(start, end)
+    if _site.get("ok"):
+        users_sum = _site["users"]
+        new_users_sum = _site["new_users"]
+        returning_users_sum = _site["returning_users"]
     new_ratio = (new_users_sum / users_sum * 100) if users_sum else 0
     returning_ratio = (returning_users_sum / users_sum * 100) if users_sum else 0
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("총 방문자 합계", f"{users_sum:,.0f} 명")
-    c2.metric("신규 방문자 합계", f"{new_users_sum:,.0f} 명")
-    c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
+    c1.metric("총 방문자", f"{users_sum:,.0f} 명")
+    c2.metric("신규 방문자", f"{new_users_sum:,.0f} 명")
+    c3.metric("재방문자", f"{returning_users_sum:,.0f} 명")
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
-    _cap = ("총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
-            "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 "
-            "맞지 않습니다 — 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다.")
+    if _site.get("ok"):
+        _cap = ("GA4에 이 기간을 통째로 물어본 **실제 사람 수**입니다 — GA4 탐색 "
+                "'방문자 보고서'의 총 사용자·첫 방문과 같은 값입니다. "
+                "재방문자는 총 사용자 − 첫 방문으로 계산합니다(GA4의 '재방문자 수'와 "
+                "몇십 명 차이가 날 수 있습니다 — 기간 안에서 첫 방문도 하고 재방문도 한 "
+                "사람을 GA는 양쪽에 다 세기 때문입니다).")
+        if _summed > users_sum:
+            _cap += (f" 아래 소스/매체별 방문자를 다 더하면 {_summed:,.0f}명으로 "
+                     f"{_summed - users_sum:,.0f}명 더 많습니다 — 한 사람이 여러 경로로 "
+                     "들어오면 경로마다 한 번씩 세어지기 때문이고, 그 합계는 매체끼리 "
+                     "비교할 때만 쓰는 값입니다.")
+    else:
+        _cap = ("총 방문자 = 신규 방문자 + 재방문자 (소스/매체별 합계). "
+                "한 사람이 여러 경로로 들어오면 중복해서 세어지므로 GA4 보고서의 "
+                "'총 사용자'보다 큽니다 — GA4 연동이 되면 실제 사람 수로 자동 교체됩니다.")
     if "unknown_sessions" in fd.columns:
         _unk = float(pd.to_numeric(fd["unknown_sessions"], errors="coerce").fillna(0).sum())
-        if _unk > 0:
+        if _unk > 0 and users_sum:
             _cap += (f" · GA4가 신규/재방문을 판정하지 못한 방문 {_unk:,.0f}건"
                      f"({_unk / users_sum * 100:.1f}%)은 같은 날·같은 소스의 판정된 비율대로 "
                      "나눠 담았습니다.")
@@ -6668,23 +6710,44 @@ def render_ga_channel_inflow_page(df: pd.DataFrame):
 
     # ── ① 방문자 추이 (GA 기준) — '유입·매출 비교' 페이지와 동일한 카드 구성 ──
     st.markdown("##### ① 방문자 추이 (GA 기준)")
-    users_sum = fd["users"].sum()
-    new_users_sum = fd["new_users"].sum()
-    returning_users_sum = fd["returning_users"].sum()
+    users_sum = float(fd["users"].sum())
+    new_users_sum = float(fd["new_users"].sum())
+    returning_users_sum = float(fd["returning_users"].sum())
+    _summed = users_sum
+    # 사이트 전체 사람 수는 GA4에 이 기간을 통째로 물어본다. 소스/매체별로 나뉜 값을
+    # 더하면 한 사람이 여러 경로로 들어온 만큼 중복해서 세어진다(9/1: 합계 8,188명 vs
+    # GA4 실제 7,330명). 아래 매체별 표는 매체끼리 비교하는 용도라 합계 그대로 둔다.
+    _site = ga4_site_totals(start, end)
+    if _site.get("ok"):
+        users_sum = _site["users"]
+        new_users_sum = _site["new_users"]
+        returning_users_sum = _site["returning_users"]
     new_ratio = (new_users_sum / users_sum * 100) if users_sum else 0
     returning_ratio = (returning_users_sum / users_sum * 100) if users_sum else 0
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("총 방문자 합계", f"{users_sum:,.0f} 명")
-    c2.metric("신규 방문자 합계", f"{new_users_sum:,.0f} 명")
-    c3.metric("재방문자 합계", f"{returning_users_sum:,.0f} 명")
+    c1.metric("총 방문자", f"{users_sum:,.0f} 명")
+    c2.metric("신규 방문자", f"{new_users_sum:,.0f} 명")
+    c3.metric("재방문자", f"{returning_users_sum:,.0f} 명")
     c4.metric("신규 방문자 비중", f"{new_ratio:.1f} %")
     c5.metric("재방문자 비중", f"{returning_ratio:.1f} %")
-    _cap = ("총 방문자 = 신규 방문자 + 재방문자 (GA4 방문수 기준). "
-            "GA4 보고서의 '총 사용자'는 중복을 뺀 사람 수라 이보다 작고, 신규+재방문과도 "
-            "맞지 않습니다 — 매체별로 나눌 수 없는 지표라 대시보드에서는 쓰지 않습니다.")
+    if _site.get("ok"):
+        _cap = ("GA4에 이 기간을 통째로 물어본 **실제 사람 수**입니다 — GA4 탐색 "
+                "'방문자 보고서'의 총 사용자·첫 방문과 같은 값입니다. "
+                "재방문자는 총 사용자 − 첫 방문으로 계산합니다(GA4의 '재방문자 수'와 "
+                "몇십 명 차이가 날 수 있습니다 — 기간 안에서 첫 방문도 하고 재방문도 한 "
+                "사람을 GA는 양쪽에 다 세기 때문입니다).")
+        if _summed > users_sum:
+            _cap += (f" 아래 소스/매체별 방문자를 다 더하면 {_summed:,.0f}명으로 "
+                     f"{_summed - users_sum:,.0f}명 더 많습니다 — 한 사람이 여러 경로로 "
+                     "들어오면 경로마다 한 번씩 세어지기 때문이고, 그 합계는 매체끼리 "
+                     "비교할 때만 쓰는 값입니다.")
+    else:
+        _cap = ("총 방문자 = 신규 방문자 + 재방문자 (소스/매체별 합계). "
+                "한 사람이 여러 경로로 들어오면 중복해서 세어지므로 GA4 보고서의 "
+                "'총 사용자'보다 큽니다 — GA4 연동이 되면 실제 사람 수로 자동 교체됩니다.")
     if "unknown_sessions" in fd.columns:
         _unk = float(pd.to_numeric(fd["unknown_sessions"], errors="coerce").fillna(0).sum())
-        if _unk > 0:
+        if _unk > 0 and users_sum:
             _cap += (f" · GA4가 신규/재방문을 판정하지 못한 방문 {_unk:,.0f}건"
                      f"({_unk / users_sum * 100:.1f}%)은 같은 날·같은 소스의 판정된 비율대로 "
                      "나눠 담았습니다.")
@@ -6994,6 +7057,53 @@ def fetch_ga4_channel_daily(start: date, end: date, channel_map: dict = None) ->
     else:
         out["channel"] = None
     return out.reset_index(drop=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ga4_site_totals(start: date, end: date) -> dict:
+    """차원을 하나도 걸지 않고 기간 전체의 사이트 총 사용자수를 받아온다.
+
+    **소스/매체별 사용자수는 더하면 안 된다.** 한 사람이 광고로 들어왔다가 나중에
+    검색으로 또 들어오면 두 줄에 각각 '1명'으로 잡힌다 — GA4가 줄마다 따로 중복을
+    제거하기 때문이다. 실제로 9/1 하루만 놓고 봐도 소스별 합계는 8,188명인데
+    GA4 보고서의 총 사용자는 7,330명이었다(12% 부풀림).
+
+    일자별로 받아서 더하는 것도 같은 이유로 틀린다 — 어제 온 사람이 오늘 또 오면
+    두 번 세어진다. 기간에 대한 '진짜 사람 수'는 그 기간을 통째로 물어보는 수밖에 없다.
+    그래서 저장해두지 않고 화면을 그릴 때 그 기간으로 직접 조회한다(15분 캐시).
+
+    돌려주는 값:
+        users          총 사용자      (GA4 '총 사용자')
+        new_users      신규 사용자    (GA4 '첫 방문')
+        returning_users 재방문 사용자 (총 − 신규)
+        sessions       방문수(세션)
+        ok             조회 성공 여부. False면 화면은 기존 합계로 되돌아간다.
+    """
+    empty = {"users": 0.0, "new_users": 0.0, "returning_users": 0.0,
+             "sessions": 0.0, "ok": False}
+    client, _err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return empty
+    try:
+        from google.analytics.data_v1beta.types import DateRange, Metric, RunReportRequest
+        resp = client.run_report(RunReportRequest(
+            property=f"properties/{prop}",
+            date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+            metrics=[Metric(name=m) for m in ("totalUsers", "newUsers", "sessions")],
+        ))
+        if not resp.rows:
+            return empty
+        v = [float(x.value or 0) for x in resp.rows[0].metric_values]
+        users, new_u, sess = v[0], v[1], v[2]
+        return {"users": users, "new_users": new_u,
+                # GA4 보고서의 '재방문자 수'와 몇십 명 차이가 날 수 있다. 기간 안에서
+                # 첫 방문도 하고 재방문도 한 사람을 GA는 양쪽에 다 세기 때문이다.
+                # 여기서는 총합이 맞는 쪽(총 − 신규)을 쓴다.
+                "returning_users": max(0.0, users - new_u),
+                "sessions": sess, "ok": True}
+    except Exception:
+        return empty
 
 
 def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -> pd.DataFrame:
@@ -7567,6 +7677,8 @@ FUNNEL_CANON_RULES = [
     ("네이버 검색광고", ["네이버 검색", "네이버검색", "(sa)", "네이버sa"]),
     ("네이버 애드부스트", ["애드부스트", "adboost", "advoost", "ad voost"]),
     ("네이버 트렌드픽", ["트렌드픽", "trendpick", "trend pick"]),
+    # GFA 외부몰은 GFA보다 먼저 봐야 한다 — 'gfa' 규칙이 먼저 걸리면 자사몰로 합쳐진다.
+    ("네이버 GFA_외부몰", ["gfa_외부몰", "gfa 외부몰"]),
     ("네이버 GFA", ["gfa"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
@@ -8469,6 +8581,25 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
 GOOGLE_ADS_VER_MAX = 30
 GOOGLE_ADS_VER_MIN = 18
 
+# 같은 광고 계정 안에 온라인팀 캠페인과 마케팅팀 캠페인이 같이 있다.
+# 이 대시보드는 온라인팀 성과만 봐야 하므로 마케팅팀 캠페인은 광고비·노출·클릭
+# 어느 것도 가져오지 않는다. (계정 전체로 받던 시절엔 PMax_마케팅팀 광고비
+# 528,423원이 같이 들어와서 구글 ROAS가 실제보다 낮게 나왔다.)
+# 캠페인 이름에 아래 단어가 하나라도 들어 있으면 제외한다. 대소문자·공백은 무시.
+# Secrets [google_ads] exclude_campaigns = "마케팅팀,테스트" 로 덮어쓸 수 있다.
+GOOGLE_ADS_EXCLUDE_DEFAULT = "마케팅팀"
+
+
+def _google_ads_exclude_words() -> list:
+    cfg = _secrets_section("google_ads") or {}
+    raw = str(cfg.get("exclude_campaigns") or GOOGLE_ADS_EXCLUDE_DEFAULT)
+    return [w.strip().lower() for w in raw.split(",") if w.strip()]
+
+
+def _google_campaign_excluded(name) -> bool:
+    n = "".join(str(name or "").lower().split())
+    return any(w.replace(" ", "") in n for w in _google_ads_exclude_words())
+
 
 def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     """Google Ads API(REST)에서 일별 광고비를 받아온다. 무거운 google-ads 라이브러리 대신
@@ -8499,9 +8630,12 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     if cfg.get("login_customer_id"):
         headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
 
+    # FROM customer(계정 전체)가 아니라 FROM campaign 으로 받는다 — 캠페인 이름을 봐야
+    # 마케팅팀 캠페인을 뺄 수 있기 때문이다. 합계는 캠페인을 더하면 계정 전체와 같다.
     query = (
-        "SELECT segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks "
-        "FROM customer "
+        "SELECT segments.date, campaign.name, metrics.cost_micros, "
+        "metrics.impressions, metrics.clicks "
+        "FROM campaign "
         f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
     )
     # 구글애즈 API는 버전을 URL에 박아야 하는데, 오래된 버전은 폐기되면서 404를 낸다.
@@ -8533,20 +8667,34 @@ def fetch_google_ads_spend(start: date, end: date) -> pd.DataFrame:
     if resp.status_code >= 400:
         raise RuntimeError(f"구글 조회 실패({resp.status_code}, {used_ver}): {resp.text[:300]}")
 
-    rows = []
+    rows, dropped = [], {}
     for chunk in resp.json():
         for r in chunk.get("results", []):
             d = (r.get("segments") or {}).get("date")
             m = r.get("metrics") or {}
+            cname = str((r.get("campaign") or {}).get("name") or "")
             micros = float(m.get("costMicros") or 0)
-            if d:
-                # 구글은 국내에서 VAT를 별도 청구하므로 cost_micros는 VAT 제외 금액이다.
-                # 다른 매체(네이버·크리테오·GFA)와 단위를 맞추려면 1.1을 곱해야 한다.
-                rows.append({"report_date": d, "channel": "구글",
-                             "cost_incl_vat": micros / 1_000_000 * 1.1,
-                             "impressions": float(m.get("impressions") or 0),
-                             "clicks": float(m.get("clicks") or 0),
-                             "source": "google_ads_api"})
+            if not d:
+                continue
+            if _google_campaign_excluded(cname):
+                dropped[cname] = dropped.get(cname, 0.0) + micros / 1_000_000 * 1.1
+                continue
+            # 구글은 국내에서 VAT를 별도 청구하므로 cost_micros는 VAT 제외 금액이다.
+            # 다른 매체(네이버·크리테오·GFA)와 단위를 맞추려면 1.1을 곱해야 한다.
+            rows.append({"report_date": d, "channel": "구글",
+                         "cost_incl_vat": micros / 1_000_000 * 1.1,
+                         "impressions": float(m.get("impressions") or 0),
+                         "clicks": float(m.get("clicks") or 0),
+                         "source": "google_ads_api"})
+    # 무엇을 뺐는지 화면에서 확인할 수 있게 남긴다. 조용히 빼면 나중에 숫자가 안 맞을 때
+    # 원인을 못 찾는다.
+    if dropped:
+        st.session_state["google_excluded_last"] = {
+            "period": f"{start}~{end}",
+            "items": sorted(dropped.items(), key=lambda kv: -kv[1]),
+        }
+    else:
+        st.session_state.pop("google_excluded_last", None)
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
@@ -9251,9 +9399,11 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
     if cfg.get("login_customer_id"):
         headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
 
+    # campaign.name도 같이 받는다 — 광고비 조회와 같은 기준으로 마케팅팀 캠페인의
+    # 애셋 그룹을 빼야 소재별 표와 채널 성과 표의 합계가 서로 안 어긋난다.
     query = (
-        "SELECT segments.date, asset_group.name, metrics.cost_micros, metrics.impressions, "
-        "metrics.clicks, metrics.conversions, metrics.conversions_value "
+        "SELECT segments.date, campaign.name, asset_group.name, metrics.cost_micros, "
+        "metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value "
         "FROM asset_group "
         f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
     )
@@ -9275,6 +9425,8 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
         for batch in (r.json() or []):
             for res in batch.get("results", []):
                 m = res.get("metrics", {})
+                if _google_campaign_excluded((res.get("campaign") or {}).get("name")):
+                    continue
                 rows.append({
                     "report_date": res.get("segments", {}).get("date"),
                     "channel": "구글",
@@ -9974,7 +10126,7 @@ def render_google_token_helper():
 
 
 MANUAL_SPEND_CHANNELS = [
-    "네이버 GFA", "네이버 애드부스트", "네이버 맨즈탭", "카카오톡 플친",
+    "네이버 GFA", "네이버 GFA_외부몰", "네이버 애드부스트", "네이버 맨즈탭", "카카오톡 플친",
     "카카오", "크리테오", "구글", "메타", "네이버 검색광고",
     "네이버 브랜드검색광고", "네이버 쇼핑검색광고", "모비온", "AEDI",
 ]
@@ -10138,24 +10290,45 @@ MEDIA_MASTER_DEFAULT = [
     # ── 외부몰: 매출이 GA4에 안 잡힌다(스마트스토어). 예산도 파일에 없어 직접 지정한다. ──
     ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "",                  0.0, "", 2_200_000),
     ("네이버 맨즈탭_외부몰",  "외부몰", 120, "네이버 맨즈탭_외부몰", "",                  0.0, "", 0),
+    # GFA 계정 안에서 외부몰(스마트스토어)로 보내는 캠페인 — STCO_외부몰_데일리_전환_PC/MO.
+    # 자사몰 캠페인과 한 파일로 내려오는데 예전엔 같이 GFA_자사몰로 들어가 있었다.
+    ("GFA_외부몰",         "외부몰", 130, "네이버 GFA_외부몰",   "",                  0.0, "", 0),
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
                      "budget_line", "budget_share", "utm_match", "budget_override", "note"]
 
 
-def media_master_frame(saved: pd.DataFrame = None) -> pd.DataFrame:
-    """저장된 매체 정의가 있으면 그걸 쓰고, 없으면 기본값으로 시작한다."""
-    if saved is not None and not saved.empty and "media" in saved.columns:
-        df = saved.copy()
-        defaults = {"sort_order": 100, "budget_share": 1.0, "budget_override": 0}
-        for c in MEDIA_MASTER_COLS:
-            if c not in df.columns:
-                df[c] = defaults.get(c, "")
-        return df[MEDIA_MASTER_COLS].sort_values("sort_order").reset_index(drop=True)
+def _media_master_default_frame() -> pd.DataFrame:
     rows = [dict(zip(MEDIA_MASTER_COLS[:-1], r)) for r in MEDIA_MASTER_DEFAULT]
     df = pd.DataFrame(rows)
     df["note"] = ""
     return df[MEDIA_MASTER_COLS]
+
+
+def media_master_frame(saved: pd.DataFrame = None) -> pd.DataFrame:
+    """저장된 매체 정의가 있으면 그걸 쓰고, 없으면 기본값으로 시작한다.
+
+    저장본에 **없는 기본 매체는 뒤에 이어 붙인다.** 한 번 저장하고 나면 그 뒤에
+    코드에 새 매체를 추가해도 화면에 안 나타나는 문제가 있었다 — GFA 외부몰을
+    새로 가르고도 저장본에 그 줄이 없어서 광고비가 어디에도 안 잡히는 식이다.
+    빠진 줄만 채우므로 사용자가 고쳐둔 값은 건드리지 않는다.
+    """
+    base = _media_master_default_frame()
+    if saved is None or saved.empty or "media" not in saved.columns:
+        return base
+
+    df = saved.copy()
+    defaults = {"sort_order": 100, "budget_share": 1.0, "budget_override": 0}
+    for c in MEDIA_MASTER_COLS:
+        if c not in df.columns:
+            df[c] = defaults.get(c, "")
+    df = df[MEDIA_MASTER_COLS]
+
+    have = set(df["media"].astype(str).str.strip())
+    missing = base[~base["media"].astype(str).str.strip().isin(have)]
+    if not missing.empty:
+        df = pd.concat([df, missing], ignore_index=True)
+    return df.sort_values("sort_order").reset_index(drop=True)
 
 
 def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
@@ -10639,13 +10812,90 @@ CONTRACT_COLS = ["channel", "start_date", "end_date", "amount_incl_vat", "note"]
 
 
 def contract_seed() -> pd.DataFrame:
-    """저장된 계약이 없을 때 보여줄 기본 행 (실제 브랜드검색 계약 기준)."""
+    """저장된 계약이 없을 때 보여줄 기본 행 (네이버 광고관리 '브랜드검색 계약' 화면 기준).
+
+    계약이 바뀌면 일 단가도 같이 바뀐다 — 같은 154만원이라도 30일 계약은 하루 51,333원,
+    60일 계약은 하루 25,667원이다. 그래서 계약 건마다 한 줄씩 들고 있어야 한다.
+    (9/6~11/4 계약을 안 넣어둬서 9/6 이후 브랜드검색 광고비가 0으로 빠져 있었다.)
+    """
     return pd.DataFrame([
         {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 7, 8),
-         "end_date": date(2026, 8, 6), "amount_incl_vat": 1_540_000, "note": "직전 30일 계약"},
+         "end_date": date(2026, 8, 6), "amount_incl_vat": 1_540_000,
+         "note": "브검PC_2607 · 30일 · 일 51,333원"},
         {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 8, 7),
-         "end_date": date(2026, 9, 5), "amount_incl_vat": 1_540_000, "note": "현재 계약"},
+         "end_date": date(2026, 9, 5), "amount_incl_vat": 1_540_000,
+         "note": "브검PC_2608 · 30일 · 일 51,333원"},
+        {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 9, 6),
+         "end_date": date(2026, 11, 4), "amount_incl_vat": 1_540_000,
+         "note": "브검PC_2609~2611 · 60일 · 일 25,667원"},
     ], columns=CONTRACT_COLS)
+
+
+def contract_gap_days(contracts: pd.DataFrame, channel: str,
+                      start: date, end: date) -> list:
+    """조회 기간 중 그 매체에 계약이 하나도 안 걸린 날짜들."""
+    covered = set()
+    if contracts is not None and not contracts.empty:
+        for _, c in contracts.iterrows():
+            if str(c.get("channel") or "").strip() != channel:
+                continue
+            try:
+                s = pd.to_datetime(c["start_date"]).date()
+                e = pd.to_datetime(c["end_date"]).date()
+            except Exception:
+                continue
+            d = max(s, start)
+            while d <= min(e, end):
+                covered.add(d)
+                d += timedelta(days=1)
+    out, d = [], start
+    while d <= end:
+        if d not in covered:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _contract_gap_warning(ad_spend, start: date, end: date):
+    """정액 계약 매체가 '돌고는 있는데 계약이 안 걸린' 기간을 잡아낸다.
+
+    계약을 갱신하고 대시보드에 안 넣으면 그 기간 광고비가 통째로 0이 된다.
+    표에는 API가 주는 노출·클릭만 남아서 ROAS가 터무니없이 높게 보이는데,
+    화면만 봐서는 '성과가 좋다'로 읽히지 '계약을 안 넣었다'로는 안 읽힌다.
+    그래서 매번 조회할 때마다 자동으로 확인한다.
+    """
+    try:
+        saved_ct = load_table("ad_contract")
+    except Exception:
+        return
+    if ad_spend is None or ad_spend.empty:
+        return
+    a = ad_spend.copy()
+    a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
+    a = a.dropna(subset=["_d"])
+    a = a[(a["_d"] >= start) & (a["_d"] <= end)]
+    if a.empty:
+        return
+    for c in ("impressions", "clicks"):
+        a[c] = pd.to_numeric(a.get(c), errors="coerce").fillna(0)
+
+    msgs = []
+    for ch in CONTRACT_CHANNELS:
+        sub = a[a["channel"].astype(str) == ch]
+        if sub.empty or (sub["impressions"].sum() + sub["clicks"].sum()) <= 0:
+            continue                      # 그 기간에 안 돈 매체는 볼 것도 없다
+        ran = set(sub.loc[sub["impressions"] + sub["clicks"] > 0, "_d"])
+        gap = sorted(ran & set(contract_gap_days(saved_ct, ch, start, end)))
+        if gap:
+            msgs.append(f"**{ch}** — {gap[0]:%m/%d}~{gap[-1]:%m/%d} ({len(gap)}일)")
+    if msgs:
+        st.warning(
+            "정액 계약이 비어 있는 기간이 있습니다: " + " · ".join(msgs) + "\n\n"
+            "광고는 돌았는데(노출·클릭 있음) 계약이 안 걸려 있어 **그 기간 광고비가 0원**으로 "
+            "잡힙니다 — ROAS가 실제보다 훨씬 좋게 나옵니다. 아래 "
+            "**🗂️ 자료 입력 · 참고 → 📄 정액 계약 광고비**에 계약을 한 줄 추가하고 "
+            "[저장하고 반영]을 눌러주세요."
+        )
 
 
 def contracts_to_daily(contracts: pd.DataFrame) -> pd.DataFrame:
@@ -10889,6 +11139,13 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     df = pd.DataFrame(recs)
 
     _spend_gap_warning(ga_daily, ad_spend, start, end)
+    _contract_gap_warning(ad_spend, start, end)
+
+    # 구글에서 제외한 캠페인이 있으면 알려준다 (마케팅팀 캠페인 등).
+    _gx = st.session_state.get("google_excluded_last")
+    if _gx and _gx.get("items"):
+        _txt = " · ".join(f"{n} {v:,.0f}원" for n, v in _gx["items"][:5])
+        st.caption(f"ℹ️ 구글 — 온라인팀 성과만 보기 위해 제외한 캠페인({_gx['period']}): {_txt}")
 
     # ── 구분 필터 (KPI보다 위) ────────────────────────────
     # 필터를 KPI 아래에 두면 '자사몰'을 골라도 위 숫자는 전체라서 예산·ROAS를 잘못 읽게 된다.
@@ -13198,6 +13455,22 @@ def render_ga_channel_funnel_page(
     users_now, users_prev = _sum(fg, "users"), _sum(pg, "users")
     new_now, new_prev = _sum(fg, "new_users"), _sum(pg, "new_users")
     ret_now, ret_prev = _sum(fg, "returning_users"), _sum(pg, "returning_users")
+
+    # ── 방문자 수는 '소스별 합계'가 아니라 GA4에 기간을 통째로 물어본 값을 쓴다 ──
+    # 소스/매체별 사용자수를 더하면 한 사람이 여러 경로로 들어온 만큼 중복해서 세어진다
+    # (9/1: 합계 8,188명 vs GA4 실제 7,330명). 매체별 표는 매체끼리 비교하는 용도라
+    # 지금처럼 두되, 사이트 전체를 말하는 이 카드만 진짜 사람 수로 바꾼다.
+    _site_now = ga4_site_totals(start, end)
+    _site_prev = ga4_site_totals(prev_start, prev_end)
+    _users_summed = users_now                 # 캡션에서 차이를 보여주려고 들고 있는다
+    if _site_now.get("ok"):
+        users_now = _site_now["users"]
+        new_now = _site_now["new_users"]
+        ret_now = _site_now["returning_users"]
+    if _site_prev.get("ok"):
+        users_prev = _site_prev["users"]
+        new_prev = _site_prev["new_users"]
+        ret_prev = _site_prev["returning_users"]
     conv_now, conv_prev = _sum(fg, "conversions"), _sum(pg, "conversions")
     rev_now, rev_prev = _sum(fg, "revenue"), _sum(pg, "revenue")
     # 목적축별 — 신규 발굴은 가입·첫구매·신규매출, 매출 확보는 재구매·재구매매출을 본다
@@ -13470,6 +13743,19 @@ def render_ga_channel_funnel_page(
         "</div></div>",
         unsafe_allow_html=True,
     )
+    if _site_now.get("ok"):
+        _gap = _users_summed - users_now
+        _note = ("총 방문자·신규·재방문은 GA4에 이 기간을 통째로 물어본 **실제 사람 수**입니다 "
+                 "(GA4 탐색 '방문자 보고서'의 총 사용자·첫 방문과 같은 값).")
+        if _gap > 0:
+            _note += (f" 아래 매체별 표의 방문자를 다 더하면 {_users_summed:,.0f}명으로 "
+                      f"{_gap:,.0f}명 더 많은데, 한 사람이 여러 경로로 들어오면 경로마다 "
+                      "한 번씩 세어지기 때문입니다 — 매체끼리 비교할 때만 쓰세요.")
+        st.caption(_note)
+    else:
+        st.caption("총 방문자는 매체별 합계입니다 — 한 사람이 여러 경로로 들어오면 중복해서 "
+                   "세어지므로 GA4 보고서의 '총 사용자'보다 큽니다. (GA4 연동이 되면 실제 "
+                   "사람 수로 자동 교체됩니다)")
 
     # ── 목적별 퍼널 (토글) ──
     # 이 화면은 대행사 리포트를 쓰지 않는다 — 매체 API(노출·클릭·광고비)와 GA4(사용자·가입·구매·매출)만
