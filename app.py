@@ -11027,10 +11027,30 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 "월이 걸쳐 있어도(예: 8/7~9/5) 날짜 단위로 나누므로 월별 집계가 알아서 맞습니다."
             )
             saved_ct = load_table("ad_contract")
-            ct = saved_ct[CONTRACT_COLS].copy() if (saved_ct is not None and not saved_ct.empty
-                                                    and "channel" in saved_ct.columns) else contract_seed()
+            seed = contract_seed()
             for c in ("start_date", "end_date"):
-                ct[c] = pd.to_datetime(ct[c], errors="coerce").dt.date
+                seed[c] = pd.to_datetime(seed[c], errors="coerce").dt.date
+            if saved_ct is not None and not saved_ct.empty and "channel" in saved_ct.columns:
+                ct = saved_ct[CONTRACT_COLS].copy()
+                for c in ("start_date", "end_date"):
+                    ct[c] = pd.to_datetime(ct[c], errors="coerce").dt.date
+                # 저장본에 없는 '아는 계약'은 표에 채워 넣는다. 기본값은 표가 비어 있을 때만
+                # 쓰였는데, 한 번 저장하고 나면 그 뒤에 새로 맺은 계약이 영영 안 들어왔다
+                # (브랜드검색 9/6~11/4 계약이 그래서 통째로 빠져 있었다).
+                have = {(str(r["channel"]).strip(), r["start_date"])
+                        for _, r in ct.iterrows()}
+                add = seed[[(str(r["channel"]).strip(), r["start_date"]) not in have
+                            for _, r in seed.iterrows()]]
+                if not add.empty:
+                    ct = pd.concat([ct, add], ignore_index=True)
+                    st.info(
+                        f"저장본에 없던 계약 {len(add)}건을 아래 표에 채워 넣었습니다 — "
+                        "확인하고 **[저장하고 반영]** 을 눌러주세요. "
+                        + " · ".join(f"{r['channel']} {r['start_date']:%m/%d}~{r['end_date']:%m/%d}"
+                                     for _, r in add.iterrows())
+                    )
+            else:
+                ct = seed
             ct = ct.sort_values(["channel", "start_date"]).reset_index(drop=True)
 
             ct_edit = st.data_editor(
@@ -12607,6 +12627,186 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# 소재별 성과 → 엑셀 내보내기
+# ──────────────────────────────────────────────────────────────
+_GC_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _gc_plain(s) -> tuple:
+    """표에 쓰는 HTML 이름에서 (이름, 부가설명)을 뽑는다.
+    key는 '260903_니들코드셔츠v2<span class="gc-sub">메타 · 의류관심타겟</span>' 꼴이다."""
+    t = str(s or "")
+    t = t.replace('<span class="gc-sub">', "\x00").replace("</span>", "")
+    t = _GC_TAG_RE.sub("", t)
+    for a, b in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
+        t = t.replace(a, b)
+    head, _, sub = t.partition("\x00")
+    return head.strip(), sub.strip()
+
+
+def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
+    """엑셀 한 줄. 화면 표(_gc_row_html)와 **같은 계산**을 쓴다 —
+    숫자가 갈리면 엑셀을 믿을 수 없게 되므로 판정 로직까지 그대로 맞춘다."""
+    ses = float(r["sessions"] or 0)
+    conv = float(r["conv"] or 0)
+    rev = float(r["rev"] or 0)
+    imp = float((media or {}).get("impressions", 0) or 0)
+    clk = float((media or {}).get("clicks", 0) or 0)
+    cost = float((media or {}).get("cost", 0) or 0)
+    ctr = (clk / imp * 100) if imp else 0.0
+    aov = (rev / conv) if conv else 0.0
+    roas = (rev / cost * 100) if cost > 0 else 0.0
+
+    judge_cost = float((media or {}).get("_full_cost", cost) or 0)
+    label, _cls = _v4_verdict(roas, judge_cost, conv, clk)
+    if cost <= 0:
+        label = "광고비 없음"
+    if (media or {}).get("_unmatched"):
+        label, roas = "UTM 없음", None
+    if is_total:
+        label = _ops_kpi_status(roas) if cost > 0 else ""
+
+    name, sub = _gc_plain(r["key"] if not isinstance(r, dict) else r.get("key", ""))
+    return {
+        "이름": "TOTAL" if is_total else name,
+        "구분": sub,
+        "_img": img_url,
+        "노출": imp, "클릭": clk, "CTR(%)": ctr,
+        "광고비(VAT+)": cost, "방문(세션)": ses,
+        "GA 구매": conv, "GA 매출": rev, "객단가": aov,
+        "ROAS(%)": roas, "판정": label,
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=600)
+def _gc_thumb_bytes(url: str, px: int = 90):
+    """소재 이미지를 표에 보이는 크기로 줄여서 JPEG 바이트로. 실패하면 None.
+
+    원본을 그대로 엑셀에 박으면 한 장에 100~300KB라 200장이면 30~50MB가 된다.
+    줄이면 한 장 5~10KB — 200장 넣어도 2~3MB로 끝난다. 표에서 보는 크기라
+    화면과 똑같이 보이면서 파일만 가벼워진다.
+    """
+    try:
+        if not url:
+            return None
+        if str(url).startswith("data:"):
+            raw = base64.b64decode(str(url).split(",", 1)[1])
+        else:
+            import requests
+            resp = requests.get(url, timeout=20)
+            if resp.status_code != 200:
+                return None
+            raw = resp.content
+        im = Image.open(io.BytesIO(raw))
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        im.thumbnail((px, px))
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=80, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _gc_safe_sheet(name: str, used: set) -> str:
+    """엑셀 시트 이름 규칙: 31자 이내, : \\ / ? * [ ] 금지, 중복 불가."""
+    s = re.sub(r"[:\\/?*\[\]]", "-", str(name or "sheet")).strip() or "sheet"
+    s = s[:31]
+    base, i = s, 2
+    while s in used:
+        tail = f"~{i}"
+        s = base[:31 - len(tail)] + tail
+        i += 1
+    used.add(s)
+    return s
+
+
+def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = True,
+                   px: int = 90, progress=None) -> bytes:
+    """매체별로 시트를 나눈 엑셀을 만든다. sheets = {탭이름: [행 dict, ...]}"""
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    cols = ["이름", "구분"] + (["이미지"] if with_images else []) + [
+        "노출", "클릭", "CTR(%)", "광고비(VAT+)", "방문(세션)",
+        "GA 구매", "GA 매출", "객단가", "ROAS(%)", "판정"]
+    numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": "0.00",
+              "광고비(VAT+)": "#,##0", "방문(세션)": "#,##0", "GA 구매": "#,##0",
+              "GA 매출": "#,##0", "객단가": "#,##0", "ROAS(%)": "#,##0"}
+    width = {"이름": 34, "구분": 22, "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
+             "CTR(%)": 9, "광고비(VAT+)": 14, "방문(세션)": 11, "GA 구매": 9,
+             "GA 매출": 14, "객단가": 11, "ROAS(%)": 10, "판정": 12}
+
+    head_fill = PatternFill("solid", fgColor="14181F")
+    head_font = Font(color="FFFFFF", bold=True, size=10)
+    tot_fill = PatternFill("solid", fgColor="F1F5E8")
+    thin = Side(style="thin", color="E3E1DC")
+    border = Border(bottom=thin)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    used, total_imgs, done = set(), 0, 0
+    if with_images:
+        total_imgs = sum(1 for recs in sheets.values() for r in recs if r.get("_img"))
+
+    for tab, recs in sheets.items():
+        ws = wb.create_sheet(_gc_safe_sheet(tab, used))
+        # 행 번호는 직접 센다. ws.append([])(빈 줄)는 max_row를 올리지 않아서,
+        # max_row로 계산하면 머리글 서식이 한 줄 위에 칠해진다.
+        ws["A1"] = f"{tab} · {level}별 GA 성과"
+        ws["A2"] = f"조회 기간 {start} ~ {end}"
+        ws["B2"] = "노출·클릭·광고비=매체 실집행 / 구매·매출=GA4 / ROAS=GA 매출 ÷ 매체 광고비"
+        ws["A1"].font = Font(bold=True, size=13)
+        ws["A2"].font = Font(color="8A8A7C", size=9)
+        ws["B2"].font = Font(color="8A8A7C", size=9)
+
+        hrow = 4
+        for i, c in enumerate(cols, start=1):
+            cell = ws.cell(row=hrow, column=i, value=c)
+            cell.fill, cell.font = head_fill, head_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.column_dimensions[get_column_letter(i)].width = width.get(c, 12)
+        ws.freeze_panes = ws.cell(row=hrow + 1, column=1)
+
+        rrow = hrow
+        for rec in recs:
+            rrow += 1
+            for i, c in enumerate(cols, start=1):
+                if c == "이미지":
+                    continue
+                v = rec.get(c)
+                cell = ws.cell(row=rrow, column=i, value=("" if v is None else v))
+                cell.border = border
+                if c in numfmt:
+                    cell.number_format = numfmt[c]
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center",
+                                               wrap_text=(c == "이름"))
+                if rec.get("이름") == "TOTAL":
+                    cell.fill = tot_fill
+                    cell.font = Font(bold=True)
+            if with_images:
+                ws.row_dimensions[rrow].height = max(18, px * 0.75)
+                b = _gc_thumb_bytes(rec["_img"], px) if rec.get("_img") else None
+                if b:
+                    try:
+                        img = XLImage(io.BytesIO(b))
+                        ws.add_image(img, f"{get_column_letter(cols.index('이미지') + 1)}{rrow}")
+                    except Exception:
+                        pass
+                if rec.get("_img"):
+                    done += 1
+                    if progress and total_imgs:
+                        progress(done / total_imgs)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             utm_map: pd.DataFrame = None,
                             creative_perf: pd.DataFrame = None,
@@ -12842,6 +13042,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         ) if not lookup else st.info("선택한 기간에 광고 유입 데이터가 없습니다.")
         return
     tab_labels = ["TOTAL"] + order
+    # 엑셀 버튼은 표보다 위에 있어야 찾기 쉬운데, 담을 내용은 탭을 다 그려봐야 안다.
+    # 자리만 먼저 잡아두고 맨 아래에서 채운다.
+    export_slot = st.container()
+    export_sheets = {}
     tabs = st.tabs(tab_labels)
     _non_cre = [c for c in GC_NON_CREATIVE if c in hidden]
     if _non_cre:
@@ -13102,9 +13306,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 st.markdown(cmt, unsafe_allow_html=True)
 
             body = []
+            recs = []          # 엑셀용 — 화면 표와 같은 값을 같은 순서로 쌓는다
             for _, r in rows.iterrows():
-                url = _gc_pick_image(r, img_map, store_idx) if show_img else None
-                body.append(_gc_row_html(r, r["_media"], img_url=url, show_img=show_img))
+                # 이미지는 화면 토글과 무관하게 찾아둔다(엑셀에는 넣을 수 있어야 하므로).
+                url = _gc_pick_image(r, img_map, store_idx)
+                body.append(_gc_row_html(r, r["_media"],
+                                         img_url=(url if show_img else None), show_img=show_img))
+                recs.append(_gc_row_record(r, r["_media"], img_url=url))
             # 매체에는 있는데 GA에서 못 찾은 소재를 한 줄로 모은다.
             #
             # 이 표는 'GA 줄이 있어야' 나오는 구조라, 매체 실적만 있고 GA 유입이 안 잡힌
@@ -13126,8 +13334,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
                     })
                     _url = _gc_pick_image(_row, img_map, store_idx)
-                    body.append(_gc_row_html(_row, dict(m, _unmatched=True), "gc-unmatched",
+                    _m_un = dict(m, _unmatched=True)
+                    body.append(_gc_row_html(_row, _m_un, "gc-unmatched",
                                              img_url=_url, show_img=show_img))
+                    recs.append(_gc_row_record(_row, _m_un, img_url=_url))
 
             tot_r = rows[["sessions", "conv", "rev"]].sum()
             tot_r["key"] = "TOTAL"
@@ -13140,6 +13350,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "_total": True,
             }
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
+            export_sheets[label] = [_gc_row_record(tot_r, tot_media, is_total=True)] + recs
 
             tid = f"gctbl{ti}"
             th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
@@ -13205,6 +13416,50 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             row_h = 116 if show_img else 44
             st.components.v1.html(card, height=min(2200, 460 + row_h * len(body)),
                                   scrolling=True)
+
+    # ── 엑셀 내보내기 ──────────────────────────────────────────
+    # 위에서 자리만 잡아둔 export_slot을 이제 채운다.
+    # 이미지를 받아오는 데 시간이 걸려서 화면을 열 때마다 만들지는 않는다 —
+    # 버튼을 눌렀을 때만 만들고, 만든 파일은 세션에 들고 있다가 내려받게 한다.
+    if not export_sheets:
+        return
+    _sig = f"{level}|{start}|{end}|{'|'.join(export_sheets)}"
+    if st.session_state.get("gc_xlsx_sig") != _sig:
+        st.session_state.pop("gc_xlsx", None)      # 기간·단위가 바뀌면 옛 파일은 버린다
+    with export_slot:
+        _c1, _c2 = st.columns([1.3, 2.7])
+        _n_rows = sum(len(v) for v in export_sheets.values())
+        _n_imgs = sum(1 for v in export_sheets.values() for r in v if r.get("_img"))
+        if _c1.button(f"📗 엑셀로 내보내기 ({len(export_sheets)}개 매체)",
+                      key="gc_xlsx_make", use_container_width=True):
+            _bar = _c2.progress(0.0, text="소재 이미지를 받아 줄이는 중…")
+            try:
+                st.session_state["gc_xlsx"] = gc_build_excel(
+                    export_sheets, level, start, end, with_images=True,
+                    progress=lambda p: _bar.progress(
+                        min(1.0, p), text=f"소재 이미지 {p * 100:.0f}%"))
+                st.session_state["gc_xlsx_sig"] = _sig
+                st.session_state["gc_xlsx_name"] = (
+                    f"소재별성과_{level}별_{start:%y%m%d}-{end:%y%m%d}.xlsx")
+            except Exception as _e:
+                st.error(f"엑셀을 만들지 못했습니다: {_e}")
+            finally:
+                _bar.empty()
+        if st.session_state.get("gc_xlsx"):
+            _mb = len(st.session_state["gc_xlsx"]) / 1024 / 1024
+            _c2.download_button(
+                f"⬇️  {st.session_state.get('gc_xlsx_name', '소재별성과.xlsx')}  ({_mb:.1f}MB)",
+                data=st.session_state["gc_xlsx"],
+                file_name=st.session_state.get("gc_xlsx_name", "소재별성과.xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="gc_xlsx_dl", use_container_width=True, type="primary")
+        else:
+            _c2.caption(
+                f"매체마다 시트를 나눠 한 파일로 만듭니다 (총 {_n_rows:,}줄 · 소재 이미지 "
+                f"{_n_imgs:,}장). 이미지는 화면에 보이는 크기로 줄여 넣어 2~3MB 정도가 "
+                "됩니다. 만드는 데 10~30초 걸립니다 — 이미지를 받아와야 해서입니다. "
+                f"지금 보고 있는 **{level}** 단위·**{start}~{end}** 기준 그대로 나갑니다."
+            )
 
 
 def render_ga_channel_funnel_page(
