@@ -2656,6 +2656,33 @@ CREATIVE_CHANNEL_WHITELIST_MAP = {
 }
 
 
+# GFA 소재탭 이름. 기기(PC/MO) × 몰(자사몰/외부몰) 네 갈래다.
+# 캠페인 이름이 'STCO_자사몰_데일리_전환_PC' / 'STCO_외부몰_데일리_전환_MO' 꼴이라
+# 거기서 둘 다 읽어낸다. 운영도 이 네 갈래로 따로 하기 때문에 합쳐 보면 판단이 안 된다.
+GFA_PC_OWN = "네이버 GFA PC (자사몰)"
+GFA_MO_OWN = "네이버 GFA MO (자사몰)"
+GFA_PC_EXT = "네이버 GFA PC (외부몰)"
+GFA_MO_EXT = "네이버 GFA MO (외부몰)"
+GFA_TABS = [GFA_PC_OWN, GFA_MO_OWN, GFA_PC_EXT, GFA_MO_EXT]
+GFA_EXT_TABS = {GFA_PC_EXT, GFA_MO_EXT}
+
+
+def gfa_tab_of(text) -> str | None:
+    """GFA 문자열(캠페인명 또는 옛 채널명)에서 탭 이름을 읽는다. 기기를 못 가르면 None.
+
+    옛 데이터는 '네이버 GFA PC'처럼 몰 구분 없이 저장돼 있다. 그때는 외부몰을 따로
+    가르지 않았으니 전부 자사몰이 맞다 — 그래서 몰 표시가 없으면 자사몰로 본다.
+    """
+    s = str(text or "")
+    low = s.lower()
+    ext = ("외부몰" in s) or ("스마트스토어" in s)
+    if re.search(r"(^|[^a-z])pc([^a-z]|$)", low):
+        return GFA_PC_EXT if ext else GFA_PC_OWN
+    if re.search(r"(^|[^a-z])mo([^a-z]|$)", low) or "모바일" in s or "mobile" in low:
+        return GFA_MO_EXT if ext else GFA_MO_OWN
+    return None
+
+
 def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> pd.Series:
     """행별 매체탭 라벨을 계산. 현재 미운영 매체는 None을 반환해 화면/저장에서 제외되도록 한다."""
     idx = campaign_series.index
@@ -2663,13 +2690,8 @@ def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> 
         label = CREATIVE_CHANNEL_WHITELIST_MAP[inferred_channel]
         return pd.Series([label] * len(idx), index=idx, dtype=object)
     if inferred_channel == "GFA":
-        camp = campaign_series.astype(str)
-        is_pc = camp.str.contains("_PC", case=False, na=False)
-        is_mo = camp.str.contains("_MO", case=False, na=False)
-        result = pd.Series([None] * len(idx), index=idx, dtype=object)
-        result[is_pc] = "네이버 GFA PC"
-        result[~is_pc & is_mo] = "네이버 GFA MO"
-        return result
+        return pd.Series([gfa_tab_of(c) for c in campaign_series.astype(str)],
+                         index=idx, dtype=object)
     return pd.Series([None] * len(idx), index=idx, dtype=object)
 
 
@@ -2977,8 +2999,11 @@ TAB_TO_ORIGIN_CHANNEL = {
     "메타": "페이스북",
     "구글(P-MAX)": "구글",
     "크리테오": "크리테오",
-    "네이버 GFA PC": "GFA",
-    "네이버 GFA MO": "GFA",
+    # GFA는 기기×몰 네 갈래지만 이미지는 한 폴더에 같이 들어 있다.
+    GFA_PC_OWN: "GFA", GFA_MO_OWN: "GFA",
+    GFA_PC_EXT: "GFA", GFA_MO_EXT: "GFA",
+    "네이버 GFA PC": "GFA", "네이버 GFA MO": "GFA",   # 옛 이름(저장된 데이터용)
+    "네이버 GFA": "GFA", "네이버 GFA (외부몰)": "GFA",
 }
 
 # Storage 저장 경로(폴더명)는 한글이 섞이면 일부 클라이언트/버전에서 URL 인코딩 문제로
@@ -5496,7 +5521,7 @@ def render_channel_mix(fc: pd.DataFrame):
 # 소재별 성과 (신규 페이지)
 # ──────────────────────────────────────────────────────────────
 # 현재 실제로 운영 중인 매체 탭만 고정 순서로 노출 (TOTAL이 맨 왼쪽)
-CREATIVE_TABS = ["TOTAL", "네이버 GFA PC", "네이버 GFA MO", "메타", "구글(P-MAX)", "크리테오"]
+CREATIVE_TABS = ["TOTAL"] + GFA_TABS + ["메타", "구글(P-MAX)", "크리테오"]
 
 
 def _render_creative_table(fc: pd.DataFrame, channel_name: str = None):
@@ -6157,8 +6182,9 @@ TARGETING_STORE_CHANNELS = {"네이버 쇼핑검색광고"}
 
 # 사용자가 정리해준 리포트 순서(비용순 정렬이 아니라 매체 관례상 고정 순서) — 목록에 없는
 # 채널은 뒤에 광고비 내림차순으로 붙는다.
-TARGETING_NEW_CHANNEL_ORDER = ["네이버 GFA PC", "네이버 GFA MO", "메타", "구글(P-MAX)", "네이버 맨즈탭"]
-TARGETING_RETARGET_OWN_CHANNEL_ORDER = ["네이버 검색광고", "네이버 브랜드검색광고", "네이버 GFA PC", "네이버 GFA MO", "메타", "크리테오"]
+TARGETING_NEW_CHANNEL_ORDER = GFA_TABS + ["메타", "구글(P-MAX)", "네이버 맨즈탭"]
+TARGETING_RETARGET_OWN_CHANNEL_ORDER = (
+    ["네이버 검색광고", "네이버 브랜드검색광고"] + GFA_TABS + ["메타", "크리테오"])
 
 TARGETING_CORE_COLS = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
                         "signups", "signup_rate", "conversions", "revenue", "roas"]
@@ -7678,7 +7704,9 @@ FUNNEL_CANON_RULES = [
     ("네이버 애드부스트", ["애드부스트", "adboost", "advoost", "ad voost"]),
     ("네이버 트렌드픽", ["트렌드픽", "trendpick", "trend pick"]),
     # GFA 외부몰은 GFA보다 먼저 봐야 한다 — 'gfa' 규칙이 먼저 걸리면 자사몰로 합쳐진다.
-    ("네이버 GFA_외부몰", ["gfa_외부몰", "gfa 외부몰"]),
+    # 소재 화면의 탭 이름('네이버 GFA PC (외부몰)')도 여기로 모인다.
+    ("네이버 GFA_외부몰", ["gfa_외부몰", "gfa 외부몰", "gfa pc (외부몰)", "gfa mo (외부몰)",
+                        "gfa (외부몰)"]),
     ("네이버 GFA", ["gfa"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
@@ -12057,36 +12085,39 @@ GC_NON_CREATIVE = ["네이버 검색광고", "네이버 브랜드검색광고", 
 
 
 def _gc_channel(name) -> str:
-    """소재별 화면용 매체명. 대표명으로 모으되 GFA만 PC/MO를 살린다.
+    """소재별 화면용 매체명. 대표명으로 모으되 GFA만 기기×몰 네 갈래를 살린다.
 
-    대행사 리포트는 GFA를 '네이버 GFA PC' / '네이버 GFA MO'로 나눠 주고 운영도 그렇게 한다.
-    _v4_canon_channel은 둘을 '네이버 GFA' 하나로 합치는데, 소재 화면에서는 기기별로 봐야
-    어느 쪽 소재를 끌지 판단이 된다.
+    대행사 리포트는 GFA를 'GFA PC' / 'GFA MO'로 나눠 주고 운영도 그렇게 한다.
+    거기에 자사몰/외부몰까지 따로 돌리므로 실제로는 네 갈래다.
+    _v4_canon_channel은 전부 '네이버 GFA' 하나로 합치는데, 소재 화면에서는
+    네 갈래로 봐야 어느 쪽 소재를 끌지 판단이 된다.
     """
     s = str(name or "")
     low = s.lower()
     if "gfa" in low and "애드부스트" not in s and "advoost" not in low and "adboost" not in low:
-        if re.search(r"(^|[^a-z])pc([^a-z]|$)", low):
-            return "네이버 GFA PC"
-        if re.search(r"(^|[^a-z])mo([^a-z]|$)", low) or "모바일" in s:
-            return "네이버 GFA MO"
+        tab = gfa_tab_of(s)
+        if tab:
+            return tab
+        # 기기를 못 가른 GFA — 몰 구분만이라도 살린다
+        if ("외부몰" in s) or ("스마트스토어" in s):
+            return "네이버 GFA (외부몰)"
     return _v4_canon_channel(name)
 
 
 def _gc_ga_channel(channel, campaign) -> str:
-    """GA 줄의 매체명. GFA는 utm_campaign의 _PC/_MO 접미사로 기기를 가른다.
+    """GA 줄의 매체명. GFA는 utm_campaign에서 기기(PC/MO)와 몰(자사/외부)을 읽는다.
 
-    GA4는 소스/매체만으로는 GFA PC와 MO를 구분 못 한다. 대행사가 캠페인명을
-    '..._PC' / '..._MO'로 짓고 그걸 utm_campaign에 그대로 쓰기 때문에 거기서 읽는다.
-    접미사가 없으면 '네이버 GFA'(기기 미상)로 남긴다 — 억지로 나누지 않는다.
+    GA4는 소스/매체만으로는 GFA를 못 가른다. 대행사가 캠페인명을
+    'STCO_자사몰_데일리_전환_PC' 꼴로 짓고 그걸 utm_campaign에 그대로 쓰기 때문에
+    거기서 읽는다. 기기를 못 읽으면 '네이버 GFA'(미상)로 남긴다 — 억지로 안 나눈다.
     """
     base = _gc_channel(channel)
-    if base == "네이버 GFA":
-        c = str(campaign or "").upper()
-        if re.search(r"(^|[^A-Z])PC([^A-Z]|$)", c):
-            return "네이버 GFA PC"
-        if re.search(r"(^|[^A-Z])MO([^A-Z]|$)", c) or "MOBILE" in c or "모바일" in c:
-            return "네이버 GFA MO"
+    if base in ("네이버 GFA", "네이버 GFA (외부몰)"):
+        # 채널명에서 이미 외부몰인 걸 알았으면 캠페인에 그 말이 없어도 외부몰이다.
+        blob = str(campaign or "")
+        if base.endswith("(외부몰)") and "외부몰" not in blob:
+            blob += " 외부몰"
+        return gfa_tab_of(blob) or base
     return base
 
 
@@ -13022,16 +13053,38 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     d["_gc_ch"] = [(_gc_ga_channel(ch, cp) if pd.notna(ch) and str(ch).strip() else None)
                    for ch, cp in zip(d["channel"], d["campaign"])]
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
-    all_ch = sorted({c for c in _in_period["_gc_ch"].dropna().unique()})
+
+    # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
+    # 'GA에 줄이 있는 매체'만 탭으로 만들면 외부몰이 영영 안 나온다 — 외부몰 광고는
+    # 스마트스토어로 보내서 자사몰 GA4에 세션이 안 잡히기 때문이다. 매체 리포트에만
+    # 있는 매체도 탭을 만들어야 노출·클릭·광고비·소재 이미지라도 볼 수 있다.
+    #
+    # 매체 API 우선, 없으면 대행사 리포트 순으로 본다. API는 매일 들어와 신규 소재가
+    # 바로 잡히고 리포트는 주 단위라 일주일씩 밀린다. GFA는 네이버가 API를 안 열어줘서
+    # 리포트만 있으므로 폴백이 반드시 필요하다.
+    _report_map = _gc_media_by_key(creative_perf, start, end)     # 대행사 리포트
+    _api_map = _gc_api_by_key(ad_creative, start, end)            # 매체 API
+    # 매체 단위로 하나만 쓴다 — API가 있는 매체는 리포트를 아예 안 본다.
+    # 둘을 소재명으로만 합치면, 리포트에만 있고 API엔 이름이 조금 다른 소재가 남아서
+    # 그 매체 광고비가 실제보다 커진다(형이 잡은 메타 84만원 → 104만원).
+    # 게다가 리포트는 '당월 누적' 스냅샷이라 기간 개념도 API와 달라서 섞으면 안 된다.
+    _api_channels = {ch for ch, _ in _api_map}
+    media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
+    media_map.update(_api_map)
+
+    _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
+    _media_ch = {k[0] for k in media_map}
+    all_ch = sorted(_ga_ch | _media_ch)
     hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
     hidden += [c for c in all_ch if c in GC_NON_CREATIVE]
     all_ch = [c for c in all_ch if c not in hidden]
 
     # GFA 기기 분리가 됐으면, 접미사가 없어 기기를 못 가른 잔여 줄(옛 소재의 UTM 링크가
-    # 아직 살아 있는 경우)은 탭을 따로 만들지 않는다. 탭이 GFA / GFA PC / GFA MO 셋으로
+    # 아직 살아 있는 경우)은 탭을 따로 만들지 않는다. 탭이 GFA / GFA PC / GFA MO 넷으로
     # 보여서 오해를 낳는다. 대신 TOTAL에는 그대로 넣어 합계가 새지 않게 한다.
-    _gfa_split = any(c in ("네이버 GFA PC", "네이버 GFA MO") for c in all_ch)
-    folded = ["네이버 GFA"] if (_gfa_split and "네이버 GFA" in all_ch) else []
+    _gfa_split = any(c in GFA_TABS for c in all_ch)
+    folded = [c for c in ("네이버 GFA", "네이버 GFA (외부몰)")
+              if _gfa_split and c in all_ch]
 
     sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE]
     order = [c for c in all_ch if c not in sep and c not in folded] + sep
@@ -13060,28 +13113,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
     per["sessions"] = pd.to_numeric(per["sessions"], errors="coerce").fillna(0)
 
-    # 소재별 실적은 '매체 API 우선, 없으면 대행사 리포트' 순으로 본다.
-    # API는 매일 들어와서 신규 소재가 바로 잡히고, 리포트는 주 단위라 일주일씩 밀린다.
-    # GFA는 네이버가 API를 안 열어줘서 리포트만 있으므로 폴백이 반드시 필요하다.
-    _report_map = _gc_media_by_key(creative_perf, start, end)     # 대행사 리포트
-    _api_map = _gc_api_by_key(ad_creative, start, end)            # 매체 API
-
-    # 매체 단위로 하나만 쓴다 — API가 있는 매체는 리포트를 아예 안 본다.
-    #
-    # 둘을 소재명으로만 합치면, 리포트에만 있고 API엔 이름이 조금 다른 소재가 남아서
-    # 그 매체 광고비가 실제보다 커진다(형이 잡은 메타 84만원 → 104만원).
-    # 게다가 리포트는 '당월 누적' 스냅샷이라 기간 개념도 API와 달라서 섞으면 안 된다.
-    # GFA처럼 API가 없는 매체만 리포트로 채운다.
-    _api_channels = {ch for ch, _ in _api_map}
-    media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
-    media_map.update(_api_map)
-
-    # GA 쪽이 GFA를 PC/MO로 못 갈랐으면(utm_campaign에 접미사가 없음) 매체 실적도 합쳐서
-    # '네이버 GFA' 하나로 붙인다 — 안 그러면 GFA 소재 전부가 '광고비 없음'이 된다.
+    # 어느 쪽에서도 기기를 못 갈랐으면 매체 실적도 '네이버 GFA' 하나로 합친다 —
+    # 안 그러면 GFA 소재 전부가 '광고비 없음'이 된다.
     if not _gfa_split:
         _merged = {}
         for (ch, key), m in list(media_map.items()):
-            if ch in ("네이버 GFA PC", "네이버 GFA MO"):
+            if ch in GFA_TABS:
                 cur = _merged.setdefault(key, {"impressions": 0.0, "clicks": 0.0, "cost": 0.0,
                                                "media_conv": 0.0, "channel": "네이버 GFA",
                                                "name": m.get("name"), "src": m.get("src")})
@@ -13177,12 +13214,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
             keep = ([c for c in order if c not in sep] + folded) if label == "TOTAL" else [label]
             ch_keep = keep
-            rows = rows_all[rows_all["channel"].isin(keep)]
-            if rows.empty:
+            rows = rows_all[rows_all["channel"].isin(keep)].copy()
+            # GA 줄이 없어도 매체 리포트에 실적이 있으면 표를 그린다.
+            # 외부몰이 그렇다 — 스마트스토어로 보내서 자사몰 GA4에 세션이 안 잡히므로
+            # GA 줄이 아예 없다. 여기서 끊으면 노출·클릭·광고비도 못 보게 된다.
+            _has_media = any(k[0] in ch_keep for k in media_map)
+            if rows.empty and not _has_media:
                 st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
-
-            rows = rows.copy()
+            if rows.empty and label in GFA_EXT_TABS:
+                st.info(
+                    "외부몰 광고는 **스마트스토어로 보내기 때문에 자사몰 GA4에 방문·매출이 "
+                    "안 잡힙니다.** 그래서 이 탭은 매체 리포트가 주는 노출·클릭·광고비와 "
+                    "소재 이미지까지만 보여줍니다. ROAS는 스마트스토어 데이터를 붙이기 "
+                    "전까지 '판단 제외'입니다."
+                )
             if label == "네이버 GFA" and not _gfa_split:
                 st.caption(
                     "GFA를 PC/MO로 나누려면 utm_campaign에 캠페인명(…_PC / …_MO)이 들어 있어야 "
@@ -13301,7 +13347,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 f"광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
                 f"미만이면 판단 보류"
             )
-            cmt = _gc_comment(rows, label if label != "TOTAL" else "전체", avg_roas)
+            cmt = None
+            if not rows.empty:
+                # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
+                # 실제로는 '알 수 없음'이라 '부진'이라고 단정하면 틀린 판단이 된다.
+                try:
+                    cmt = _gc_comment(rows, label if label != "TOTAL" else "전체", avg_roas)
+                except Exception:
+                    cmt = None
             if cmt:
                 st.markdown(cmt, unsafe_allow_html=True)
 
