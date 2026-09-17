@@ -12201,6 +12201,18 @@ def _gc_channel(name) -> str:
     return _v4_canon_channel(name)
 
 
+# 탭 정렬 키. GFA는 **PC를 MO보다 앞에** 둔다 — 운영도 PC부터 보기 때문이고,
+# 그냥 가나다순으로 두면 MO가 먼저 와서 화면 순서와 일하는 순서가 어긋난다.
+_GC_TAB_ORDER_FIX = {
+    GFA_PC_OWN: "네이버 GFA 1 (자사몰)", GFA_MO_OWN: "네이버 GFA 2 (자사몰)",
+    GFA_PC_EXT: "네이버 GFA 1 (외부몰)", GFA_MO_EXT: "네이버 GFA 2 (외부몰)",
+}
+
+
+def _gc_tab_sort_key(c) -> str:
+    return _GC_TAB_ORDER_FIX.get(c, str(c))
+
+
 def _gc_ga_channel(channel, campaign) -> str:
     """GA 줄의 매체명. GFA는 utm_campaign에서 기기(PC/MO)와 몰(자사/외부)을 읽는다.
 
@@ -13195,7 +13207,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
     _media_ch = {k[0] for k in media_map}
-    all_ch = sorted(_ga_ch | _media_ch)
+    all_ch = sorted(_ga_ch | _media_ch, key=_gc_tab_sort_key)
 
     # 외부몰은 광고비가 잡히는데(채널 성과에는 나온다) 소재 데이터가 아직 없을 수 있다.
     # 그럴 때 탭을 아예 안 만들면 '왜 안 나오지'가 된다 — 탭은 만들고 왜 비었는지,
@@ -13249,18 +13261,34 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         st.caption("검색광고(" + " · ".join(_non_cre) + ")는 배너 소재가 없어 이 화면에서 뺐습니다 — "
                    "채널 성과 탭에서 보세요.")
     if folded:
-        # 어디에도 안 들어가는 줄이 생기므로, 얼마나 되는지는 반드시 보여준다.
-        # 조용히 빠지면 나중에 합계가 안 맞을 때 원인을 못 찾는다.
-        _fold = _in_period[_in_period["_gc_ch"].isin(folded)]
-        _f_ses = float(pd.to_numeric(_fold.get("sessions"), errors="coerce").fillna(0).sum())
-        _f_rev = float(pd.to_numeric(_fold.get("revenue"), errors="coerce").fillna(0).sum()) \
-            if "revenue" in _fold.columns else 0.0
-        st.caption(
-            f"GFA 중 utm_campaign에 `_PC`/`_MO`가 없어 기기를 못 가른 줄은 탭을 만들지 "
-            f"않았습니다 — 방문 {_f_ses:,.0f}건 · 매출 {_f_rev:,.0f}원. 대개 예전 링크가 "
-            "아직 살아 있어 찍히는 것이라 무시하셔도 됩니다. 규모가 크면 지금 돌고 있는 "
-            "광고의 utm_campaign에 `_PC`/`_MO`가 빠진 것이니 UTM을 고쳐주세요."
-        )
+        # 어디에도 안 들어가는 줄이 생기므로, 얼마나 되는지 + **어느 캠페인 때문인지**를
+        # 반드시 보여준다. 숫자만 보여주면 "9월엔 PC/MO 나눠 돌렸는데 왜?"에서 막힌다.
+        # 원인은 늘 utm_campaign 값에 있으므로 그 값을 그대로 꺼내 보여준다.
+        _fold = _in_period[_in_period["_gc_ch"].isin(folded)].copy()
+        _fold["sessions"] = pd.to_numeric(_fold.get("sessions"), errors="coerce").fillna(0)
+        if "revenue" not in _fold.columns:
+            _fold["revenue"] = 0.0
+        _fold["revenue"] = pd.to_numeric(_fold["revenue"], errors="coerce").fillna(0)
+        _f_ses, _f_rev = float(_fold["sessions"].sum()), float(_fold["revenue"].sum())
+        with st.expander(
+                f"⚠️ GFA 기기(PC/MO)를 못 가른 유입 {_f_ses:,.0f}건 · 매출 {_f_rev:,.0f}원 "
+                "— 어느 캠페인인지 보기", expanded=False):
+            st.caption(
+                "기기는 **utm_campaign 값**에서 `PC` / `MO`를 읽어 가릅니다. "
+                "아래 캠페인 이름에 그 표시가 없어서 못 갈랐습니다. "
+                "광고 관리자에서는 PC/MO를 나눠 돌렸더라도, **랜딩 URL의 utm_campaign이 "
+                "캠페인 이름과 다르게 박혀 있으면** GA는 그 값밖에 못 봅니다."
+            )
+            _g = (_fold.groupby(["channel", "campaign"], as_index=False)
+                  .agg(방문=("sessions", "sum"), 매출=("revenue", "sum"))
+                  .sort_values("방문", ascending=False).head(30))
+            _g = _g.rename(columns={"channel": "매체(UTM 매핑)", "campaign": "utm_campaign"})
+            st.dataframe(_g, use_container_width=True, hide_index=True)
+            st.caption(
+                "고치는 법 — ① 위 캠페인의 랜딩 URL utm_campaign에 `_PC` / `_MO`를 붙인다 "
+                "(운영 도구 › UTM 빌더). ② 이미 끝난 캠페인이면 그냥 두셔도 됩니다. "
+                "③ 캠페인 이름 규칙이 아예 다르면 알려주세요 — 그 규칙으로 읽도록 바꾸겠습니다."
+            )
 
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
@@ -13388,6 +13416,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         "외부몰은 스마트스토어로 보내서 자사몰 GA4에 방문·매출이 안 잡히므로, "
                         "구매·매출은 GFA가 신고한 값으로 보여드립니다."
                     )
+                    # 이미 올렸는데 안 나온다면, 소재 데이터가 **어느 매체명으로** 들어가
+                    # 있는지가 원인이다. 그대로 꺼내 보여준다 — 추측할 일이 아니다.
+                    with st.expander("소재 데이터가 지금 어떤 매체명으로 들어와 있는지 보기"):
+                        _have = sorted({k[0] for k in media_map})
+                        st.write("**소재별 실적이 있는 매체**")
+                        st.write(_have or "— (하나도 없음)")
+                        if ad_creative is not None and not ad_creative.empty:
+                            _ac = ad_creative.copy()
+                            _ac["_d"] = pd.to_datetime(_ac["report_date"], errors="coerce").dt.date
+                            _ac = _ac[(_ac["_d"] >= start) & (_ac["_d"] <= end)]
+                            if not _ac.empty:
+                                _s = (_ac.groupby(["channel", "source"], as_index=False)
+                                      .agg(소재수=("creative", "nunique"),
+                                           노출=("impressions", "sum"),
+                                           광고비=("cost_incl_vat", "sum"))
+                                      .sort_values("노출", ascending=False))
+                                st.write("**ad_creative_daily에 저장된 것 (이 기간)**")
+                                st.dataframe(_s, use_container_width=True, hide_index=True)
+                        st.caption(
+                            "여기에 `네이버 GFA PC (외부몰)` 같은 줄이 없으면 아직 안 올라간 "
+                            "겁니다. 매체 리포트를 **소재 단위로** 다시 받아 올려주세요. "
+                            "줄은 있는데 이름이 다르면 그 이름을 알려주시면 맞추겠습니다."
+                        )
                 else:
                     st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
