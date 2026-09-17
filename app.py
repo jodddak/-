@@ -8819,15 +8819,44 @@ def _meta_insights(acct: str, params: dict, timeout: int = 60):
     return rows
 
 
+def meta_visible_accounts() -> tuple:
+    """이 토큰으로 **실제로 볼 수 있는** 광고 계정 목록. ([(id, 이름)], 오류문구)
+
+    메타 토큰은 발급 시점에 '어떤 광고 계정을 허용할지'를 토큰 안에 박아둔다
+    (granular scopes). 그래서 비즈니스 관리자에서 계정 권한을 줘도, 그 전에 발급한
+    토큰으로는 계속 막힌다 — 토큰을 새로 발급받아야 한다.
+    이 목록에 없으면 권한 문제가 아니라 **토큰 문제**다.
+    """
+    cfg = _secrets_section("meta_ads") or {}
+    if not cfg.get("access_token"):
+        return [], "access_token이 없습니다."
+    import requests
+    ver = str(cfg.get("api_version", "v21.0")).strip()
+    try:
+        r = requests.get(
+            f"https://graph.facebook.com/{ver}/me/adaccounts",
+            params={"fields": "account_id,name", "limit": 200,
+                    "access_token": cfg["access_token"]}, timeout=30)
+        p = r.json()
+        if "error" in p:
+            return [], p["error"].get("message", str(p["error"]))[:200]
+        return [(str(d.get("account_id")), str(d.get("name") or ""))
+                for d in p.get("data", [])], ""
+    except Exception as e:
+        return [], str(e)[:200]
+
+
 def _meta_note_error(ch: str, acct: str, err: str):
     """계정 하나가 막혔을 때 화면에 띄울 안내를 세션에 남긴다."""
     msg = str(err)
     if "(#200)" in msg or "permission" in msg.lower():
-        msg = (f"이 토큰에 **{ch}** 광고계정({acct}) 접근 권한이 없습니다.\n\n"
-               "메타 비즈니스 관리자 → **비즈니스 설정 → 계정 → 광고 계정**에서 "
-               "해당 계정을 고르고, 토큰을 만든 사용자(또는 시스템 사용자)에게 "
-               "**광고 계정 관리** 권한을 주세요. 권한을 준 뒤에는 토큰을 새로 "
-               "발급받아야 반영됩니다.")
+        msg = (f"이 토큰으로 **{ch}** 광고계정({acct})을 못 봅니다.\n\n"
+               "비즈니스 관리자에서 사람 권한을 이미 주셨다면 **토큰 문제**입니다 — "
+               "메타 토큰은 발급할 때 '어떤 광고 계정을 허용할지'를 토큰 안에 박아두기 "
+               "때문에, 나중에 계정 권한을 줘도 옛 토큰으로는 계속 막힙니다.\n\n"
+               "**토큰을 새로 발급받되, 발급 팝업의 광고 계정 선택 단계에서 이 계정을 "
+               "반드시 체크**하세요. 아래 **연동 진단**을 돌리면 지금 토큰이 실제로 "
+               "어떤 계정을 볼 수 있는지 목록으로 나옵니다.")
     st.session_state.setdefault("meta_account_errors", {})[ch] = msg
 
 
@@ -12348,6 +12377,21 @@ def diagnose_ad_spend_setup() -> str:
                 ng("1-2. 메타 외부몰 계정이 없습니다 — Secrets [meta_ads] 에 "
                    'ad_account_id_ext = "1932624177545739" (STCO_스마트스토어) 를 '
                    "추가하면 외부몰도 같이 받습니다.")
+            # 토큰이 실제로 볼 수 있는 계정 목록. 여기 없으면 비즈니스 관리자 권한이
+            # 아니라 토큰을 새로 발급받아야 하는 상황이다.
+            _vis, _vis_err = meta_visible_accounts()
+            if _vis_err:
+                ng(f"1-0. 메타 토큰이 볼 수 있는 계정 조회 실패: {_vis_err}")
+            else:
+                info("1-0. 이 토큰으로 볼 수 있는 광고계정 "
+                     + (", ".join(f"{i} {n}" for i, n in _vis) or "— (없음)"))
+                _want = {a.replace("act_", "") for _c, a in _meta_accounts()}
+                _missing = sorted(_want - {i for i, _n in _vis})
+                if _missing:
+                    ng("1-0. Secrets에 적힌 계정 중 **토큰이 못 보는 것**: "
+                       + ", ".join(_missing)
+                       + " → 비즈니스 관리자 권한이 있어도, 토큰 발급 팝업에서 그 계정을 "
+                         "체크하지 않으면 못 봅니다. 토큰을 새로 발급받으세요.")
             # 계정마다 따로 물어본다 — 한 계정이 막혀 있으면 그 계정만 콕 집어 보여줘야
             # '토큰 권한이 없다'와 '그 기간에 집행이 없다'를 구분할 수 있다.
             for _ch, _ac in _meta_accounts():
