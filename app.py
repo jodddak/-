@@ -13268,13 +13268,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 외부몰은 광고비가 잡히는데(채널 성과에는 나온다) 소재 데이터가 아직 없을 수 있다.
     # 그럴 때 탭을 아예 안 만들면 '왜 안 나오지'가 된다 — 탭은 만들고 왜 비었는지,
     # 무엇을 올려야 채워지는지 그 자리에서 알려준다.
+    # 탭은 **항상 PC / MO 두 개**로 만든다. 광고를 그렇게 운영하니까 화면도 그래야 한다.
+    # 채널 광고비(ad_spend_daily)에는 PC/MO 구분이 없어서(캠페인 단위로 접혀 저장된다)
+    # 숫자는 소재 파일을 올려야 채워지지만, 그렇다고 탭을 하나로 합쳐 보여주면
+    # 화면과 운영이 어긋난다.
     _EXT_SPEND_CH = "네이버 GFA_외부몰"
-    _ext_placeholder = None
+    _ext_placeholders = set()
     if (spend_by_ch.get(_EXT_SPEND_CH, 0) > 0
-            and not any(c in GFA_EXT_TABS for c in all_ch)
-            and "네이버 GFA (외부몰)" not in all_ch):
-        _ext_placeholder = "네이버 GFA (외부몰)"
-        all_ch.append(_ext_placeholder)
+            and not any(c in GFA_EXT_TABS for c in all_ch)):
+        _ext_placeholders = {GFA_PC_EXT, GFA_MO_EXT}
+        all_ch = [c for c in all_ch if c != "네이버 GFA (외부몰)"]
+        all_ch += sorted(_ext_placeholders, key=_gc_tab_sort_key)
 
     hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
     hidden += [c for c in all_ch if c in GC_NON_CREATIVE]
@@ -13470,17 +13474,23 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # GA 줄이 아예 없다. 여기서 끊으면 노출·클릭·광고비도 못 보게 된다.
             _has_media = any(k[0] in ch_keep for k in media_map)
             if rows.empty and not _has_media:
-                if label == "네이버 GFA (외부몰)":
+                if label in _ext_placeholders:
                     _s = spend_row_by_ch.get(_EXT_SPEND_CH, {})
-                    st.info(
-                        f"**이 기간 외부몰 집행은 잡혀 있습니다** — 노출 "
+                    _dev = "PC" if label == GFA_PC_EXT else "모바일"
+                    st.warning(
+                        f"### {_dev} 숫자를 채우려면 `result.csv`를 한 번만 다시 올려주세요\n\n"
+                        "사이드바 → **데이터 파일 업로드** → 늘 올리시던 그 자리입니다.\n\n"
+                        "저장된 광고비 데이터에는 **PC/MO 구분이 들어 있지 않습니다** — "
+                        "날짜×매체로 접어서 저장하다 보니 캠페인 이름이 버려집니다. "
+                        "기기를 가르는 정보는 `result.csv`의 캠페인 이름에만 있어서, "
+                        "그 파일을 한 번 올려야 갈라집니다. 앞으로는 매일 올리실 때마다 "
+                        "자동으로 유지됩니다."
+                    )
+                    st.caption(
+                        f"참고 — 이 기간 외부몰 전체(PC+MO) 집행: 노출 "
                         f"{_s.get('impressions', 0):,.0f} · 클릭 {_s.get('clicks', 0):,.0f} · "
                         f"광고비 {_s.get('cost', 0):,.0f}원. "
-                        "그런데 **소재별로 쪼갠 데이터가 아직 없습니다.**\n\n"
-                        "지금 올리시는 매체 리포트가 캠페인 단위라 소재 열이 없어서 그렇습니다. "
-                        "GFA 관리자에서 **소재(크리에이티브) 단위로** 다시 받아 같은 자리에 "
-                        "올리시면 PC/MO로 갈라져 채워집니다. 업로드하면 결과에 "
-                        "`소재별 N행`이라고 뜹니다.\n\n"
+                        "올리시면 PC / 모바일로 갈라져 소재별로 나옵니다. "
                         "외부몰은 스마트스토어로 보내서 자사몰 GA4에 방문·매출이 안 잡히므로, "
                         "구매·매출은 GFA가 신고한 값으로 보여드립니다."
                     )
