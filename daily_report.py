@@ -109,6 +109,39 @@ def get_client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+# ── 중복 발송 방지 ────────────────────────────────────────────
+# GitHub 예약 실행은 '보장'이 아니다. 붐비면 밀리고, 때론 통째로 건너뛴다.
+# 하루에 한 번만 걸어두면 그날은 그냥 메일이 안 온다(2026-09-17에 실제로 그랬다).
+# 그래서 같은 리포트를 시간차로 여러 번 시도하되, 이미 보낸 건 건너뛴다.
+# 보낸 기록은 Supabase의 mail_log 표에 남긴다 — GitHub 러너는 매번 새 컴퓨터라
+# 파일로는 기억을 못 남긴다.
+MAIL_LOG_TABLE = "mail_log"
+
+
+def mail_log_key(weekly: bool, start: date, end: date) -> str:
+    return f"{'weekly' if weekly else 'daily'}:{start}:{end}"
+
+
+def already_sent(client, key: str) -> bool:
+    """이미 보냈나. 표가 없거나 조회가 안 되면 '안 보냈다'로 본다 —
+    중복 한 통보다 아예 안 오는 쪽이 더 나쁘다."""
+    try:
+        r = client.table(MAIL_LOG_TABLE).select("report_key").eq("report_key", key).execute()
+        return bool(r.data)
+    except Exception as e:
+        print(f"[알림] 발송 기록을 못 읽었습니다({e}). 중복 검사 없이 진행합니다.", file=sys.stderr)
+        return False
+
+
+def mark_sent(client, key: str, subject: str):
+    try:
+        client.table(MAIL_LOG_TABLE).upsert(
+            {"report_key": key, "subject": subject}, on_conflict="report_key").execute()
+    except Exception as e:
+        print(f"[알림] 발송 기록을 못 남겼습니다({e}). "
+              "mail_log 표가 없으면 같은 리포트가 두 번 올 수 있습니다.", file=sys.stderr)
+
+
 def load_table(client, name: str, since: date | None = None,
                order_cols: list[str] | None = None) -> pd.DataFrame:
     """표 하나를 통째로 읽는다. 1000행씩 나눠 받되 기본키로 정렬해 경계를 고정한다
@@ -724,6 +757,9 @@ def main():
                     help="auto(기본)면 한국 기준 월요일에만 주간 리포트")
     ap.add_argument("--date", help="일별: 집계 날짜 / 주간: 그 날이 속한 주 (YYYY-MM-DD)")
     ap.add_argument("--dry-run", action="store_true", help="메일을 안 보내고 화면에만 출력")
+    ap.add_argument("--dedupe", action="store_true",
+                    help="이미 보낸 리포트면 건너뛴다. 예약 실행에만 붙인다 "
+                         "(손으로 돌릴 땐 언제나 보내야 하므로 안 붙인다)")
     args = ap.parse_args()
 
     weekly, start, end = resolve_period(args.mode, args.date)
@@ -737,6 +773,14 @@ def main():
           f"보내는 곳: {SMTP_HOST}:{SMTP_PORT} ({SMTP_SECURITY})", flush=True)
 
     client = get_client()
+
+    # 예약 실행은 하루에 여러 번 시도한다(GitHub이 한 번쯤 건너뛰어도 따라잡으려고).
+    # 이미 보낸 리포트면 여기서 조용히 끝낸다.
+    log_key = mail_log_key(weekly, start, end)
+    if args.dedupe and not args.dry_run and already_sent(client, log_key):
+        print(f"이미 보낸 리포트입니다({log_key}). 건너뜁니다.")
+        return
+
     since = p_start - timedelta(days=3)       # 비교 기간까지 덮고 경계 여유를 둔다
     ad_spend = load_table(client, "ad_spend_daily", since,
                           ["report_date", "channel", "source"])
@@ -791,6 +835,7 @@ def main():
         return
 
     send_mail(subject, html, text)
+    mark_sent(client, log_key, subject)
     print(f"발송 완료: {subject} → {', '.join(MAIL_TO)}")
 
 
