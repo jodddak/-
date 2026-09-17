@@ -13155,10 +13155,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
     # (탭 구성보다 먼저 구해둔다 — '지금 집행 중인가'로 숨김 여부를 판단해야 해서.)
     spend = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None else pd.DataFrame()
-    spend_by_ch = {}
+    spend_by_ch, spend_row_by_ch = {}, {}
     if spend is not None and not spend.empty:
         for _, r in spend.iterrows():
-            spend_by_ch[_v4_canon_channel(r["channel"])] = float(r.get("cost_incl_vat", 0) or 0)
+            _c = _v4_canon_channel(r["channel"])
+            spend_by_ch[_c] = float(r.get("cost_incl_vat", 0) or 0)
+            spend_row_by_ch[_c] = {
+                "impressions": float(r.get("impressions", 0) or 0),
+                "clicks": float(r.get("clicks", 0) or 0),
+                "cost": float(r.get("cost_incl_vat", 0) or 0),
+            }
 
     # ── 매체 탭 ── 캡처하신 소재별 성과 화면과 같은 구성.
     # 맨즈탭처럼 별도 시트로 관리하는 매체는 탭 순서 맨 뒤로 보낸다(평소에 안 보게).
@@ -13190,20 +13196,36 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
     _media_ch = {k[0] for k in media_map}
     all_ch = sorted(_ga_ch | _media_ch)
+
+    # 외부몰은 광고비가 잡히는데(채널 성과에는 나온다) 소재 데이터가 아직 없을 수 있다.
+    # 그럴 때 탭을 아예 안 만들면 '왜 안 나오지'가 된다 — 탭은 만들고 왜 비었는지,
+    # 무엇을 올려야 채워지는지 그 자리에서 알려준다.
+    _EXT_SPEND_CH = "네이버 GFA_외부몰"
+    _ext_placeholder = None
+    if (spend_by_ch.get(_EXT_SPEND_CH, 0) > 0
+            and not any(c in GFA_EXT_TABS for c in all_ch)
+            and "네이버 GFA (외부몰)" not in all_ch):
+        _ext_placeholder = "네이버 GFA (외부몰)"
+        all_ch.append(_ext_placeholder)
+
     hidden = [c for c in all_ch if c in GC_HIDE_IF_IDLE and spend_by_ch.get(_v4_canon_channel(c), 0) <= 0]
     hidden += [c for c in all_ch if c in GC_NON_CREATIVE]
     all_ch = [c for c in all_ch if c not in hidden]
 
     # GFA 기기 분리가 됐으면, 접미사가 없어 기기를 못 가른 잔여 줄(옛 소재의 UTM 링크가
     # 아직 살아 있는 경우)은 탭을 따로 만들지 않는다. 탭이 GFA / GFA PC / GFA MO 넷으로
-    # 보여서 오해를 낳는다.
+    # 보여서 오해를 낳는다. 자사몰과 외부몰은 따로 판단한다 — 자사몰이 기기별로
+    # 갈렸다고 해서 외부몰 잔여 줄까지 숨기면 외부몰이 통째로 사라진다.
     _gfa_split = any(c in GFA_TABS for c in all_ch)
-    folded = [c for c in ("네이버 GFA", "네이버 GFA (외부몰)")
-              if _gfa_split and c in all_ch]
+    _own_split = any(c in (GFA_PC_OWN, GFA_MO_OWN) for c in all_ch)
+    _ext_split = any(c in GFA_EXT_TABS for c in all_ch)
+    folded = ([c for c in ["네이버 GFA"] if _own_split and c in all_ch]
+              + [c for c in ["네이버 GFA (외부몰)"] if _ext_split and c in all_ch])
 
     # 뒤로 미는 탭 — 맨즈탭은 별도 시트로 관리하고, 외부몰은 기준(매체 신고)이 달라서
     # 자사몰 탭들과 나란히 두면 헷갈린다. 순서만 뒤로 보낸다.
-    sep = [c for c in all_ch if c in GC_DEFAULT_EXCLUDE or c in GFA_EXT_TABS]
+    sep = [c for c in all_ch
+           if c in GC_DEFAULT_EXCLUDE or c in GFA_EXT_TABS or c == "네이버 GFA (외부몰)"]
     order = [c for c in all_ch if c not in sep and c not in folded] + sep
     if not order:
         st.warning(
@@ -13352,10 +13374,25 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # GA 줄이 아예 없다. 여기서 끊으면 노출·클릭·광고비도 못 보게 된다.
             _has_media = any(k[0] in ch_keep for k in media_map)
             if rows.empty and not _has_media:
-                st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
+                if label == "네이버 GFA (외부몰)":
+                    _s = spend_row_by_ch.get(_EXT_SPEND_CH, {})
+                    st.info(
+                        f"**이 기간 외부몰 집행은 잡혀 있습니다** — 노출 "
+                        f"{_s.get('impressions', 0):,.0f} · 클릭 {_s.get('clicks', 0):,.0f} · "
+                        f"광고비 {_s.get('cost', 0):,.0f}원. "
+                        "그런데 **소재별로 쪼갠 데이터가 아직 없습니다.**\n\n"
+                        "지금 올리시는 매체 리포트가 캠페인 단위라 소재 열이 없어서 그렇습니다. "
+                        "GFA 관리자에서 **소재(크리에이티브) 단위로** 다시 받아 같은 자리에 "
+                        "올리시면 PC/MO로 갈라져 채워집니다. 업로드하면 결과에 "
+                        "`소재별 N행`이라고 뜹니다.\n\n"
+                        "외부몰은 스마트스토어로 보내서 자사몰 GA4에 방문·매출이 안 잡히므로, "
+                        "구매·매출은 GFA가 신고한 값으로 보여드립니다."
+                    )
+                else:
+                    st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
             # 외부몰은 GA4가 못 보는 영역이라 매체 신고 전환·매출로 본다.
-            _media_basis = (label in GFA_EXT_TABS)
+            _media_basis = (label in GFA_EXT_TABS) or (label == "네이버 GFA (외부몰)")
             if _media_basis:
                 st.info(
                     "외부몰 광고는 **스마트스토어로 보내기 때문에 자사몰 GA4에 방문·매출이 "
