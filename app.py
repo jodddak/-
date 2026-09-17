@@ -5345,6 +5345,34 @@ def render_upload_panel():
                     f"• **{ch}** — 광고비 {sub['cost_incl_vat'].sum():,.0f}원 · "
                     f"노출 {sub['impressions'].sum():,.0f} · 클릭 {sub['clicks'].sum():,.0f}"
                 )
+            # ── 소재 단위까지 같이 읽는다 ──
+            # 위 mr_df는 날짜×매체로 접은 것이라 캠페인 이름이 버려진다. 그런데 GFA의
+            # PC/MO·자사몰/외부몰 구분은 캠페인 이름에만 있어서, 접기 전 원본에서 한 번 더
+            # 읽어야 소재별 화면이 기기별로 갈라진다.
+            try:
+                mr_cre = parse_media_report_creatives(mr_file, vat_included=vat_in)
+                mr_cre_err = None
+            except Exception as e:
+                mr_cre, mr_cre_err = _empty_creative(), str(e)[:150]
+            if drop_cost and mr_cre is not None and not mr_cre.empty:
+                mr_cre = mr_cre.assign(cost_incl_vat=0.0)
+
+            if mr_cre_err:
+                st.sidebar.warning(f"소재별을 읽지 못했습니다: {mr_cre_err}")
+            elif mr_cre is not None and not mr_cre.empty:
+                st.sidebar.write(
+                    f"🎨 **소재별 {len(mr_cre)}행 · {mr_cre['creative'].nunique()}개 소재**")
+                for ch in sorted(mr_cre["channel"].unique()):
+                    _s = mr_cre[mr_cre["channel"] == ch]
+                    st.sidebar.caption(
+                        f"　{ch} — 소재 {_s['creative'].nunique()}개 · "
+                        f"노출 {_s['impressions'].sum():,.0f} · "
+                        f"광고비 {_s['cost_incl_vat'].sum():,.0f}원")
+            else:
+                st.sidebar.caption(
+                    "소재 열이 없어 소재별 성과는 안 들어갑니다 — 매체 관리자에서 "
+                    "**소재(크리에이티브) 단위**로 받으면 기기별로 갈라집니다.")
+
             # 캠페인명으로 매체를 잘못 짚었을 때 손으로 바꿀 수 있게 한다
             fix = st.sidebar.selectbox(
                 "매체 지정 (자동 인식이 틀렸을 때만)",
@@ -5352,14 +5380,29 @@ def render_upload_panel():
             if fix != "자동 인식 그대로":
                 mr_df = mr_df.assign(channel=fix).groupby(
                     ["report_date", "channel"], as_index=False).sum(numeric_only=True)
+                # 매체를 손으로 지정하면 기기 구분이 사라지므로 소재별은 넣지 않는다
+                # (전부 한 매체로 뭉쳐 들어가면 PC/MO가 도로 합쳐진다).
+                if mr_cre is not None and not mr_cre.empty:
+                    st.sidebar.caption("　※ 매체를 직접 지정하셔서 소재별은 저장하지 않습니다.")
+                    mr_cre = _empty_creative()
 
             if st.sidebar.button("💾 매체 리포트 저장하기", type="primary", key="mr_save_btn"):
                 save_df = mr_df.copy()
                 save_df["source"] = "manual"
                 n = save_table("ad_spend_daily", save_df,
                                "report_date,channel,source", mr_file.name)
+                _msg = f"저장 완료! 광고비 {n}행"
+                if mr_cre is not None and not mr_cre.empty:
+                    try:
+                        n2 = save_table("ad_creative_daily", mr_cre,
+                                        "report_date,channel,creative,source", mr_file.name)
+                        _msg += (f" · 소재별 {n2}행 "
+                                 f"({mr_cre['creative'].nunique()}개 소재 · "
+                                 f"{', '.join(sorted(mr_cre['channel'].unique()))})")
+                    except Exception as e:
+                        _msg += f"\n\n⚠️ 소재별 저장 실패: {str(e)[:150]}"
                 st.cache_data.clear()
-                st.sidebar.success(f"저장 완료! {n}행")
+                st.sidebar.success(_msg)
                 st.rerun()
 
     st.sidebar.markdown("---")
