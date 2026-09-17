@@ -10064,6 +10064,27 @@ AD_CREATIVE_FETCHERS = [
     ("크리테오", fetch_criteo_creative),
 ]
 
+# 한 fetcher가 매체를 여러 개 받아오는 경우. 메타는 자사몰·외부몰이 **다른 광고 계정**이라
+# 한 번에 둘 다 받아온다. 시작 날짜를 fetcher 이름('메타') 하나로만 계산하면,
+# 자사몰이 어제까지 차 있다는 이유로 새로 붙인 외부몰까지 '최신'으로 보고 최근 며칠만
+# 받아버린다 — 외부몰이 영영 안 채워진다. 그래서 fetcher가 덮는 매체를 전부 적어두고
+# 그중 **가장 뒤처진 매체**를 기준으로 시작일을 잡는다.
+FETCHER_CHANNELS = {
+    "메타": ["메타", META_EXT_CHANNEL],
+}
+
+
+def _fetch_start_for(label, last_by_ch: dict, end: date,
+                     lookback: int, tail: int, start: date = None) -> date:
+    if start is not None:
+        return start
+    chs = FETCHER_CHANNELS.get(label, [label])
+    lasts = [last_by_ch.get(_v4_canon_channel(c)) for c in chs]
+    if any(l is None for l in lasts):
+        # 한 번도 안 받아본 매체가 끼어 있으면 처음부터 받는다
+        return end - timedelta(days=lookback - 1)
+    return min(min(lasts) - timedelta(days=tail - 1), end)
+
 
 def _creative_last_dates(existing: pd.DataFrame) -> dict:
     """ad_creative_daily에 매체별로 어느 날짜까지 들어와 있는지 {매체: date}."""
@@ -10093,12 +10114,8 @@ def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
     last_by_ch = _creative_last_dates(existing)
 
     def _start_for(label):
-        if start is not None:
-            return start
-        last = last_by_ch.get(label)
-        if last is None:
-            return end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
-        return min(last - timedelta(days=AD_SPEND_RESYNC_TAIL_DAYS - 1), end)
+        return _fetch_start_for(label, last_by_ch, end,
+                                AD_SPEND_LOOKBACK_DAYS, AD_SPEND_RESYNC_TAIL_DAYS, start)
 
     saved, errors, total = {}, {}, 0
     for label, fn in AD_CREATIVE_FETCHERS:
@@ -10192,7 +10209,21 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
         for s, v in e.groupby("source")["report_date"].max().items():
             last_by_src[str(s)] = v.date()
 
+    # 매체(channel)별 마지막 날짜도 따로 본다. 출처(source)만 보면 메타 자사몰·외부몰이
+    # 둘 다 meta_api라 하나로 묶여서, 새로 붙인 외부몰이 '이미 최신'으로 취급된다.
+    last_by_ch = {}
+    if existing is not None and not existing.empty and "channel" in existing.columns:
+        e2 = existing[["channel", "report_date"]].copy()
+        e2["report_date"] = pd.to_datetime(e2["report_date"], errors="coerce")
+        e2 = e2.dropna(subset=["report_date"])
+        for c, v in e2.groupby("channel")["report_date"].max().items():
+            last_by_ch[_v4_canon_channel(c)] = v.date()
+
     def _start_for(label):
+        # 이 fetcher가 받아오는 매체 중 하나라도 처음이면 처음부터 받는다
+        for ch in FETCHER_CHANNELS.get(label, []):
+            if last_by_ch.get(_v4_canon_channel(ch)) is None:
+                return end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
         last = last_by_src.get(AD_SPEND_FETCHER_SOURCE.get(label, ""))
         if last is None:
             return end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1)
@@ -12278,16 +12309,27 @@ def diagnose_ad_spend_setup() -> str:
                 ng("1-2. 메타 외부몰 계정이 없습니다 — Secrets [meta_ads] 에 "
                    'ad_account_id_ext = "1932624177545739" (STCO_스마트스토어) 를 '
                    "추가하면 외부몰도 같이 받습니다.")
-            try:
-                df = fetch_meta_spend(test_start, test_end)
-                if df.empty:
-                    ng(f"1. 메타: 응답은 왔지만 데이터 0행 ({test_start}~{test_end})")
-                else:
-                    _by = df.groupby("channel")["cost_incl_vat"].sum()
-                    ok("1. 메타 연동 성공: "
-                       + " · ".join(f"{c} {v:,.0f}원" for c, v in _by.items()))
-            except Exception as e:
-                ng(f"1. 메타 조회 실패: {str(e)[:220]}")
+            # 계정마다 따로 물어본다 — 한 계정이 막혀 있으면 그 계정만 콕 집어 보여줘야
+            # '토큰 권한이 없다'와 '그 기간에 집행이 없다'를 구분할 수 있다.
+            for _ch, _ac in _meta_accounts():
+                try:
+                    _rows = _meta_insights(_ac, {
+                        "fields": "spend,impressions,clicks",
+                        "level": "account", "time_increment": 1,
+                        "time_range": json.dumps({"since": str(test_start),
+                                                  "until": str(test_end)}),
+                    })
+                    if not _rows:
+                        ng(f"1. 메타 {_ch}({_ac}): 응답은 정상인데 **0행** — "
+                           f"{test_start}~{test_end}에 집행이 없거나, 토큰에 이 계정 "
+                           "권한이 없습니다. 메타 비즈니스 관리자에서 이 광고계정 접근 "
+                           "권한을 확인해주세요.")
+                    else:
+                        _amt = sum(float(r.get("spend") or 0) for r in _rows) * 1.1
+                        ok(f"1. 메타 {_ch} 연동 성공: {len(_rows)}일 · "
+                           f"합계 {_amt:,.0f}원 (VAT 포함)")
+                except Exception as e:
+                    ng(f"1. 메타 {_ch}({_ac}) 조회 실패: {str(e)[:220]}")
 
     g = _secrets_section("google_ads")
     if not g:
