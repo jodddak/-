@@ -12960,6 +12960,26 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         _drop = False
         for c in _excl_cols:
             _drop = _drop | g[c].map(_google_campaign_excluded)
+        if bool(_drop.any()) if hasattr(_drop, "any") else False:
+            # 무엇이 왜 빠졌는지 남긴다. 조용히 빼면 '매출이 왜 줄었지?'에서 막힌다.
+            _d = g[_drop].copy()
+            _sum = (_d.groupby(["campaign", "creative"], as_index=False)
+                    .agg(방문=("sessions", "sum"), 구매=("conversions", "sum"),
+                         매출=("revenue", "sum"))
+                    .sort_values("매출", ascending=False))
+            try:
+                st.session_state["gc_excluded_rows"] = {
+                    "rows": _sum.to_dict("records"),
+                    "rev": float(_d["revenue"].sum()),
+                    "conv": float(_d["conversions"].sum()),
+                }
+            except Exception:
+                pass
+        else:
+            try:
+                st.session_state.pop("gc_excluded_rows", None)
+            except Exception:
+                pass
         g = g[~_drop]
     if g.empty:
         return pd.DataFrame(columns=cols)
@@ -13881,6 +13901,25 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             "노출·클릭·광고비 출처 — " + " · ".join(_bits)
             + " (한 매체에 여러 출처가 있으면 위쪽 것 하나만 씁니다 — 섞으면 이중 계상됩니다)"
         )
+    # 제외한 줄을 펼쳐볼 수 있게 한다 — 매출이 줄어든 이유를 눈으로 확인하는 용도.
+    _ex = st.session_state.get("gc_excluded_rows")
+    if _ex and _ex.get("rows"):
+        with st.expander(
+                f"🚫 온라인팀 성과가 아니라서 뺀 줄 — 구매 {_ex['conv']:,.0f}건 · "
+                f"매출 {_ex['rev']:,.0f}원 (무엇인지 보기)"):
+            st.caption(
+                "캠페인 이름에 "
+                + ", ".join(f"`{w}`" for w in _google_ads_exclude_words())
+                + " 가 들어간 줄입니다. **광고비와 매출을 같이** 뺍니다 — "
+                "광고비만 빼면 그 매체 ROAS가 통째로 부풀어 오릅니다. "
+                "소재명이 `(미설정)`이어도 캠페인이 제외 대상이면 같이 빠집니다."
+            )
+            st.dataframe(pd.DataFrame(_ex["rows"]), use_container_width=True, hide_index=True)
+            st.caption(
+                "여기 있으면 안 되는 줄이 보이면 알려주세요 — 제외 단어를 고치면 됩니다 "
+                "(Secrets `[google_ads]` → `exclude_campaigns`)."
+            )
+
     show_img = (level == "소재")
     head = list(GC_HEAD)
     head[0] = {"소재": "소재 (날짜_소재명)", "타겟팅": "매체 · 타겟팅",
