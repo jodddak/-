@@ -10834,6 +10834,79 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
     return out
 
 
+def _cp_excluded_ga(master: pd.DataFrame, start: date, end: date) -> dict:
+    """제외 대상(마케팅팀 등) 캠페인의 GA 구매·매출을 **매체별로** 집계한다.
+
+    채널 성과가 쓰는 ga_channel_daily는 소스/매체 단위라 캠페인 구분이 없다.
+    반면 ga_creative_daily에는 GA4의 세션 캠페인(sessionCampaignName)이 들어 있어
+    'PMax_온라인팀'과 'PMax_마케팅팀'을 가를 수 있다. 그래서 여기서 제외분을 뽑아
+    채널 성과의 GA 매출에서 빼준다 — 소재별 성과와 숫자가 맞아야 하므로.
+
+    합계 자체는 ga_channel_daily를 그대로 쓰고(그게 채널 총액의 기준이다)
+    **식별된 제외분만 덜어낸다.** 소재 테이블로 총액을 다시 만들면 차원이 늘어난 만큼
+    GA4가 행을 (other)로 뭉치거나 잘라내서 총액이 살짝 달라진다.
+    """
+    out = {}
+    try:
+        cre = load_table("ga_creative_daily")
+    except Exception:
+        return out
+    if cre is None or cre.empty or "source_medium" not in cre.columns:
+        return out
+    c = cre.copy()
+    c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+    c = c[(c["report_date"] >= start) & (c["report_date"] <= end)]
+    if c.empty:
+        return out
+    # 캠페인 이름 **또는 소재 이름** 어느 쪽이든 걸리면 뺀다.
+    #
+    # 소재명까지 봐야 하는 이유: GA4의 '세션 캠페인'은 클릭 시점의 gclid로 정해지는데,
+    # 한 세션에 여러 광고가 섞이면 캠페인이 엉뚱하게 붙는다. 실제로 마케팅팀 캠페인에만
+    # 있는 애셋그룹(0911_마케팅팀_B_2)의 매출 83,800원이 세션 캠페인 'PMax_온라인팀'으로
+    # 잡혀 있었다. 그 애셋그룹의 광고비는 마케팅팀으로 이미 빠졌으니, 매출만 온라인팀에
+    # 남으면 광고비 없는 매출이 되어 ROAS가 부풀어 오른다.
+    # utm_content(소재명)는 그 소재가 어느 팀 자산인지를 더 정확히 말해준다.
+    if "campaign" not in c.columns:
+        c["campaign"] = ""
+    if "creative" not in c.columns:
+        c["creative"] = ""
+    c = c[c["campaign"].map(_google_campaign_excluded)
+          | c["creative"].map(_google_campaign_excluded)]
+    if c.empty:
+        return out
+    for col in ("conversions", "revenue"):
+        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+
+    def norm(s):
+        return "".join(str(s or "").lower().split())
+
+    exact, partial = {}, []
+    for _, m in master.sort_values("sort_order").iterrows():
+        for kw in str(m.get("utm_match") or "").split(","):
+            kw = norm(kw)
+            if kw:
+                exact.setdefault(kw, m["media"])
+                partial.append((len(kw), kw, m["media"]))
+    partial.sort(key=lambda x: -x[0])
+
+    for _, r in c.iterrows():
+        sm = norm(r.get("source_medium"))
+        media = exact.get(sm)
+        if media is None:
+            for _, kw, mm in partial:
+                if kw in sm:
+                    media = mm
+                    break
+        if media is None:
+            continue
+        d = out.setdefault(media, {"conv": 0.0, "rev": 0.0, "names": {}})
+        d["conv"] += float(r["conversions"])
+        d["rev"] += float(r["revenue"])
+        _nm = str(r.get("campaign") or "(미설정)")
+        d["names"][_nm] = d["names"].get(_nm, 0.0) + float(r["revenue"])
+    return out
+
+
 def _cp_ga_breakdown(ga_daily, master, start: date, end: date) -> pd.DataFrame:
     """매체별로 '어떤 소스/매체를 합쳐서 만든 숫자인지' 펼쳐 보여준다.
 
@@ -11569,6 +11642,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     spend = _cp_spend_by_channel(ad_spend, start, end)
     spend_map = {r["channel"]: r for _, r in spend.iterrows()} if not spend.empty else {}
     ga_map = _cp_ga_by_media(ga_daily, mst, start, end)
+
+    # 온라인팀 성과가 아닌 캠페인(마케팅팀 등)의 GA 구매·매출을 덜어낸다.
+    # 광고비는 받아올 때 이미 빼고 있는데 매출을 안 빼면 그 매체 ROAS가 부풀어 오른다
+    # (구글: 매출 4,258,028 · ROAS 151% → 실제 온라인팀만 보면 103% 수준).
+    _ex_ga = _cp_excluded_ga(mst, start, end)
+    for _m, _v in _ex_ga.items():
+        if _m in ga_map:
+            ga_map[_m]["conv"] = max(0.0, ga_map[_m]["conv"] - _v["conv"])
+            ga_map[_m]["rev"] = max(0.0, ga_map[_m]["rev"] - _v["rev"])
     # 기간이 여러 달에 걸치면(최근 30일, 1~8월 직접 지정) 그 달들의 예산을 전부 더한다.
     # 예전엔 시작일이 속한 한 달 예산만 써서, 8개월 광고비를 1개월 예산으로 나눠 소진율이
     # 800%처럼 나왔다.
@@ -11655,11 +11737,18 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     for _k, _v in (st.session_state.get("meta_account_errors") or {}).items():
         st.warning(f"**{_k}** — {_v}")
 
-    # 구글에서 제외한 캠페인이 있으면 알려준다 (마케팅팀 캠페인 등).
-    _gx = st.session_state.get("google_excluded_last")
-    if _gx and _gx.get("items"):
-        _txt = " · ".join(f"{n} {v:,.0f}원" for n, v in _gx["items"][:5])
-        st.caption(f"ℹ️ 구글 — 온라인팀 성과만 보기 위해 제외한 캠페인({_gx['period']}): {_txt}")
+    # 온라인팀 성과가 아니라 뺀 것을 한 줄로 알려준다 — 광고비와 매출을 같이 빼야
+    # ROAS가 정직해진다. 조용히 빼면 'GA4에서 본 숫자와 왜 다르지'로 시간을 뺏긴다.
+    if _ex_ga:
+        _bits = []
+        for _m, _v in sorted(_ex_ga.items(), key=lambda kv: -kv[1]["rev"]):
+            _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:3])
+            _bits.append(f"**{_m}** 구매 {_v['conv']:,.0f}건 · 매출 {_v['rev']:,.0f}원 ({_nm})")
+        st.caption(
+            "ℹ️ 온라인팀 성과가 아니라서 **광고비와 매출을 같이 뺀 것**: "
+            + " / ".join(_bits)
+            + " — GA4에서 직접 보시면 이 금액이 포함돼 있어 숫자가 더 큽니다."
+        )
 
     # ── 구분 필터 (KPI보다 위) ────────────────────────────
     # 필터를 KPI 아래에 두면 '자사몰'을 골라도 위 숫자는 전체라서 예산·ROAS를 잘못 읽게 된다.
@@ -12955,12 +13044,16 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     # 광고비만 빼고 GA 매출을 남겨두면 그 매체 ROAS가 통째로 부풀어 오른다 —
     # 실제로 0911_마케팅팀_A_1/A_2가 광고비 없이 GA 매출 89만원만 들고 있었다.
     # 소재명(utm_content)과 캠페인명(utm_campaign) 어느 쪽에 들어 있어도 잡는다.
-    _excl_cols = [c for c in ("creative", "campaign") if c in g.columns]
-    if _excl_cols:
-        _drop = False
-        for c in _excl_cols:
-            _drop = _drop | g[c].map(_google_campaign_excluded)
-        if bool(_drop.any()) if hasattr(_drop, "any") else False:
+    # 캠페인 이름 **또는 소재 이름** 어느 쪽이든 걸리면 뺀다.
+    # GA4의 세션 캠페인은 한 세션에 여러 광고가 섞이면 엉뚱하게 붙는다 —
+    # 마케팅팀 캠페인에만 있는 애셋그룹의 매출이 '온라인팀' 세션으로 잡혀 있었다.
+    # 그 광고비는 이미 마케팅팀으로 빠졌으니 매출도 같이 빼야 ROAS가 안 부풀어 오른다.
+    _cols = [c for c in ("campaign", "creative") if c in g.columns]
+    if _cols:
+        _drop = g[_cols[0]].map(_google_campaign_excluded)
+        for _c in _cols[1:]:
+            _drop = _drop | g[_c].map(_google_campaign_excluded)
+        if bool(_drop.any()):
             # 무엇이 왜 빠졌는지 남긴다. 조용히 빼면 '매출이 왜 줄었지?'에서 막힌다.
             _d = g[_drop].copy()
             _sum = (_d.groupby(["campaign", "creative"], as_index=False)
