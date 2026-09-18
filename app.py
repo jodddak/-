@@ -610,10 +610,47 @@ def inject_theme():
             border: none !important;
         }}
 
-        [data-testid="stTabs"] button {{ color: {THEME_COLORS["muted"]}; font-weight: 600; }}
-        [data-testid="stTabs"] button[aria-selected="true"] {{
+        /* ── 탭을 버튼 모양으로 ──
+           매체 탭이 11개까지 늘면서 기본 밑줄 탭으로는 양끝이 잘리고, 어느 게 선택된
+           건지도 밑줄 하나로만 구분돼 잘 안 보였다. 알약 버튼으로 바꾸고 줄바꿈을
+           허용해서, 개수가 늘어도 다 보이고 선택된 탭이 한눈에 들어오게 한다. */
+        [data-testid="stTabs"] [data-baseweb="tab-list"] {{
+            gap: 7px;
+            flex-wrap: wrap;            /* 잘리는 대신 다음 줄로 */
+            overflow: visible;
+            border-bottom: none !important;
+            padding-bottom: 2px;
+        }}
+        /* 기본 밑줄 하이라이트 제거 — 버튼 배경으로 선택을 표시한다 */
+        [data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        [data-testid="stTabs"] [data-baseweb="tab-border"] {{
+            display: none !important;
+        }}
+        [data-testid="stTabs"] button[data-baseweb="tab"] {{
+            height: auto !important;
+            padding: 8px 15px !important;
+            margin: 0 !important;
+            border-radius: 10px !important;
+            /* 선택 안 된 탭은 중립 회색. weak_bg(연한 파랑)를 쓰면 전부 활성처럼 보인다 */
+            background: {THEME_COLORS["surface"]} !important;
+            border: 1px solid {THEME_COLORS["border"]} !important;
+            color: {THEME_COLORS["body"]} !important;
+            font-weight: 600; font-size: 13.5px; white-space: nowrap;
+            transition: background .12s, color .12s, border-color .12s;
+        }}
+        [data-testid="stTabs"] button[data-baseweb="tab"]:hover {{
+            background: {THEME_COLORS["weak_bg"]} !important;
+            border-color: {THEME_COLORS["primary"]} !important;
             color: {THEME_COLORS["primary"]} !important;
-            border-bottom-color: {THEME_COLORS["primary"]} !important;
+        }}
+        [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {{
+            background: {THEME_COLORS["foreground"]} !important;
+            border-color: {THEME_COLORS["foreground"]} !important;
+            color: #FFFFFF !important;
+        }}
+        [data-testid="stTabs"] button[data-baseweb="tab"] p {{
+            font-size: 13.5px !important; font-weight: 600 !important;
+            color: inherit !important; margin: 0 !important;
         }}
 
         [data-testid="stPopover"] {{ width: fit-content !important; }}
@@ -16002,12 +16039,20 @@ def main():
     # st.title()은 raw HTML(이미지)을 못 받아서, 이모지(📊) 대신 커스텀 아이콘을 쓰려면
     # 직접 <h1>을 그려야 한다. inject_theme()의 전역 h1 스타일(글자크기/굵기/색)은
     # 태그 자체를 그대로 쓰기 때문에 동일하게 적용된다.
-    # gap 10px → 14px: 배지가 정사각이라 글자와 너무 붙어 보였다(S와 '온'이 거의 맞닿음).
+    # 배지와 제목 정렬 — 두 가지를 같이 맞춰야 눈에 어긋나지 않는다.
+    #  · 간격: 배지가 정사각이라 14px로는 'S'와 '온'이 붙어 보인다 → 20px.
+    #  · 높이: align-items:center는 '줄 상자'를 기준으로 가운데를 맞추는데,
+    #    한글 글꼴은 글자 위아래로 여백이 붙어 있어서 상자 중앙과 글자 중앙이 다르다.
+    #    그래서 배지만 떠 보였다. span에 line-height:1을 줘 상자를 글자에 딱 붙이면
+    #    상자 중앙 = 글자 중앙이 되어 배지와 수평이 맞는다.
+    #    img도 display:block으로 둬야 인라인 baseline 여백이 안 생긴다.
     st.markdown(
-        f'<h1 style="display:flex;align-items:center;gap:14px;margin:0 0 0.5rem 0;">'
+        f'<h1 style="display:flex;align-items:center;gap:20px;'
+        f'margin:0 0 0.5rem 0;line-height:1.15;">'
         f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" '
-        f'style="height:34px;width:auto;border-radius:6px;" />'
-        f'<span>온라인사업팀 광고 성과 대시보드</span></h1>',
+        f'style="height:33px;width:auto;border-radius:6px;display:block;flex:none;" />'
+        f'<span style="line-height:1;display:block;">온라인사업팀 광고 성과 대시보드</span>'
+        f'</h1>',
         unsafe_allow_html=True,
     )
     render_upload_panel()
