@@ -818,29 +818,24 @@ def inject_theme():
             fill: {SIDEBAR["text_dim"]} !important;
         }}
 
-        /* ── 브랜드 블록 (맨 위 로고) ── */
+        /* ── 브랜드 블록 (맨 위 로고) ──
+           보라 그라데이션 아이콘 박스 + 자간 넓은 글씨 조합을 뺐다.
+           워드마크는 세로로 쌓고(로고 → 설명) 장식을 없애는 쪽이 로고 원본에 가깝다. */
         .stco-brand {{
-            display: flex; align-items: center; gap: 11px;
-            padding: 4px 2px 18px;
+            padding: 2px 2px 22px;
         }}
-        .stco-brand-mark {{
-            width: 38px; height: 38px; flex: none;
-            border-radius: 11px;
-            background: linear-gradient(135deg, {SIDEBAR["accent"]}, {SIDEBAR["accent_soft"]});
-            display: flex; align-items: center; justify-content: center;
-            box-shadow: 0 4px 14px rgba(124, 92, 255, .35);
+        .stco-logo {{
+            display: block; width: 92px; height: auto;
         }}
-        .stco-brand-mark img {{
-            width: 21px; height: 21px;
-            filter: brightness(0) invert(1);   /* 검정 아이콘을 흰색으로 */
-        }}
-        .stco-brand-name {{
-            color: #FFFFFF; font-size: 21px; font-weight: 800;
-            letter-spacing: .14em; line-height: 1.1;
+        .stco-wordmark {{
+            color: #FFFFFF; font-size: 31px; font-weight: 900; line-height: 1;
+            letter-spacing: .005em;
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
         }}
         .stco-brand-sub {{
-            color: {SIDEBAR["accent_soft"]}; font-size: 11.5px; font-weight: 600;
-            letter-spacing: .01em; margin-top: 3px;
+            color: {SIDEBAR["text_dim"]}; font-size: 11px; font-weight: 500;
+            letter-spacing: .085em; margin-top: 8px;
         }}
 
         /* ── 어두운 바탕에 맞춘 위젯들 ── */
@@ -4918,15 +4913,24 @@ def save_uploaded_file(f, kind: str) -> str:
     return "알 수 없는 종류"
 
 
+# STCO 워드마크 원본(투명 배경 PNG). 사이드바 폭 92px에 쓰므로 3배(276px)로 줄여 넣었다 —
+# 565px 원본을 그대로 박으면 base80이 4배로 커져서 app.py만 무거워진다.
+# 글자를 미리 흰색으로 칠해뒀다. CSS filter(invert)로 뒤집으면 안티에일리어싱 경계가
+# 지저분해지기 때문이다.
+# 로고가 바뀌면 이 한 줄만 새 base64로 갈아끼우면 된다.
+STCO_LOGO_B64 = (
+    "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"
+)
+
+
 def render_sidebar_brand():
     """사이드바 맨 위 로고 블록. 어두운 패널 위에 STCO 워드마크와 한 줄 설명을 얹는다."""
+    mark = (f'<img class="stco-logo" src="data:image/png;base64,{STCO_LOGO_B64}" alt="STCO" />'
+            if STCO_LOGO_B64 else '<div class="stco-wordmark">STCO</div>')
     st.sidebar.markdown(
         '<div class="stco-brand">'
-        '<div class="stco-brand-mark">'
-        f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" />'
-        '</div>'
-        '<div><div class="stco-brand-name">STCO</div>'
-        '<div class="stco-brand-sub">온라인팀 성과 대시보드</div></div>'
+        + mark
+        + '<div class="stco-brand-sub">온라인팀 성과 대시보드</div>'
         '</div>',
         unsafe_allow_html=True,
     )
