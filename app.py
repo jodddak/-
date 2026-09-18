@@ -614,20 +614,25 @@ def inject_theme():
            매체 탭이 11개까지 늘면서 기본 밑줄 탭으로는 양끝이 잘리고, 어느 게 선택된
            건지도 밑줄 하나로만 구분돼 잘 안 보였다. 알약 버튼으로 바꾸고 줄바꿈을
            허용해서, 개수가 늘어도 다 보이고 선택된 탭이 한눈에 들어오게 한다. */
-        [data-testid="stTabs"] [data-baseweb="tab-list"] {{
-            gap: 7px;
-            flex-wrap: wrap;            /* 잘리는 대신 다음 줄로 */
-            overflow: visible;
+        /* 선택자를 testid에 묶지 않는다 — 스트림릿 버전에 따라 stTabs가 안 붙을 때가
+           있어서 스타일이 통째로 안 먹는다. baseweb 속성만 보면 버전을 안 탄다. */
+        div[data-baseweb="tab-list"] {{
+            gap: 7px !important;
+            flex-wrap: wrap !important;      /* 잘리는 대신 다음 줄로 */
+            overflow: visible !important;
             border-bottom: none !important;
+            box-shadow: none !important;
             padding-bottom: 2px;
         }}
+        /* 탭을 가로 스크롤로 감싸는 래퍼가 있으면 그것도 풀어준다 */
+        div[data-baseweb="tab-list"] > div {{ overflow: visible !important; }}
         /* 기본 밑줄 하이라이트 제거 — 버튼 배경으로 선택을 표시한다 */
-        [data-testid="stTabs"] [data-baseweb="tab-highlight"],
-        [data-testid="stTabs"] [data-baseweb="tab-border"] {{
-            display: none !important;
+        [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{
+            display: none !important; background: transparent !important;
         }}
-        [data-testid="stTabs"] button[data-baseweb="tab"] {{
+        button[data-baseweb="tab"] {{
             height: auto !important;
+            min-height: 0 !important;
             padding: 8px 15px !important;
             margin: 0 !important;
             border-radius: 10px !important;
@@ -635,22 +640,28 @@ def inject_theme():
             background: {THEME_COLORS["surface"]} !important;
             border: 1px solid {THEME_COLORS["border"]} !important;
             color: {THEME_COLORS["body"]} !important;
-            font-weight: 600; font-size: 13.5px; white-space: nowrap;
+            font-family: {THEME_FONT_STACK} !important;
+            font-weight: 600 !important; font-size: 13.5px !important;
+            white-space: nowrap;
             transition: background .12s, color .12s, border-color .12s;
         }}
-        [data-testid="stTabs"] button[data-baseweb="tab"]:hover {{
+        button[data-baseweb="tab"]:hover {{
             background: {THEME_COLORS["weak_bg"]} !important;
             border-color: {THEME_COLORS["primary"]} !important;
             color: {THEME_COLORS["primary"]} !important;
         }}
-        [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {{
+        button[data-baseweb="tab"][aria-selected="true"] {{
             background: {THEME_COLORS["foreground"]} !important;
             border-color: {THEME_COLORS["foreground"]} !important;
             color: #FFFFFF !important;
         }}
-        [data-testid="stTabs"] button[data-baseweb="tab"] p {{
+        /* 탭 글자는 <p>로 한 겹 더 감싸여 나온다 — 거기까지 안 맞추면
+           색·굵기·글씨체가 겉돌아서 버튼만 바뀌고 글자는 그대로 보인다 */
+        button[data-baseweb="tab"] [data-testid="stMarkdownContainer"],
+        button[data-baseweb="tab"] p {{
+            font-family: {THEME_FONT_STACK} !important;
             font-size: 13.5px !important; font-weight: 600 !important;
-            color: inherit !important; margin: 0 !important;
+            color: inherit !important; margin: 0 !important; line-height: 1.2 !important;
         }}
 
         [data-testid="stPopover"] {{ width: fit-content !important; }}
