@@ -11080,6 +11080,13 @@ CP_CSS = """
 .cp-tbl th.l,.cp-tbl td.l{text-align:left}
 .cp-ar{margin-left:6px;color:#B9BEC5;font-size:13px}
 .cp-tbl th:hover{background:#EDEAE3}
+/* CTR·CPC를 넣느라 열이 12개가 됐다. 매체 칸이 넓어 여백이 많았으므로 거기를 줄이고
+   숫자 칸 좌우 여백을 조금씩 깎아 가로 스크롤 없이 한 화면에 들어오게 한다. */
+.cp-tbl{table-layout:auto}
+.cp-tbl th:nth-child(1),.cp-tbl td:nth-child(1){width:62px;padding-left:10px;padding-right:4px}
+.cp-tbl th:nth-child(2),.cp-tbl td:nth-child(2){width:auto;max-width:210px;
+  white-space:normal;word-break:keep-all;padding-left:6px}
+.cp-tbl th:nth-child(n+3),.cp-tbl td:nth-child(n+3){padding-left:8px;padding-right:8px}
 .cp-tbl td{padding:12px;text-align:right;border-bottom:1px solid #F3F1EC;white-space:nowrap;
   font-variant-numeric:tabular-nums}
 .cp-tbl tr:last-child td{border-bottom:none}
@@ -11710,13 +11717,21 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         '</div></div>', unsafe_allow_html=True)
 
     # ── 표 ───────────────────────────────────────────────
-    heads = ["구분", "매체", "노출", "클릭", "총비용(VAT 포함)", "GA 구매", "GA 매출", "GA ROAS", "월 예산", "예산 소진율"]
+    heads = ["구분", "매체", "노출", "클릭", "CTR", "CPC", "총비용(VAT 포함)",
+             "GA 구매", "GA 매출", "GA ROAS", "월 예산", "예산 소진율"]
     th = "".join(
         f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}<span class="cp-ar">&#8645;</span></th>'
         for h in heads)
     body = []
     for _, r in view.iterrows():
         badge = "cp-ext" if r["구분"] == "외부몰" else "cp-own"
+        # CTR·CPC는 저장하지 않고 여기서 계산한다 — 노출·클릭·광고비에서 바로 나오고,
+        # 따로 저장하면 원본이 보정될 때 같이 안 바뀌어 어긋난다.
+        _imp, _clk, _cost = float(r["노출"] or 0), float(r["클릭"] or 0), float(r["비용"] or 0)
+        _ctr = (_clk / _imp * 100) if _imp > 0 else None
+        _cpc = (_cost / _clk) if _clk > 0 else None
+        ctr_v = ('<span class="cp-mute">—</span>' if _ctr is None else f'{_ctr:.2f}%')
+        cpc_v = ('<span class="cp-mute">—</span>' if _cpc is None else _cp_won(_cpc))
         roas_v = ('<span class="cp-mute">—</span>'
                   if r["GA ROAS"] is None or pd.isna(r["GA ROAS"])
                   else f'{r["GA ROAS"]:,.1f}%')
@@ -11736,6 +11751,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             f'<td class="l m">{r["매체"]}{sub}</td>'
             f'<td data-v="{r["노출"]:.0f}">{_cp_int(r["노출"])}</td>'
             f'<td data-v="{r["클릭"]:.0f}">{_cp_int(r["클릭"])}</td>'
+            f'<td data-v="{(_ctr if _ctr is not None else -1):.3f}">{ctr_v}</td>'
+            f'<td data-v="{(_cpc if _cpc is not None else -1):.0f}">{cpc_v}</td>'
             f'<td data-v="{r["비용"]:.0f}">{_cp_won(r["비용"])}</td>'
             f'<td data-v="{r["GA구매"]:.0f}">{_cp_int(r["GA구매"])}</td>'
             f'<td data-v="{r["GA매출"]:.0f}">{_cp_won(r["GA매출"])}</td>'
@@ -11745,9 +11762,13 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{view["GA매출"].sum() / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
+    _s_imp, _s_clk = float(view["노출"].sum()), float(view["클릭"].sum())
+    s_ctr = f'{_s_clk / _s_imp * 100:.2f}%' if _s_imp > 0 else '<span class="cp-mute">—</span>'
+    s_cpc = _cp_won(s_cost / _s_clk) if _s_clk > 0 else '<span class="cp-mute">—</span>'
     body.append(
         f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
         f'<td>{_cp_int(view["노출"].sum())}</td><td>{_cp_int(view["클릭"].sum())}</td>'
+        f'<td>{s_ctr}</td><td>{s_cpc}</td>'
         f'<td>{_cp_won(s_cost)}</td><td>{_cp_int(view["GA구매"].sum())}</td>'
         f'<td>{_cp_won(view["GA매출"].sum())}</td><td>{s_roas}</td>'
         f'<td>{_cp_won(s_bud)}</td><td>{s_pace}</td></tr>')
@@ -12574,7 +12595,7 @@ def diagnose_ad_spend_setup() -> str:
 # 매체 리포트(노출·클릭·광고비)와 GA(방문·구매·매출)를 한 줄에 놓는다.
 # 광고비가 매체 실제 청구액이라 소재별 ROAS를 제대로 볼 수 있다.
 # 전환은 GA 기준 하나만 쓴다 — 매체 신고 전환은 매체마다 기준이 달라 서로 못 더한다.
-GC_HEAD = ["구분", "노출", "클릭", "CTR", "광고비(VAT+)",
+GC_HEAD = ["구분", "노출", "클릭", "CTR", "CPC", "광고비(VAT+)",
            "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
 
 # utm_content 작명 규칙: 그룹명(타겟팅명)_날짜_소재이름
@@ -12929,6 +12950,17 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     # UTM 매핑(utm_channel_map)에 있는 소스/매체 = 우리가 돈 내고 돌리는 광고다.
     # 매핑이 안 된 건 organic·referral·direct·(not set)이라 소재 성과로 볼 게 없다.
     g = g[g.apply(classify_ga_bucket, axis=1) == "광고"]
+
+    # 제외 대상(마케팅팀 등)은 **매출도 같이** 뺀다.
+    # 광고비만 빼고 GA 매출을 남겨두면 그 매체 ROAS가 통째로 부풀어 오른다 —
+    # 실제로 0911_마케팅팀_A_1/A_2가 광고비 없이 GA 매출 89만원만 들고 있었다.
+    # 소재명(utm_content)과 캠페인명(utm_campaign) 어느 쪽에 들어 있어도 잡는다.
+    _excl_cols = [c for c in ("creative", "campaign") if c in g.columns]
+    if _excl_cols:
+        _drop = False
+        for c in _excl_cols:
+            _drop = _drop | g[c].map(_google_campaign_excluded)
+        g = g[~_drop]
     if g.empty:
         return pd.DataFrame(columns=cols)
     g["channel"] = [_gc_ga_channel(ch, cp) for ch, cp in zip(g["channel"], g["campaign"])]
@@ -13177,6 +13209,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         rev = float((media or {}).get("media_rev", 0) or 0)
 
     ctr = (clk / imp * 100) if imp else 0.0
+    cpc = (cost / clk) if clk else 0.0
     aov = (rev / conv) if conv else 0.0
     roas = (rev / cost * 100) if cost > 0 else 0.0
     roas_txt = f"{roas:,.0f}%" if cost > 0 else "-"
@@ -13221,6 +13254,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         f'<td data-v="{imp:.0f}">{dash(imp, ",.0f")}</td>'
         f'<td data-v="{clk:.0f}">{dash(clk, ",.0f")}</td>'
         f'<td data-v="{ctr:.3f}">{f"{ctr:.2f}%" if imp else "-"}</td>'
+        f'<td data-v="{cpc:.0f}">{(f"{cpc:,.0f}원" if cpc else "-")}</td>'
         f'<td data-v="{cost:.0f}">{(f"{cost:,.0f}원" if cost else "-")}</td>'
         f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
         f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
@@ -13280,7 +13314,7 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         "이름": "TOTAL" if is_total else name,
         "구분": sub,
         "_img": img_url,
-        "노출": imp, "클릭": clk, "CTR(%)": ctr,
+        "노출": imp, "클릭": clk, "CTR(%)": ctr, "CPC": (cost / clk) if clk else 0.0,
         "광고비(VAT+)": cost, "방문(세션)": ses,
         "구매": conv, "매출": rev, "객단가": aov,
         "ROAS(%)": roas, "판정": label,
@@ -13340,13 +13374,13 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     from openpyxl.utils import get_column_letter
 
     cols = ["이름", "구분"] + (["이미지"] if with_images else []) + [
-        "노출", "클릭", "CTR(%)", "광고비(VAT+)", "방문(세션)",
+        "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "방문(세션)",
         "구매", "매출", "객단가", "ROAS(%)", "판정", "기준"]
-    numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": "0.00",
+    numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": "0.00", "CPC": "#,##0",
               "광고비(VAT+)": "#,##0", "방문(세션)": "#,##0", "구매": "#,##0",
               "매출": "#,##0", "객단가": "#,##0", "ROAS(%)": "#,##0"}
     width = {"이름": 34, "구분": 22, "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
-             "CTR(%)": 9, "광고비(VAT+)": 14, "방문(세션)": 11, "구매": 9,
+             "CTR(%)": 9, "CPC": 10, "광고비(VAT+)": 14, "방문(세션)": 11, "구매": 9,
              "매출": 14, "객단가": 11, "ROAS(%)": 10, "판정": 12, "기준": 11}
 
     head_fill = PatternFill("solid", fgColor="14181F")
