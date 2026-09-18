@@ -13940,6 +13940,31 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
     media_map.update(_api_map)
 
+    # ── 채널 성과와의 차이를 미리 계산해둔다 ─────────────────────
+    # 두 화면은 GA4에 **서로 다른 질문**을 한다.
+    #   채널 성과 : 날짜 × 소스/매체 × 신규재방문
+    #   이 화면   : 날짜 × 소스/매체 × 캠페인 × 소재 × utm_id × 신규재방문
+    # 차원이 늘면 GA4가 행 수 한도에 걸려 일부를 '(other)'로 묶는다. 그 행은 소재를
+    # 못 가리키니 이 표에서 빠지고, 그래서 합계가 채널 성과보다 1~2% 작게 나온다.
+    # 없앨 수 없는 차이라, 숨기지 말고 탭마다 얼마나 차이 나는지 적어준다.
+    _chan_rev, _chan_conv = {}, {}
+    try:
+        _cd = load_table("ga_channel_daily")
+    except Exception:
+        _cd = None
+    if _cd is not None and not _cd.empty and "channel" in _cd.columns:
+        _c = _cd.copy()
+        _c["_d"] = pd.to_datetime(_c.get("report_date"), errors="coerce").dt.date
+        _c = _c[(_c["_d"] >= start) & (_c["_d"] <= end)]
+        _c = _c[_c["channel"].notna()]
+        if not _c.empty:
+            for _col in ("conversions", "revenue"):
+                _c[_col] = pd.to_numeric(_c.get(_col), errors="coerce").fillna(0)
+            _c["_t"] = _c["channel"].map(_gc_channel)
+            for _t, _sub in _c.groupby("_t"):
+                _chan_rev[_t] = float(_sub["revenue"].sum())
+                _chan_conv[_t] = float(_sub["conversions"].sum())
+
     _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
     _media_ch = {k[0] for k in media_map}
 
@@ -14383,6 +14408,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 f"광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
                 f"미만이면 판단 보류"
             )
+
+            # 채널 성과 탭과 GA 매출이 얼마나 벌어지는지 — 숨기면 '왜 다르지'가 된다.
+            _cr = float(_chan_rev.get(label, 0) or 0)
+            if _cr > 0 and not _media_basis:
+                _gap = _cr - tot_rev
+                if abs(_gap) / _cr >= 0.005:      # 0.5% 넘게 벌어질 때만
+                    st.caption(
+                        f"📐 **채널 성과 탭의 {label} GA 매출은 {_cr:,.0f}원**입니다 — "
+                        f"이 표 합계({tot_rev:,.0f}원)보다 {abs(_gap):,.0f}원"
+                        f"({abs(_gap) / _cr * 100:.1f}%) {'큽니다' if _gap > 0 else '작습니다'}. "
+                        "두 화면이 GA4에 묻는 단위가 달라서 그렇습니다 — 여기서는 "
+                        "캠페인·소재까지 쪼개서 묻는데, 그러면 GA4가 행 수 한도 때문에 "
+                        "일부를 '(기타)'로 묶어버려 소재를 못 가리는 줄이 빠집니다. "
+                        "**매체 총액은 채널 성과를, 소재끼리 비교는 이 표를** 보세요."
+                    )
             cmt = None
             if not rows.empty:
                 # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
