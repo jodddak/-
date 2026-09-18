@@ -1,5 +1,5 @@
 """
-STCO 온라인팀 광고/마케팅 성과 대시보드
+STCO 온라인사업팀 광고 성과 대시보드
 ==================================
 매주 "STCO_주간보고서_...xlsx" 파일을 업로드하면 아래 시트들을 자동으로 인식해서
 누적 저장하고, ROAS/KPI를 웹에서 바로 볼 수 있는 대시보드.
@@ -16002,10 +16002,12 @@ def main():
     # st.title()은 raw HTML(이미지)을 못 받아서, 이모지(📊) 대신 커스텀 아이콘을 쓰려면
     # 직접 <h1>을 그려야 한다. inject_theme()의 전역 h1 스타일(글자크기/굵기/색)은
     # 태그 자체를 그대로 쓰기 때문에 동일하게 적용된다.
+    # gap 10px → 14px: 배지가 정사각이라 글자와 너무 붙어 보였다(S와 '온'이 거의 맞닿음).
     st.markdown(
-        f'<h1 style="display:flex;align-items:center;gap:10px;margin:0 0 0.5rem 0;">'
-        f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" style="height:34px;width:auto;" />'
-        f'STCO 온라인팀 광고/마케팅 성과 대시보드</h1>',
+        f'<h1 style="display:flex;align-items:center;gap:14px;margin:0 0 0.5rem 0;">'
+        f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" '
+        f'style="height:34px;width:auto;border-radius:6px;" />'
+        f'<span>온라인사업팀 광고 성과 대시보드</span></h1>',
         unsafe_allow_html=True,
     )
     render_upload_panel()
