@@ -13811,48 +13811,56 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _run_sync("자동 — " + (", ".join(_stale) + " 늦음" if _stale else "GA4 갱신"),
                       unlimited=False)
 
-    # ── 크리테오 차원 진단 ──
-    # 크리테오가 '광고 단위'를 뭐라고 부르는지 계정마다 달라서, 이름을 하나씩 고쳐 배포하며
-    # 확인하느라 며칠을 썼다. 여기서 후보를 한 번에 던져보고 통하는 이름을 확정한다.
-    with st.expander("🔎 크리테오 차원 진단 — 광고(소재) 단위 이름 찾기"):
-        st.caption(
-            "크리테오 API에 소재 단위 차원 이름 후보를 하나씩 던져보고 어떤 게 통하는지 봅니다. "
-            "호출 제한(429)에 안 걸리게 1.5초씩 쉬면서 돌기 때문에 20~30초 걸립니다. "
-            "**응답 키** 열이 핵심입니다 — 크리테오가 실제로 뭐라고 돌려주는지가 거기 나옵니다."
-        )
-        cpb1, cpb2 = st.columns([1, 1])
-        with cpb1:
-            if st.button("진단 실행 (최근 7일)", key="gc_criteo_probe"):
-                with st.spinner("크리테오에 차원 이름을 하나씩 물어보는 중..."):
-                    try:
-                        _pr = probe_criteo_dimensions(date.today() - timedelta(days=7),
-                                                      date.today() - timedelta(days=1))
-                        st.session_state["gc_criteo_probe_result"] = _pr
-                    except Exception as _e:
-                        st.session_state["gc_criteo_probe_result"] = [
-                            ("(오류)", "-", "", str(_e)[:300])]
-        with cpb2:
-            if st.button("크리테오 소재 실적 비우기", key="gc_criteo_wipe",
-                         help="묶음 단위로 잘못 저장된 행을 지웁니다. 지운 뒤 다시 받으면 됩니다."):
-                if delete_ad_creative_for_channel("크리테오"):
-                    st.success("지웠습니다. 새로 그리면서 크리테오를 자동으로 다시 받습니다.")
-                    st.session_state.pop("gc_synced", None)   # 자동 동기화가 다시 돌게
-                    st.cache_data.clear()
-                    st.rerun()
-        _used = st.session_state.get("gc_criteo_used")
-        if _used:
-            st.success(f"마지막 동기화에서 크리테오 소재를 받은 경로 — **{_used}**")
-        _pr = st.session_state.get("gc_criteo_probe_result")
-        if _pr:
-            st.dataframe(
-                pd.DataFrame(_pr, columns=["차원 이름", "API 버전", "응답 키", "결과"]),
-                use_container_width=True, hide_index=True)
-            st.caption("429는 '거부'가 아니라 **호출 제한**입니다 — 그 줄은 판정 보류이니 "
-                       "다시 한 번 눌러 확인해 주세요.")
+    # ── 아래로 내린 진단·설정 패널들 ─────────────────────────────
+    # 성과표가 화면 아래쪽으로 밀려서 스크롤을 한참 내려야 보였다.
+    # 진단·설정류는 전부 '무엇을 그릴지'만 여기서 정의해두고, 실제 출력은
+    # 이 함수 맨 끝의 _render_tools() 에서 한 번에 한다.
+    _panels = {}
 
-    # 자동 동기화는 세션당 한 번뿐이라, 실패한 매체를 다시 받으려면 새로고침 말고 버튼이 필요하다.
-    _never = [lab for lab, _ in AD_CREATIVE_FETCHERS if _media_last.get(lab) is None]
-    if _never:
+    def _criteo_probe_panel():
+        # 크리테오가 '광고 단위'를 뭐라고 부르는지 계정마다 달라서, 이름을 하나씩 고쳐
+        # 배포하며 확인하느라 며칠을 썼다. 후보를 한 번에 던져보고 통하는 이름을 확정한다.
+        with st.expander("🔎 크리테오 차원 진단 — 광고(소재) 단위 이름 찾기"):
+            st.caption(
+                "크리테오 API에 소재 단위 차원 이름 후보를 하나씩 던져보고 어떤 게 통하는지 봅니다. "
+                "호출 제한(429)에 안 걸리게 1.5초씩 쉬면서 돌기 때문에 20~30초 걸립니다. "
+                "**응답 키** 열이 핵심입니다 — 크리테오가 실제로 뭐라고 돌려주는지가 거기 나옵니다."
+            )
+            cpb1, cpb2 = st.columns([1, 1])
+            with cpb1:
+                if st.button("진단 실행 (최근 7일)", key="gc_criteo_probe"):
+                    with st.spinner("크리테오에 차원 이름을 하나씩 물어보는 중..."):
+                        try:
+                            _pr = probe_criteo_dimensions(date.today() - timedelta(days=7),
+                                                          date.today() - timedelta(days=1))
+                            st.session_state["gc_criteo_probe_result"] = _pr
+                        except Exception as _e:
+                            st.session_state["gc_criteo_probe_result"] = [
+                                ("(오류)", "-", "", str(_e)[:300])]
+            with cpb2:
+                if st.button("크리테오 소재 실적 비우기", key="gc_criteo_wipe",
+                             help="묶음 단위로 잘못 저장된 행을 지웁니다. 지운 뒤 다시 받으면 됩니다."):
+                    if delete_ad_creative_for_channel("크리테오"):
+                        st.success("지웠습니다. 새로 그리면서 크리테오를 자동으로 다시 받습니다.")
+                        st.session_state.pop("gc_synced", None)   # 자동 동기화가 다시 돌게
+                        st.cache_data.clear()
+                        st.rerun()
+            _used = st.session_state.get("gc_criteo_used")
+            if _used:
+                st.success(f"마지막 동기화에서 크리테오 소재를 받은 경로 — **{_used}**")
+            _pr = st.session_state.get("gc_criteo_probe_result")
+            if _pr:
+                st.dataframe(
+                    pd.DataFrame(_pr, columns=["차원 이름", "API 버전", "응답 키", "결과"]),
+                    use_container_width=True, hide_index=True)
+                st.caption("429는 '거부'가 아니라 **호출 제한**입니다 — 그 줄은 판정 보류이니 "
+                           "다시 한 번 눌러 확인해 주세요.")
+
+    def _never_panel():
+        # 자동 동기화는 세션당 한 번뿐이라, 실패한 매체를 다시 받으려면 버튼이 필요하다.
+        _never = [lab for lab, _ in AD_CREATIVE_FETCHERS if _media_last.get(lab) is None]
+        if not _never:
+            return
         st.warning(
             f"**{', '.join(_never)}** 소재 실적이 한 건도 저장돼 있지 않습니다. "
             "그 매체 소재는 대행사 리포트로만 채워지고 있어 최근 소재가 빠질 수 있습니다."
@@ -13873,11 +13881,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 st.cache_data.clear()
                 st.rerun()
 
+    def _render_tools():
+        """화면 맨 아래 — 진단·설정. 성과표를 위로 올리려고 여기로 모았다."""
+        st.markdown("---")
+        st.caption("🛠️ 아래는 **진단·설정**입니다. 평소에는 안 보셔도 됩니다.")
+        for _fn in ("never", "source", "excluded", "folded", "alias",
+                    "img_upload", "criteo"):
+            _p = _panels.get(_fn)
+            if _p:
+                try:
+                    _p()
+                except Exception as _e:      # 패널 하나가 죽어도 화면은 살린다
+                    st.caption(f"({_fn} 패널 오류: {str(_e)[:120]})")
+
+    _panels["criteo"] = _criteo_probe_panel
+    _panels["never"] = _never_panel
+
     if cre is None or cre.empty:
         st.info(
             "아직 소재별 데이터가 없습니다. 오른쪽 **🔄 소재 데이터 동기화**를 눌러주세요.\n\n"
             "먼저 Supabase에 `ga_creative_daily` 테이블이 있어야 합니다 (배포 SQL 참고)."
         )
+        _render_tools()
         return
 
     d = cre.copy()
@@ -13885,6 +13910,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     d = d.dropna(subset=["report_date"])
     if d.empty:
         st.info("날짜를 읽을 수 있는 행이 없습니다.")
+        _render_tools()
         return
 
     # 매체 판정은 저장된 channel을 믿지 않고 지금의 UTM 매핑으로 다시 입힌다.
@@ -13911,24 +13937,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     img_map.update(st.session_state.get("gc_img_extra", {}))
     # 직접 올린 이미지는 Storage에서 다시 읽는다 — 세션에만 두면 다음 접속에 사라진다.
     store_idx = _gc_stored_image_index()
-    with st.expander("소재 이미지 추가 업로드 — 파일명을 소재명으로 (예: 260807_수피마티셔츠.jpg)"):
-        ups = st.file_uploader("이미지 여러 장 한 번에 올릴 수 있습니다",
-                               type=["png", "jpg", "jpeg", "webp"],
-                               accept_multiple_files=True, key="gc_img_up")
-        if ups and st.button("업로드하고 반영", key="gc_img_btn"):
-            urls, errs = upload_ga_creative_images(ups)
-            if urls:
-                st.session_state.setdefault("gc_img_extra", {}).update(urls)
-                _gc_stored_image_index.clear()   # 방금 올린 것이 바로 목록에 잡히게
-                st.success(f"{len(urls)}장 올렸습니다. 다음 접속에도 그대로 남습니다.")
-                st.rerun()
-            for e in errs:
-                st.error(e)
-        st.caption(
-            "대행사 리포트에 있던 소재는 이미 올라가 있어 다시 주실 필요 없습니다. "
-            "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다. "
-            f"현재 직접 올려둔 이미지 {len(store_idx)}장."
-        )
+
+    def _img_upload_panel():
+        with st.expander("🖼️ 소재 이미지 추가 업로드 — 파일명을 소재명으로 "
+                         "(예: 260807_수피마티셔츠.jpg)"):
+            ups = st.file_uploader("이미지 여러 장 한 번에 올릴 수 있습니다",
+                                   type=["png", "jpg", "jpeg", "webp"],
+                                   accept_multiple_files=True, key="gc_img_up")
+            if ups and st.button("업로드하고 반영", key="gc_img_btn"):
+                urls, errs = upload_ga_creative_images(ups)
+                if urls:
+                    st.session_state.setdefault("gc_img_extra", {}).update(urls)
+                    _gc_stored_image_index.clear()   # 방금 올린 것이 바로 목록에 잡히게
+                    st.success(f"{len(urls)}장 올렸습니다. 다음 접속에도 그대로 남습니다.")
+                    st.rerun()
+                for e in errs:
+                    st.error(e)
+            st.caption(
+                "대행사 리포트에 있던 소재는 이미 올라가 있어 다시 주실 필요 없습니다. "
+                "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다. "
+                f"현재 직접 올려둔 이미지 {len(store_idx)}장."
+            )
+
+    _panels["img_upload"] = _img_upload_panel
 
     # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
     # (탭 구성보다 먼저 구해둔다 — '지금 집행 중인가'로 숨김 여부를 판단해야 해서.)
@@ -14056,6 +14087,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             "UTM 매핑이 비어 있어 광고 매체를 가려낼 수 없습니다. "
             "사이드바에서 **UTM 리스트 파일**을 먼저 올려주세요 (소스/매체 → 매체명 대응표)."
         ) if not lookup else st.info("선택한 기간에 광고 유입 데이터가 없습니다.")
+        _render_tools()
         return
     # TOTAL 탭은 두지 않는다.
     # 소재는 매체끼리 비교하는 물건이 아니라 '이 매체 안에서 어느 소재를 끌지'를 보는
@@ -14068,11 +14100,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     export_slot = st.container()
     export_sheets = {}
     tabs = st.tabs(tab_labels)
-    _non_cre = [c for c in GC_NON_CREATIVE if c in hidden]
-    if _non_cre:
-        st.caption("검색광고(" + " · ".join(_non_cre) + ")는 배너 소재가 없어 이 화면에서 뺐습니다 — "
-                   "채널 성과 탭에서 보세요.")
-    if folded:
+
+    def _folded_panel():
+        _non_cre = [c for c in GC_NON_CREATIVE if c in hidden]
+        if _non_cre:
+            st.caption("검색광고(" + " · ".join(_non_cre) + ")는 배너 소재가 없어 이 화면에서 "
+                       "뺐습니다 — 채널 성과 탭에서 보세요.")
+        if not folded:
+            return
         # 어디에도 안 들어가는 줄이 생기므로, 얼마나 되는지 + **어느 캠페인 때문인지**를
         # 반드시 보여준다. 숫자만 보여주면 "9월엔 PC/MO 나눠 돌렸는데 왜?"에서 막힌다.
         # 원인은 늘 utm_campaign 값에 있으므로 그 값을 그대로 꺼내 보여준다.
@@ -14102,6 +14137,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "③ 캠페인 이름 규칙이 아예 다르면 알려주세요 — 그 규칙으로 읽도록 바꾸겠습니다."
             )
 
+    _panels["folded"] = _folded_panel
+
     # ── UTM 설정 상태 진단 ── 소재가 (미설정)이면 표가 뭉개진다.
     per = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
     per = per[per.apply(classify_ga_bucket, axis=1) == "광고"]
@@ -14126,35 +14163,45 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # UTM에 박힌 옛 이름을 지금 쓰는 이름으로 바꿔 보여준다.
     alias_df = load_table("creative_alias")
     alias = creative_alias_map(alias_df)
-    with st.expander(f"✏️ 소재명 바꿔 보기 ({len(alias)}개 등록됨) — UTM 이름이 옛날 것일 때"):
-        st.caption(
-            "UTM은 한 번 심으면 GA에 그대로 쌓입니다. 나중에 소재 이름을 바꿔도 GA는 옛 이름을 "
-            "계속 주기 때문에 화면과 매체 관리자가 어긋납니다. "
-            "여기에 적어두면 **화면에 보이는 이름만** 바뀌고, 매체 리포트·이미지 매칭은 "
-            "UTM 원본으로 그대로 돌아갑니다(과거 데이터가 안 깨집니다)."
-        )
-        _base = (alias_df[CREATIVE_ALIAS_COLS].copy()
-                 if (alias_df is not None and not alias_df.empty
-                     and "utm_name" in alias_df.columns)
-                 else pd.DataFrame(columns=CREATIVE_ALIAS_COLS))
-        _ed = st.data_editor(
-            _base, num_rows="dynamic", use_container_width=True, key="gc_alias_editor",
-            column_config={
-                "utm_name": st.column_config.TextColumn(
-                    "UTM 소재명 (지금 화면에 보이는 이름)", required=True),
-                "display_name": st.column_config.TextColumn(
-                    "바꿔서 보여줄 이름", required=True),
-                "note": st.column_config.TextColumn("메모"),
-            },
-        )
-        if st.button("저장하고 반영", key="gc_alias_save", type="primary"):
-            _e = _ed.dropna(subset=["utm_name", "display_name"])
-            _e = _e[(_e["utm_name"].astype(str).str.strip() != "")
-                    & (_e["display_name"].astype(str).str.strip() != "")]
-            save_table("creative_alias", _e[CREATIVE_ALIAS_COLS], "utm_name", "소재명 별칭")
-            st.cache_data.clear()
-            st.rerun()
-    if _api_channels:
+
+    def _alias_panel():
+        with st.expander(f"✏️ 소재명 바꿔 보기 ({len(alias)}개 등록됨) — "
+                         "UTM 이름이 옛날 것일 때"):
+            st.caption(
+                "UTM은 한 번 심으면 GA에 그대로 쌓입니다. 나중에 소재 이름을 바꿔도 GA는 "
+                "옛 이름을 계속 주기 때문에 화면과 매체 관리자가 어긋납니다. "
+                "여기에 적어두면 **화면에 보이는 이름만** 바뀌고, 매체 리포트·이미지 매칭은 "
+                "UTM 원본으로 그대로 돌아갑니다(과거 데이터가 안 깨집니다)."
+            )
+            _base = (alias_df[CREATIVE_ALIAS_COLS].copy()
+                     if (alias_df is not None and not alias_df.empty
+                         and "utm_name" in alias_df.columns)
+                     else pd.DataFrame(columns=CREATIVE_ALIAS_COLS))
+            _ed = st.data_editor(
+                _base, num_rows="dynamic", use_container_width=True,
+                key="gc_alias_editor",
+                column_config={
+                    "utm_name": st.column_config.TextColumn(
+                        "UTM 소재명 (지금 화면에 보이는 이름)", required=True),
+                    "display_name": st.column_config.TextColumn(
+                        "바꿔서 보여줄 이름", required=True),
+                    "note": st.column_config.TextColumn("메모"),
+                },
+            )
+            if st.button("저장하고 반영", key="gc_alias_save", type="primary"):
+                _e = _ed.dropna(subset=["utm_name", "display_name"])
+                _e = _e[(_e["utm_name"].astype(str).str.strip() != "")
+                        & (_e["display_name"].astype(str).str.strip() != "")]
+                save_table("creative_alias", _e[CREATIVE_ALIAS_COLS],
+                           "utm_name", "소재명 별칭")
+                st.cache_data.clear()
+                st.rerun()
+
+    _panels["alias"] = _alias_panel
+
+    def _source_panel():
+        if not _api_channels:
+            return
         # 같은 ad_creative_daily 안에도 출처가 둘이다 — 매체 API로 받은 것과,
         # 매체 리포트 파일(GFA)을 올려서 들어온 것. 섞어서 'API'라고 적으면
         # 나중에 'GFA는 API 없는데?' 하고 헷갈린다.
@@ -14173,9 +14220,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             "노출·클릭·광고비 출처 — " + " · ".join(_bits)
             + " (한 매체에 여러 출처가 있으면 위쪽 것 하나만 씁니다 — 섞으면 이중 계상됩니다)"
         )
-    # 제외한 줄을 펼쳐볼 수 있게 한다 — 매출이 줄어든 이유를 눈으로 확인하는 용도.
-    _ex = st.session_state.get("gc_excluded_rows")
-    if _ex and _ex.get("rows"):
+
+    _panels["source"] = _source_panel
+
+    def _excluded_panel():
+        # 제외한 줄을 펼쳐볼 수 있게 한다 — 매출이 줄어든 이유를 눈으로 확인하는 용도.
+        _ex = st.session_state.get("gc_excluded_rows")
+        if not (_ex and _ex.get("rows")):
+            return
         with st.expander(
                 f"🚫 온라인팀 성과가 아니라서 뺀 줄 — 구매 {_ex['conv']:,.0f}건 · "
                 f"매출 {_ex['rev']:,.0f}원 (무엇인지 보기)"):
@@ -14191,6 +14243,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "여기 있으면 안 되는 줄이 보이면 알려주세요 — 제외 단어를 고치면 됩니다 "
                 "(Secrets `[google_ads]` → `exclude_campaigns`)."
             )
+
+    _panels["excluded"] = _excluded_panel
 
     show_img = (level == "소재")
     head = list(GC_HEAD)
@@ -14309,20 +14363,25 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 else:
                     st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
                 continue
+            # ── 안내문은 표 아래로 ──
+            # 설명이 표 위에 쌓여 있어서 정작 성과를 보려면 한참 스크롤해야 했다.
+            # 여기서는 (종류, 내용)만 모아두고, 표를 먼저 그린 뒤 아래에서 출력한다.
+            notes = []      # [("info"|"warning"|"caption", 본문)]
+
             # 외부몰은 GA4가 못 보는 영역이라 매체 신고 전환·매출로 본다.
             _media_basis = (label in EXT_TABS) or (label == "네이버 GFA (외부몰)")
             if _media_basis:
-                st.info(
+                notes.append((
+                    "info",
                     "외부몰 광고는 **스마트스토어로 보내기 때문에 자사몰 GA4에 방문·매출이 "
                     "안 잡힙니다.** 그래서 이 탭만 구매·매출을 **매체(GFA)가 신고한 값**으로 "
                     "보여줍니다 — 다른 탭의 GA 기준 숫자와 그대로 더하면 안 됩니다. "
-                    "매체 신고 전환은 어트리뷰션 기준이 GA와 달라 보통 더 후하게 잡힙니다."
-                )
+                    "매체 신고 전환은 어트리뷰션 기준이 GA와 달라 보통 더 후하게 잡힙니다."))
             if label == "네이버 GFA" and not _gfa_split:
-                st.caption(
+                notes.append((
+                    "caption",
                     "GFA를 PC/MO로 나누려면 utm_campaign에 캠페인명(…_PC / …_MO)이 들어 있어야 "
-                    "합니다. 지금 GA 유입에는 그 표시가 없어 PC+MO를 합쳐서 보여줍니다."
-                )
+                    "합니다. 지금 GA 유입에는 그 표시가 없어 PC+MO를 합쳐서 보여줍니다."))
 
             if _media_basis:
                 for k, m in media_map.items():
@@ -14408,12 +14467,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             t_ses = float(sub["sessions"].sum())
             unset = float(sub[sub["creative"] == "(미설정)"]["sessions"].sum())
             if t_ses > 0 and unset / t_ses > 0.2:
-                st.warning(
+                notes.append((
+                    "warning",
                     f"소재명이 안 붙은 방문이 {unset:,.0f} / {t_ses:,.0f}건 "
                     f"({unset / t_ses * 100:.0f}%)입니다. 광고 랜딩 URL에 `utm_content` "
                     "(크리테오는 `utm_id`)를 넣어야 소재별 비교가 됩니다 — "
-                    "운영 도구 › UTM 빌더에서 만들 수 있습니다."
-                )
+                    "운영 도구 › UTM 빌더에서 만들 수 있습니다."))
 
             # 매체엔 있는데 GA에 못 붙은 소재(UTM 없음)와, GA엔 있는데 소재명이 없는 구매((미설정)·
             # (규칙 외))가 같은 매체에 동시에 있으면 십중팔구 같은 광고다 — 크리테오 다이나믹처럼
@@ -14425,35 +14484,35 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _lo_cost = sum(float(m.get("cost", 0) or 0) for _, m in leftovers)
                 if _nn_conv > 0 and _lo_cost > 0:
                     _lo_names = ", ".join(str(m.get("name") or k[1]) for k, m in leftovers[:3])
-                    st.info(
+                    notes.append((
+                        "info",
                         f"GA에 **소재명 없이 들어온 구매 {_nn_conv:,.0f}건 · {_nn_rev:,.0f}원**과 "
                         f"GA 매칭이 안 된 매체 소재 **{_lo_names}** (광고비 {_lo_cost:,.0f}원)는 "
                         "같은 광고일 가능성이 큽니다. 그 광고의 트래킹 파라미터에 소재명을 "
                         "(크리테오는 `utm_id`, 나머지는 `utm_content`) 넣으면 한 줄로 합쳐집니다. "
-                        "합계(TOTAL)는 이미 둘 다 포함하고 있어 정확합니다."
-                    )
+                        "합계(TOTAL)는 이미 둘 다 포함하고 있어 정확합니다."))
 
-            st.caption(
+            notes.append((
+                "caption",
                 f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · "
                 f"클릭 {FUNNEL_ZERO_CONV_CLICKS}회 이상인데 구매 0이면 효율 미달 · "
                 f"광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
-                f"미만이면 판단 보류"
-            )
+                f"미만이면 판단 보류"))
 
             # 채널 성과 탭과 GA 매출이 얼마나 벌어지는지 — 숨기면 '왜 다르지'가 된다.
             _cr = float(_chan_rev.get(label, 0) or 0)
             if _cr > 0 and not _media_basis:
                 _gap = _cr - tot_rev
                 if abs(_gap) / _cr >= 0.005:      # 0.5% 넘게 벌어질 때만
-                    st.caption(
+                    notes.append((
+                        "caption",
                         f"📐 **채널 성과 탭의 {label} GA 매출은 {_cr:,.0f}원**입니다 — "
                         f"이 표 합계({tot_rev:,.0f}원)보다 {abs(_gap):,.0f}원"
                         f"({abs(_gap) / _cr * 100:.1f}%) {'큽니다' if _gap > 0 else '작습니다'}. "
                         "두 화면이 GA4에 묻는 단위가 달라서 그렇습니다 — 여기서는 "
                         "캠페인·소재까지 쪼개서 묻는데, 그러면 GA4가 행 수 한도 때문에 "
                         "일부를 '(기타)'로 묶어버려 소재를 못 가리는 줄이 빠집니다. "
-                        "**매체 총액은 채널 성과를, 소재끼리 비교는 이 표를** 보세요."
-                    )
+                        "**매체 총액은 채널 성과를, 소재끼리 비교는 이 표를** 보세요."))
             cmt = None
             if not rows.empty:
                 # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
@@ -14462,8 +14521,6 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     cmt = _gc_comment(rows, label, avg_roas)
                 except Exception:
                     cmt = None
-            if cmt:
-                st.markdown(cmt, unsafe_allow_html=True)
 
             body = []
             recs = []          # 엑셀용 — 화면 표와 같은 값을 같은 순서로 쌓는다
@@ -14534,40 +14591,22 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
                      f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
 
+            # 표 위에는 제목 한 줄만 둔다. 읽는 법·기준 설명은 표 아래
+            # '이 표 읽는 법'으로 내렸다 — 설명이 위에 쌓여서 정작 성과를 보려면
+            # 스크롤을 한참 내려야 했다.
+            _card_sub = (
+                '구매·매출은 <b>매체(GFA)가 신고한 &lt;구매완료&gt; 값</b>입니다 — '
+                '다른 탭의 GA 기준 숫자와 그대로 더하면 안 됩니다.'
+                if _media_basis else
+                'GA4의 utm_campaign / utm_content 기준 · '
+                '<b>UTM 매핑된 광고 매체만</b> 셉니다.')
             card = (
                 FUNNEL_V4_CSS
                 + '<div class="fv4-wrap"><div class="fv4-card">'
                 f'<span class="fv4-badge-dark">{level}별</span>'
                 f'<div class="fv4-card-title">{label} · {level}별 '
                 f'{"매체 신고" if _media_basis else "GA"} 성과</div>'
-                + ('<div class="fv4-card-sub">구매·매출은 <b>매체(GFA)가 신고한 '
-                   '&lt;구매완료&gt; 값</b>입니다 — 외부몰은 스마트스토어로 보내서 자사몰 GA4에 '
-                   '안 잡히기 때문입니다. GFA가 주는 <b>총 전환매출액은 쓰지 않습니다</b> — '
-                   '장바구니 담기·회원가입까지 매출로 더해져 실제보다 몇 배로 커집니다. '
-                   '어트리뷰션 기준이 GA와 달라 다른 탭 숫자와 그대로 더하면 안 됩니다.</div>'
-                   if _media_basis else
-                   '<div class="fv4-card-sub">GA4의 utm_campaign / utm_content 기준입니다. '
-                   '매체가 신고하는 전환은 매체마다 기준이 달라 서로 못 더하지만, GA는 한 기준이라 '
-                   '소재끼리 비교가 됩니다. <b>UTM 매핑된 광고 매체만</b> 셉니다 — '
-                   '자연유입·레퍼럴·(not set)은 소재가 없어서 제외합니다.</div>')
-                + '<div class="fv4-bk-cap">머리글을 누르면 정렬됩니다. 합계(TOTAL) 줄은 맨 위 고정입니다.<br>'
-                '소재 이름은 <b>utm_content</b>를 <code>타겟팅_날짜_소재명</code> 규칙으로 쪼갠 '
-                '것입니다 — 같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 '
-                '<b>(규칙 외)</b>로 모아 보여주니, 그게 많으면 UTM 작명을 맞춰주세요.<br>'
-                '<b>노출·클릭·광고비</b>는 매체 API(메타·구글·크리테오)에서 매일 받은 실제 집행값이고 '
-                'GFA만 대행사 리포트입니다. <b>구매·매출</b>은 GA4 값입니다. '
-                'UTM의 <code>날짜_소재명</code>이 매체 소재명과 같은 꼴이라 그 키로 붙입니다. '
-                '타겟팅·캠페인·매체 단위는 소재 단위에서 붙인 실적을 합친 것이라 어느 단위로 봐도 합계가 같습니다. '
-                '전환은 GA 기준 하나만 씁니다 — 매체 신고 전환은 매체마다 기준이 달라 '
-                '서로 못 더합니다. ROAS는 <b>GA 매출 ÷ 매체 광고비</b>입니다.<br>'
-                '광고비가 안 붙은 소재는 <b>광고비 없음</b>으로 둡니다 — 매체 리포트에 없거나 '
-                '소재명이 UTM과 달라 못 찾은 경우라, 그게 많으면 작명을 맞춰주세요. '
-                f'판정 기준 — 클릭 {FUNNEL_ZERO_CONV_CLICKS}회 이상인데 구매가 0이면 '
-                '<b>효율 미달</b>입니다. 경매형 매체는 반응이 좋은 소재에 예산을 몰아주므로, '
-                '광고비가 적게 나간 것 자체가 이미 성과 신호입니다.<br>'
-                f'광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 '
-                '미만일 때만 <b>판단 보류</b>로 둡니다. 표본은 타겟팅으로 쪼개기 전 '
-                '<b>소재 전체 광고비</b>로 봅니다.</div>'
+                f'<div class="fv4-card-sub">{_card_sub}</div>'
                 + table + '</div></div>'
                 + """
 <script>
@@ -14592,15 +14631,57 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 })();
 </script>""".replace("__TID__", tid)
             )
-            row_h = 116 if show_img else 44
-            st.components.v1.html(card, height=min(2200, 460 + row_h * len(body)),
-                                  scrolling=True)
+            # 높이 — 실제로 재서 맞춘 값이다(브라우저에서 측정).
+            #   이미지 줄 157px · 이미지 없는 줄 59px · 머리(배지+제목+한 줄 설명) 145px
+            #   + 표 머리글 42 + TOTAL 줄 57 + 카드 여백 44 ≈ 288
+            # 예전 값(116/44 · 460 · 상한 2200)은 줄 높이를 낮게 잡아 안쪽에 스크롤바가
+            # 생겼다. 안쪽 바 없이 페이지째로 내려 보게 넉넉히 준다.
+            row_h = 157 if show_img else 59
+            st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
+                                  scrolling=False)
+
+            # ── 표 아래 ── 판정 코멘트 → 경고·안내 → 읽는 법
+            if cmt:
+                st.markdown(cmt, unsafe_allow_html=True)
+            for _kind, _txt in notes:
+                if _kind == "info":
+                    st.info(_txt)
+                elif _kind == "warning":
+                    st.warning(_txt)
+                else:
+                    st.caption(_txt)
+            with st.expander("📖 이 표 읽는 법 — 기준·판정 규칙"):
+                st.markdown(
+                    "- 머리글을 누르면 **정렬**됩니다. 합계(TOTAL) 줄은 맨 위 고정입니다.\n"
+                    "- 소재 이름은 `utm_content`를 `타겟팅_날짜_소재명` 규칙으로 쪼갠 것입니다 — "
+                    "같은 소재라도 타겟팅이 다르면 따로 셉니다. 규칙에 안 맞는 값은 "
+                    "**(규칙 외)**로 모입니다.\n"
+                    "- **노출·클릭·광고비**는 매체 API(메타·구글·크리테오)에서 매일 받은 실제 "
+                    "집행값이고 GFA만 대행사 리포트입니다. **구매·매출**은 GA4 값입니다. "
+                    "UTM의 `날짜_소재명`이 매체 소재명과 같은 꼴이라 그 키로 붙입니다.\n"
+                    "- 타겟팅·캠페인·매체 단위는 소재 단위에서 붙인 실적을 합친 것이라 "
+                    "어느 단위로 봐도 합계가 같습니다.\n"
+                    "- 전환은 **GA 기준 하나만** 씁니다 — 매체 신고 전환은 매체마다 기준이 "
+                    "달라 서로 못 더합니다. ROAS는 **GA 매출 ÷ 매체 광고비**입니다.\n"
+                    "- 광고비가 안 붙은 소재는 **광고비 없음**으로 둡니다 — 매체 리포트에 "
+                    "없거나 소재명이 UTM과 달라 못 찾은 경우입니다.\n"
+                    f"- 판정 — 클릭 {FUNNEL_ZERO_CONV_CLICKS}회 이상인데 구매가 0이면 "
+                    "**효율 미달**. 경매형 매체는 반응이 좋은 소재에 예산을 몰아주므로, "
+                    "광고비가 적게 나간 것 자체가 이미 성과 신호입니다.\n"
+                    f"- 광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
+                    "미만일 때만 **판단 보류**. 표본은 타겟팅으로 쪼개기 전 "
+                    "**소재 전체 광고비**로 봅니다."
+                    + ("\n- 이 탭은 외부몰이라 GFA가 주는 **총 전환매출액은 쓰지 않습니다** — "
+                       "장바구니 담기·회원가입까지 매출로 더해져 실제보다 몇 배로 커집니다. "
+                       "**구매완료**만 씁니다." if _media_basis else "")
+                )
 
     # ── 엑셀 내보내기 ──────────────────────────────────────────
     # 위에서 자리만 잡아둔 export_slot을 이제 채운다.
     # 이미지를 받아오는 데 시간이 걸려서 화면을 열 때마다 만들지는 않는다 —
     # 버튼을 눌렀을 때만 만들고, 만든 파일은 세션에 들고 있다가 내려받게 한다.
     if not export_sheets:
+        _render_tools()
         return
     _sig = f"{level}|{start}|{end}|{'|'.join(export_sheets)}"
     if st.session_state.get("gc_xlsx_sig") != _sig:
@@ -14634,11 +14715,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 key="gc_xlsx_dl", use_container_width=True, type="primary")
         else:
             _c2.caption(
-                f"매체마다 시트를 나눠 한 파일로 만듭니다 (총 {_n_rows:,}줄 · 소재 이미지 "
-                f"{_n_imgs:,}장). 이미지는 화면에 보이는 크기로 줄여 넣어 2~3MB 정도가 "
-                "됩니다. 만드는 데 10~30초 걸립니다 — 이미지를 받아와야 해서입니다. "
-                f"지금 보고 있는 **{level}** 단위·**{start}~{end}** 기준 그대로 나갑니다."
+                f"매체별 시트 · 총 {_n_rows:,}줄 · 이미지 {_n_imgs:,}장 "
+                f"(2~3MB · 10~30초) — 지금 보는 **{level}** 단위 "
+                f"**{start}~{end}** 그대로."
             )
+
+    # 진단·설정 패널은 전부 맨 아래에서 그린다.
+    _render_tools()
 
 
 def render_ga_channel_funnel_page(
