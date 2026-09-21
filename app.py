@@ -1407,6 +1407,32 @@ def delete_ad_creative_for_channel(channel: str) -> bool:
         return False
 
 
+def delete_ga_rows_in_range(table: str, start, end) -> bool:
+    """GA 테이블에서 지정한 날짜 구간의 행을 통째로 지운다.
+
+    **upsert만으로는 안 되는 이유**: upsert는 '이번에 받아온 행'만 덮어쓴다.
+    GA4가 나중에 구매를 다시 귀속시키거나(어트리뷰션 보정) 취소·환불로 지워버리면,
+    예전에 저장해둔 그 행은 새 응답에 없으므로 **영원히 남는다.**
+    실제로 그래서 GA에는 없는 '260709_썸머울수트 1건 78,563원'이 화면에만 남아 있었다.
+    다시 받기 전에 그 구간을 비우고 넣어야 화면이 GA와 같아진다.
+    """
+    client = get_supabase_client()
+    if client is None:
+        store = _local_store()
+        df = store.get(table, pd.DataFrame())
+        if df is not None and not df.empty and "report_date" in df.columns:
+            _d = pd.to_datetime(df["report_date"], errors="coerce").dt.date
+            store[table] = df[~((_d >= start) & (_d <= end))]
+        return True
+    try:
+        (client.table(TABLES[table]).delete()
+         .gte("report_date", str(start)).lte("report_date", str(end)).execute())
+        return True
+    except Exception as e:
+        st.error(f"{table} {start}~{end} 삭제 실패: {e}")
+        return False
+
+
 def delete_creative_performance_for_date(as_of_date_value):
     """오늘자 소재별 성과를 다시 저장하기 전에, 같은 날짜로 이미 저장돼있던 이전 스냅샷을
     통째로 지운다. upsert는 '새 업로드에 있는 행'만 갱신할 뿐 '새 업로드에서 빠진 행'은
@@ -7318,7 +7344,11 @@ def _ga4_signup_filter():
         field_name="eventName", in_list_filter=Filter.InListFilter(values=evs)))
 GA4_METRICS = ["totalUsers", "sessions", "transactions", "purchaseRevenue"]
 GA4_LOOKBACK_DAYS = 30      # 최초 연동 시 끌어올 기간
-GA4_RESYNC_TAIL_DAYS = 3    # GA는 하루이틀 뒤 값이 보정되므로 최근 며칠은 매번 다시 받아 덮어쓴다
+# GA4는 구매 귀속을 **며칠에 걸쳐 보정한다.** 3일만 다시 받았더니, 그 뒤에 GA4가
+# 취소·환불·재귀속으로 지운 구매가 우리 DB에만 남아 화면이 GA보다 커졌다
+# (9/1~9/20 메타: GA 95건 8,925,128원인데 화면은 96건 9,003,691원 — 차이가 딱 그 한 줄).
+# 일주일 이상 다시 받아 덮어쓴다.
+GA4_RESYNC_TAIL_DAYS = 8
 
 
 @st.cache_resource(show_spinner=False)
@@ -7711,6 +7741,9 @@ def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_ful
         return 0, None, None, f"GA4 조회 실패: {e}"
     if df.empty:
         return 0, start, end, "GA4에서 받아온 소재 데이터가 0행입니다"
+    # 받아온 다음에 지운다 — 조회가 실패했는데 먼저 지워버리면 데이터가 날아간다.
+    # 지우고 넣어야 GA4가 취소·재귀속으로 없앤 옛 행이 화면에서도 사라진다.
+    delete_ga_rows_in_range("ga_creative_daily", start, end)
     n = save_table("ga_creative_daily", df,
                    "report_date,source_medium,campaign,creative,user_type", "GA4 API")
     if not n:
@@ -7781,6 +7814,8 @@ def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full
         return 0, None, None, f"GA4 조회 실패: {e}"
     if df.empty:
         return 0, start, end, "GA4에서 받아온 데이터가 0행입니다 (속성ID/뷰어 권한 확인 필요)"
+    # 소재 쪽과 같은 이유로, 받아온 뒤 그 구간을 비우고 넣는다(사라진 행까지 반영).
+    delete_ga_rows_in_range("ga_channel_daily", start, end)
     n = save_table("ga_channel_daily", df, "report_date,source_medium,user_type", "GA4 API")
     if not n:
         return 0, start, end, (
@@ -13931,7 +13966,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         """화면 맨 아래 — 진단·설정. 성과표를 위로 올리려고 여기로 모았다."""
         st.markdown("---")
         st.caption("🛠️ 아래는 **진단·설정**입니다. 평소에는 안 보셔도 됩니다.")
-        for _fn in ("never", "source", "excluded", "folded", "alias",
+        for _fn in ("repull", "raw", "never", "source", "excluded", "folded", "alias",
                     "img_upload", "criteo"):
             _p = _panels.get(_fn)
             if _p:
@@ -14419,6 +14454,111 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             )
 
     _panels["excluded"] = _excluded_panel
+
+    def _raw_lookup_panel():
+        """화면 한 줄이 **어느 GA 원본 행들로 만들어졌는지** 그대로 펼쳐본다.
+
+        화면 숫자와 GA4 보고서가 안 맞을 때 추측으로 원인을 말하면 시간만 버린다.
+        소재명으로 찾아서 날짜·소스/매체·캠페인·utm_content를 그대로 보여주면
+        'GA 보고서에서 어떤 필터 때문에 빠졌는지'가 한 번에 드러난다.
+        """
+        with st.expander("🔍 소재 한 줄이 어디서 왔는지 보기 — GA 원본 행 그대로"):
+            st.caption(
+                "소재명 일부를 넣으면 `ga_creative_daily`(GA4에서 받아 저장한 원본)에서 "
+                "그 소재의 행을 **날짜·소스/매체·캠페인까지 그대로** 꺼내 보여줍니다. "
+                "GA4 보고서에 없는 줄이 화면에 있다면, 보고서 쪽 필터(소스/매체·기간)에서 "
+                "빠졌는지 여기서 바로 확인됩니다."
+            )
+            _q = st.text_input("소재명 · 캠페인명 검색", key="gc_raw_q",
+                               placeholder="예: 썸머울수트")
+            if not str(_q).strip():
+                return
+            _r = d[(d["report_date"] >= start) & (d["report_date"] <= end)].copy()
+            _m = pd.Series(False, index=_r.index)
+            for _col in ("creative", "campaign", "source_medium"):
+                if _col in _r.columns:
+                    _m = _m | _r[_col].astype(str).str.contains(
+                        str(_q).strip(), case=False, na=False, regex=False)
+            _r = _r[_m]
+            if _r.empty:
+                st.warning(
+                    f"이 기간({start}~{end}) 저장된 GA 원본에 **{_q}** 가 없습니다. "
+                    "기간을 넓혀보시거나, 화면 표의 이름이 **소재명 별칭**으로 "
+                    "바뀐 이름일 수 있습니다(아래 ✏️ 소재명 바꿔 보기에서 확인)."
+                )
+                return
+            for _c in ("sessions", "conversions", "revenue"):
+                if _c not in _r.columns:
+                    _r[_c] = 0.0
+                _r[_c] = pd.to_numeric(_r[_c], errors="coerce").fillna(0)
+            _view = _r[[c for c in ("report_date", "source_medium", "channel", "campaign",
+                                    "creative", "user_type", "sessions", "conversions",
+                                    "revenue") if c in _r.columns]].copy()
+            _view = _view.sort_values("revenue", ascending=False)
+            _view.columns = [{"report_date": "날짜", "source_medium": "소스/매체",
+                              "channel": "매체(UTM 매핑)", "campaign": "utm_campaign",
+                              "creative": "utm_content", "user_type": "신규/재방문",
+                              "sessions": "방문", "conversions": "구매",
+                              "revenue": "매출"}.get(c, c) for c in _view.columns]
+            st.dataframe(_view, use_container_width=True, hide_index=True)
+            st.success(
+                f"합계 — 구매 **{_r['conversions'].sum():,.0f}건** · "
+                f"매출 **{_r['revenue'].sum():,.0f}원** · "
+                f"소스/매체 {_r['source_medium'].nunique()}종 "
+                + " / ".join(f"`{s}`" for s in sorted(
+                    _r["source_medium"].astype(str).unique())[:6])
+            )
+            st.caption(
+                "여기 나온 **소스/매체**로 GA4에서 다시 보세요. 보고서를 특정 소스/매체 "
+                "하나로 걸러 받으셨다면, 다른 값으로 들어온 이 줄은 보고서에 안 나옵니다."
+            )
+
+    _panels["raw"] = _raw_lookup_panel
+
+    def _repull_panel():
+        """선택한 기간을 **지우고 다시 받는다.**
+
+        평소 동기화는 최근 며칠만 다시 받는다. 그보다 오래된 날짜에 GA4가 취소·환불·
+        재귀속으로 값을 바꿔놓으면, 우리 DB에만 옛 값이 남아 화면이 GA보다 커진다.
+        그 구간만 콕 집어 새로 받을 수단이 필요하다.
+        """
+        with st.expander("🔁 이 기간 GA 데이터 다시 받기 — 화면이 GA4 보고서와 다를 때"):
+            st.caption(
+                f"**{start} ~ {end}** 구간의 GA 데이터를 **지우고 새로** 받습니다. "
+                "GA4는 구매 귀속을 며칠에 걸쳐 바꾸고, 취소·환불이면 아예 지웁니다. "
+                "평소 동기화는 최근 며칠만 덮어쓰기 때문에 그보다 오래된 날짜는 옛 값이 "
+                "남습니다 — 화면이 GA4 보고서보다 클 때 여기를 누르시면 맞춰집니다."
+            )
+            if st.button("지우고 다시 받기", key="gc_repull", type="primary"):
+                _cmap = (build_utm_channel_lookup(utm_map)
+                         if utm_map is not None and not utm_map.empty else {})
+                with st.status(f"{start}~{end} 다시 받는 중...", expanded=True) as _st4:
+                    _ok = True
+                    for _kind, _tbl, _fetch, _key in (
+                        ("채널", "ga_channel_daily", fetch_ga4_channel_daily,
+                         "report_date,source_medium,user_type"),
+                        ("소재", "ga_creative_daily", fetch_ga4_creative_daily,
+                         "report_date,source_medium,campaign,creative,user_type"),
+                    ):
+                        st.write(f"{_kind} 데이터 조회 중…")
+                        try:
+                            _df = _fetch(start, end, _cmap)
+                        except Exception as _e:
+                            st.write(f"   ⚠️ 실패 — {str(_e)[:160]}")
+                            _ok = False
+                            continue
+                        if _df is None or _df.empty:
+                            st.write("   ⚠️ 받아온 행이 0개라 기존 데이터를 그대로 둡니다.")
+                            continue
+                        delete_ga_rows_in_range(_tbl, start, end)
+                        _n = save_table(_tbl, _df, _key, "GA4 기간 재수집")
+                        st.write(f"   ✅ {_n:,}행으로 교체")
+                    _st4.update(label="다시 받기 완료" if _ok else "일부 실패",
+                                state="complete" if _ok else "error")
+                st.cache_data.clear()
+                st.rerun()
+
+    _panels["repull"] = _repull_panel
 
     show_img = (level == "소재")
     head = list(GC_HEAD)
