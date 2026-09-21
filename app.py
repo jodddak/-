@@ -14073,6 +14073,134 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _chan_rev[_t] = float(_sub["revenue"].sum())
                 _chan_conv[_t] = float(_sub["conversions"].sum())
 
+    # ── 차이의 '범인'을 소스/매체 단위로 집어낸다 ───────────────────
+    # 두 화면은 소스/매체를 매체 이름으로 바꾸는 **표가 서로 다르다.**
+    #   채널 성과 : 매체 정의(media_master)의 utm_match
+    #   이 화면   : UTM 리스트 파일(utm_channel_map) 매핑
+    # 한쪽에만 등록된 값이 있으면, 그 값으로 들어온 주문이 한쪽에서만 잡힌다.
+    # 숫자만 '몇 % 다릅니다' 하고 끝내면 어디를 고쳐야 할지 알 수가 없어서,
+    # 소스/매체별로 두 표를 나란히 놓고 매핑까지 같이 보여준다.
+    def _norm_sm(s):
+        return "".join(str(s or "").lower().split())
+
+    _mm_exact, _mm_partial = {}, []
+    try:
+        _mst_df = media_master_frame(load_table("media_master"))
+    except Exception:
+        _mst_df = None
+    if _mst_df is not None and not _mst_df.empty:
+        for _, _m in _mst_df.sort_values("sort_order").iterrows():
+            for _kw in str(_m.get("utm_match") or "").split(","):
+                _kw = _norm_sm(_kw)
+                if _kw:
+                    _mm_exact.setdefault(_kw, _m["media"])
+                    _mm_partial.append((len(_kw), _kw, _m["media"]))
+        _mm_partial.sort(key=lambda x: -x[0])
+
+    def _media_by_master(sm):
+        """채널 성과가 쓰는 규칙 — 완전일치 먼저, 그다음 부분일치(긴 것부터)."""
+        k = _norm_sm(sm)
+        if k in _mm_exact:
+            return _mm_exact[k]
+        for _, _kw, _mm in _mm_partial:
+            if _kw in k:
+                return _mm
+        return None
+
+    # 소스/매체별 GA 매출·구매 — 두 표에서 각각
+    _sm_chan, _sm_cre = {}, {}
+    if _cd is not None and not _cd.empty and "source_medium" in _cd.columns:
+        _c2 = _cd.copy()
+        _c2["_d"] = pd.to_datetime(_c2.get("report_date"), errors="coerce").dt.date
+        _c2 = _c2[(_c2["_d"] >= start) & (_c2["_d"] <= end)]
+        for _col in ("conversions", "revenue"):
+            _c2[_col] = pd.to_numeric(_c2.get(_col), errors="coerce").fillna(0)
+        for _sm, _sub in _c2.groupby(_c2["source_medium"].astype(str).str.strip()):
+            _sm_chan[_sm] = {"conv": float(_sub["conversions"].sum()),
+                             "rev": float(_sub["revenue"].sum())}
+    if "source_medium" in _in_period.columns:
+        _p2 = _in_period.copy()
+        for _col in ("conversions", "revenue"):
+            if _col not in _p2.columns:
+                _p2[_col] = 0.0
+            _p2[_col] = pd.to_numeric(_p2[_col], errors="coerce").fillna(0)
+        for _sm, _sub in _p2.groupby(_p2["source_medium"].astype(str).str.strip()):
+            _sm_cre[_sm] = {"conv": float(_sub["conversions"].sum()),
+                            "rev": float(_sub["revenue"].sum())}
+
+    def _gap_panel(label: str, tot_rev: float, tot_conv: float):
+        """코멘트 바로 아래 — 채널 성과와 얼마나, 왜 다른지."""
+        _cr = float(_chan_rev.get(label, 0) or 0)
+        _cc = float(_chan_conv.get(label, 0) or 0)
+        if _cr <= 0:
+            return
+        _gap = _cr - tot_rev
+        if abs(_gap) / _cr < 0.005:      # 0.5% 안쪽이면 굳이 안 띄운다
+            return
+        _bigger = "채널 성과" if _gap > 0 else "이 표"
+        with st.expander(
+                f"📐 채널 성과와 **{abs(_gap):,.0f}원** 차이 "
+                f"({abs(_gap) / _cr * 100:.1f}% · {_bigger}가 큼) — 어느 소스/매체 때문인지 보기"):
+            st.markdown(
+                f"| | GA 구매 | GA 매출 |\n|---|---|---|\n"
+                f"| 채널 성과 · {label} | {_cc:,.0f}건 | {_cr:,.0f}원 |\n"
+                f"| 이 표 합계 | {tot_conv:,.0f}건 | {tot_rev:,.0f}원 |\n"
+                f"| **차이** | **{_cc - tot_conv:+,.0f}건** | **{_gap:+,.0f}원** |"
+            )
+            # 두 매핑 중 하나라도 이 탭으로 보내는 소스/매체를 모두 모은다
+            _keys = set(_sm_chan) | set(_sm_cre)
+            _rows = []
+            for _sm in _keys:
+                _mb = _media_by_master(_sm)                     # 채널 성과 규칙
+                # 이 화면 규칙 — lookup 키는 strip().lower()까지만 한다(안쪽 공백은 살아 있다).
+                # 여기서 _norm_sm을 쓰면 'naver / gfa'가 절대 안 맞는다.
+                _ml = lookup.get(str(_sm).strip().lower()) if lookup else None
+                _tb = _gc_channel(_mb) if _mb else None
+                _tl = _gc_channel(_ml) if _ml else None
+                if _tb != label and _tl != label:
+                    continue
+                _a = _sm_chan.get(_sm, {"conv": 0.0, "rev": 0.0})
+                _b = _sm_cre.get(_sm, {"conv": 0.0, "rev": 0.0})
+                _rows.append({
+                    "소스/매체": _sm,
+                    "채널 성과 매체": _mb or "— (매핑 없음)",
+                    "소재별 매체": _ml or "— (매핑 없음)",
+                    "채널 매출": round(_a["rev"]),
+                    "소재 매출": round(_b["rev"]),
+                    "매출 차이": round(_a["rev"] - _b["rev"]),
+                    "매핑": "✅ 같음" if (_mb or "") == (_ml or "") else "⚠️ 다름",
+                })
+            if not _rows:
+                st.caption(
+                    "이 탭은 utm_campaign으로 기기(PC/MO)를 갈라 만든 탭이라 "
+                    "소스/매체 단위로는 짝을 지을 수 없습니다. "
+                    "합친 매체 탭에서 보세요."
+                )
+                return
+            _df = pd.DataFrame(_rows).sort_values("매출 차이", key=lambda s: s.abs(),
+                                                  ascending=False)
+            st.dataframe(_df, use_container_width=True, hide_index=True)
+            _bad = [r for r in _rows if r["매핑"] == "⚠️ 다름"]
+            if _bad:
+                st.warning(
+                    "**매핑이 다른 소스/매체가 있습니다** — "
+                    + ", ".join(f"`{r['소스/매체']}`" for r in _bad[:5])
+                    + ". 채널 성과는 **매체 정의의 utm_match**, 이 화면은 "
+                    "**UTM 리스트 파일**을 봅니다. 둘 중 빠진 쪽에 이 값을 넣어주시면 "
+                    "차이가 사라집니다 (채널 성과 → ⚙️ 매체 정의 / 사이드바 → UTM 리스트)."
+                )
+            else:
+                st.caption(
+                    "매핑은 양쪽이 같습니다. 그러면 남는 원인은 **GA4가 행을 묶는 방식**입니다 — "
+                    "이 화면은 캠페인·소재·utm_id까지 쪼개서 묻는데, 차원이 늘면 GA4가 행 수 "
+                    "한도 때문에 일부를 '(기타)'로 묶어버려 소재를 못 가리는 줄이 빠집니다. "
+                    "없앨 수 있는 차이가 아니라, **매체 총액은 채널 성과를** 보시면 됩니다."
+                )
+            st.caption(
+                "※ 마케팅팀·VIBESHIFT 같은 제외 대상은 두 화면에서 **같은 금액이** 빠지므로 "
+                "이 차이와는 무관합니다. 위 표는 빼기 전 원본 기준입니다."
+            )
+
     _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
     _media_ch = {k[0] for k in media_map}
 
@@ -14500,6 +14628,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             rows["_name"] = rows["cre_title"] if show_img else rows["key"]
             tot_cost = float(rows["_cost"].sum())
             tot_rev = float(rows["rev"].sum())
+            tot_conv = float(pd.to_numeric(rows["conv"], errors="coerce").fillna(0).sum())
             # 평균 ROAS의 분모에는 GA 매칭 안 된 소재의 광고비도 들어가야 한다 — 돈은 나갔으니까.
             _lo = {"impressions": 0.0, "clicks": 0.0, "cost": 0.0, "media_conv": 0.0}
             for _, m in leftovers:
@@ -14545,20 +14674,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 f"광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
                 f"미만이면 판단 보류"))
 
-            # 채널 성과 탭과 GA 매출이 얼마나 벌어지는지 — 숨기면 '왜 다르지'가 된다.
-            _cr = float(_chan_rev.get(label, 0) or 0)
-            if _cr > 0 and not _media_basis:
-                _gap = _cr - tot_rev
-                if abs(_gap) / _cr >= 0.005:      # 0.5% 넘게 벌어질 때만
-                    notes.append((
-                        "caption",
-                        f"📐 **채널 성과 탭의 {label} GA 매출은 {_cr:,.0f}원**입니다 — "
-                        f"이 표 합계({tot_rev:,.0f}원)보다 {abs(_gap):,.0f}원"
-                        f"({abs(_gap) / _cr * 100:.1f}%) {'큽니다' if _gap > 0 else '작습니다'}. "
-                        "두 화면이 GA4에 묻는 단위가 달라서 그렇습니다 — 여기서는 "
-                        "캠페인·소재까지 쪼개서 묻는데, 그러면 GA4가 행 수 한도 때문에 "
-                        "일부를 '(기타)'로 묶어버려 소재를 못 가리는 줄이 빠집니다. "
-                        "**매체 총액은 채널 성과를, 소재끼리 비교는 이 표를** 보세요."))
+            # 채널 성과와의 차이는 코멘트 바로 밑에서 따로 그린다(_gap_panel).
             cmt = None
             if not rows.empty:
                 # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
@@ -14687,6 +14803,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 표 위에 둔다. 기준 설명·차이 안내만 표 아래로 내렸다.
             if cmt:
                 st.markdown(cmt, unsafe_allow_html=True)
+            # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
+            if not _media_basis:
+                _gap_panel(label, tot_rev, tot_conv)
             st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
                                   scrolling=False)
 
