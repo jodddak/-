@@ -9047,25 +9047,45 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
 
 
 def _meta_account_spend_rows(ch: str, acct: str, start: date, end: date) -> list:
-    """계정 하나의 일별 광고비 행. 실패하면 예외를 그대로 올린다(호출부가 계정별로 잡는다)."""
-    rows = []
+    """계정 하나의 일별 광고비 행. 실패하면 예외를 그대로 올린다(호출부가 계정별로 잡는다).
+
+    **캠페인 단위로 받아서 제외 대상(마케팅팀·VIBESHIFT 등)을 걸러낸 뒤 날짜로 합친다.**
+    예전엔 level=account로 계정 총액을 받았는데, 같은 계정에 섞여 있는 다른 팀 캠페인
+    광고비까지 온라인팀 광고비로 잡혔다(구글은 이미 캠페인 단위로 걸러내고 있었다).
+    """
+    agg, dropped = {}, {}
     for d in _meta_insights(acct, {
         # clicks는 좋아요·프로필 클릭까지 포함한 '전체 클릭'이라 광고관리자 화면(링크 클릭)과
         # 숫자가 다르다. actions에서 link_click을 꺼내 쓴다.
-        "fields": "spend,impressions,clicks,actions",
-        "level": "account",
+        "fields": "campaign_name,spend,impressions,clicks,actions",
+        "level": "campaign",
         "time_increment": 1,
         "time_range": json.dumps({"since": str(start), "until": str(end)}),
     }):
-        rows.append({
-            "report_date": d.get("date_start"), "channel": ch,
+        _cost = float(d.get("spend") or 0) * 1.1
+        if _google_campaign_excluded(d.get("campaign_name")):
+            _cn = str(d.get("campaign_name") or "")
+            dropped[_cn] = dropped.get(_cn, 0.0) + _cost
+            continue
+        _k = d.get("date_start")
+        if not _k:
+            continue
+        a = agg.setdefault(_k, {
+            "report_date": _k, "channel": ch, "source": "meta_api",
             # 메타도 국내는 VAT 별도 청구라 insights의 spend는 VAT 제외 금액이다.
             # 네이버·구글·크리테오·GFA와 단위를 맞추려면 1.1을 곱해야 한다.
-            "cost_incl_vat": float(d.get("spend") or 0) * 1.1, "source": "meta_api",
-            "impressions": float(d.get("impressions") or 0),
-            "clicks": _meta_link_clicks(d),
-        })
-    return rows
+            "cost_incl_vat": 0.0, "impressions": 0.0, "clicks": 0.0})
+        a["cost_incl_vat"] += _cost
+        a["impressions"] += float(d.get("impressions") or 0)
+        a["clicks"] += _meta_link_clicks(d)
+    if dropped:
+        # 무엇이 얼마나 빠졌는지 남긴다 — 조용히 빼면 '메타 광고비가 왜 줄었지'가 된다.
+        try:
+            st.session_state.setdefault("meta_excluded_campaigns", {}).update(
+                {f"{ch} · {k}": v for k, v in dropped.items()})
+        except Exception:
+            pass
+    return list(agg.values())
 
 
 # 구글애즈 API 버전 탐색 범위. 구글은 대략 분기마다 버전을 올리고 1년 남짓 지나면 폐기한다.
@@ -9076,18 +9096,29 @@ GOOGLE_ADS_VER_MIN = 18
 # 이 대시보드는 온라인팀 성과만 봐야 하므로 마케팅팀 캠페인은 광고비·노출·클릭
 # 어느 것도 가져오지 않는다. (계정 전체로 받던 시절엔 PMax_마케팅팀 광고비
 # 528,423원이 같이 들어와서 구글 ROAS가 실제보다 낮게 나왔다.)
-# 캠페인 이름에 아래 단어가 하나라도 들어 있으면 제외한다. 대소문자·공백은 무시.
-# Secrets [google_ads] exclude_campaigns = "마케팅팀,테스트" 로 덮어쓸 수 있다.
-GOOGLE_ADS_EXCLUDE_DEFAULT = "마케팅팀"
+#
+# **구글만의 이야기가 아니다.** 메타에도 마케팅팀 캠페인(VIBESHIFT)이 같은 계정에
+# 섞여 있어서 GA 매출 1,519,840원이 온라인팀 성과로 잡혔다. 그래서 이 목록은
+# 구글·메타·GA 어느 쪽이든 **캠페인 이름 또는 소재 이름**에 걸리면 빼는 데 쓴다.
+#
+# 이름에 아래 단어가 하나라도 들어 있으면 제외한다. 대소문자·공백은 무시.
+# Secrets [google_ads] exclude_campaigns = "테스트,이벤트" 로 **더 추가**할 수 있다
+# (아래 기본 목록은 Secrets를 적어도 항상 함께 적용된다 — 빼먹으면 조용히 섞인다).
+GOOGLE_ADS_EXCLUDE_DEFAULT = "마케팅팀,VIBESHIFT"
 
 
 def _google_ads_exclude_words() -> list:
     cfg = _secrets_section("google_ads") or {}
-    raw = str(cfg.get("exclude_campaigns") or GOOGLE_ADS_EXCLUDE_DEFAULT)
-    return [w.strip().lower() for w in raw.split(",") if w.strip()]
+    words = [w.strip().lower() for w in GOOGLE_ADS_EXCLUDE_DEFAULT.split(",") if w.strip()]
+    for w in str(cfg.get("exclude_campaigns") or "").split(","):
+        w = w.strip().lower()
+        if w and w not in words:
+            words.append(w)
+    return words
 
 
 def _google_campaign_excluded(name) -> bool:
+    """캠페인·소재 이름이 제외 대상인가 (구글 전용이 아니라 전 매체 공통)."""
     n = "".join(str(name or "").lower().split())
     return any(w.replace(" ", "") in n for w in _google_ads_exclude_words())
 
@@ -9816,11 +9847,16 @@ def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
     for ch, acct in _meta_accounts():
         try:
             for d in _meta_insights(acct, {
-                "fields": "ad_name,spend,impressions,clicks,actions,action_values",
+                "fields": ("campaign_name,ad_name,spend,impressions,clicks,"
+                           "actions,action_values"),
                 "level": "ad",                     # ← 계정이 아니라 광고 단위
                 "time_increment": 1,
                 "time_range": json.dumps({"since": str(start), "until": str(end)}),
             }, timeout=90):
+                # 다른 팀 캠페인(마케팅팀·VIBESHIFT 등)은 소재도 가져오지 않는다.
+                if (_google_campaign_excluded(d.get("campaign_name"))
+                        or _google_campaign_excluded(d.get("ad_name"))):
+                    continue
                 rows.append({
                     "report_date": d.get("date_start"), "channel": ch,
                     "creative": str(d.get("ad_name") or "").strip(),
@@ -11902,6 +11938,16 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "ℹ️ 온라인팀 성과가 아니라서 **광고비와 매출을 같이 뺀 것**: "
             + " / ".join(_bits)
             + " — GA4에서 직접 보시면 이 금액이 포함돼 있어 숫자가 더 큽니다."
+        )
+
+    # 메타 광고비에서 캠페인 단위로 빼낸 것 (같은 계정에 다른 팀 캠페인이 있을 때)
+    _mx = st.session_state.get("meta_excluded_campaigns") or {}
+    if _mx:
+        st.caption(
+            "ℹ️ 메타 광고비에서 뺀 캠페인 — "
+            + " / ".join(f"**{k}** {v:,.0f}원"
+                         for k, v in sorted(_mx.items(), key=lambda kv: -kv[1])[:5])
+            + " (가장 최근 동기화 기준)"
         )
 
     # ── 구분 필터 (KPI보다 위) ────────────────────────────
