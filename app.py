@@ -7350,6 +7350,12 @@ GA4_LOOKBACK_DAYS = 30      # 최초 연동 시 끌어올 기간
 # 일주일 이상 다시 받아 덮어쓴다.
 GA4_RESYNC_TAIL_DAYS = 8
 
+# 그래도 8일 바깥에서 값이 바뀌면 못 잡는다(환불은 한참 뒤에도 일어난다).
+# 그래서 **하루에 한 번**은 이 기간을 통째로 지우고 다시 받는다.
+# 35일로 잡은 이유: GA4 어트리뷰션 창이 최대 30일이고, 월말 주문이 다음 달 초에
+# 취소되는 경우까지 덮으려면 한 달을 조금 넘겨야 한다.
+GA4_DEEP_RESYNC_DAYS = 35
+
 
 @st.cache_resource(show_spinner=False)
 def _build_ga4_client(sa_json: str):
@@ -7722,17 +7728,67 @@ def render_ga4_signup_check(start: date, end: date):
                 )
 
 
+def _ga4_deep_due(key: str) -> bool:
+    """오늘 이미 '통째로 다시 받기'를 했는가.
+
+    기록은 mail_log 표를 같이 쓴다(이미 만들어 쓰고 있는 표다 — 표를 하나 더 만들게 하면
+    그 SQL을 안 돌린 채로 몇 주가 지나간다). 표가 없거나 접근이 안 되면 **세션당 한 번**으로
+    물러난다 — 아예 안 하는 것보다 낫다.
+    """
+    today = str(date.today())
+    tag = f"ga4_deep:{key}:{today}"
+    ss = st.session_state.setdefault("_ga4_deep_done", set())
+    if tag in ss:
+        return False
+    client = get_supabase_client()
+    if client is None:
+        ss.add(tag)
+        return True
+    try:
+        r = (client.table(TABLES.get("mail_log", "mail_log"))
+             .select("report_key").eq("report_key", tag).limit(1).execute())
+        if getattr(r, "data", None):
+            ss.add(tag)
+            return False
+    except Exception:
+        ss.add(tag)          # 표가 없으면 세션당 한 번
+        return True
+    return True
+
+
+def _ga4_deep_mark(key: str):
+    """통째로 다시 받기를 마쳤다고 남긴다(같은 날 또 돌지 않게)."""
+    today = str(date.today())
+    tag = f"ga4_deep:{key}:{today}"
+    st.session_state.setdefault("_ga4_deep_done", set()).add(tag)
+    client = get_supabase_client()
+    if client is None:
+        return
+    try:
+        client.table(TABLES.get("mail_log", "mail_log")).upsert(
+            {"report_key": tag, "subject": f"GA4 {key} {GA4_DEEP_RESYNC_DAYS}일 재수집"},
+            on_conflict="report_key").execute()
+    except Exception:
+        pass                 # 기록을 못 남겨도 동기화 자체는 이미 끝났다
+
+
 def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_full: bool = False):
     """소재별 GA 데이터 동기화. 채널용과 같은 규칙(어제까지, 최근 며칠 재수집)으로 돈다."""
     client, err = get_ga4_client()
     if client is None:
         return 0, None, None, err
     end = date.today() - timedelta(days=1)
+    _deep = False
     if force_full or existing is None or existing.empty or "report_date" not in existing.columns:
         start = end - timedelta(days=GA4_LOOKBACK_DAYS - 1)
     else:
         last = pd.to_datetime(existing["report_date"]).max().date()
         start = min(last - timedelta(days=GA4_RESYNC_TAIL_DAYS - 1), end)
+        # 하루 한 번은 한 달치를 통째로 다시 받는다 — 8일 바깥에서 일어난
+        # 취소·환불·재귀속은 꼬리 재수집으로는 영영 못 잡는다.
+        if _ga4_deep_due("creative"):
+            start = min(start, end - timedelta(days=GA4_DEEP_RESYNC_DAYS - 1))
+            _deep = True
     if start > end:
         return 0, None, None, None
     try:
@@ -7751,6 +7807,8 @@ def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_ful
             "GA4에서 데이터는 받았지만 저장에 실패했습니다 — "
             "ga_creative_daily 테이블이 없을 수 있습니다(배포 SQL 실행 필요)"
         )
+    if _deep:
+        _ga4_deep_mark("creative")
     return n, start, end, None
 
 
@@ -7801,11 +7859,15 @@ def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full
         return 0, None, None, err
     today = date.today()
     end = today - timedelta(days=1)          # 어제까지 (오늘은 아직 집계 중이라 제외)
+    _deep = False
     if force_full or existing is None or existing.empty or "report_date" not in existing.columns:
         start = end - timedelta(days=GA4_LOOKBACK_DAYS - 1)
     else:
         last = pd.to_datetime(existing["report_date"]).max().date()
         start = min(last - timedelta(days=GA4_RESYNC_TAIL_DAYS - 1), end)
+        if _ga4_deep_due("channel"):         # 하루 한 번 한 달치 통째로
+            start = min(start, end - timedelta(days=GA4_DEEP_RESYNC_DAYS - 1))
+            _deep = True
     if start > end:
         return 0, None, None, None
     try:
@@ -7822,6 +7884,8 @@ def sync_ga4_channel_daily(existing: pd.DataFrame, channel_map: dict, force_full
             "GA4에서 데이터는 받았지만 Supabase 저장에 실패했습니다 — "
             "ga_channel_daily 테이블이 없을 수 있습니다(ga4_tables.sql 실행 필요)"
         )
+    if _deep:
+        _ga4_deep_mark("channel")
     return n, start, end, None
 
 
