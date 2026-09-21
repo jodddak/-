@@ -624,22 +624,26 @@ def inject_theme():
            옛 버전(button[data-baseweb="tab"])도 같이 적어둔다. 둘 중 있는 쪽만 먹는다. */
         [data-testid="stTabs"] [role="tablist"],
         div[data-baseweb="tab-list"] {{
-            gap: 7px !important;
+            gap: 8px !important;
+            row-gap: 9px !important;           /* 두 줄로 넘어갈 때 줄끼리 붙지 않게 */
             flex-wrap: wrap !important;        /* 잘리는 대신 다음 줄로 */
             overflow-x: visible !important;
             border-bottom: none !important;
             box-shadow: none !important;
-            padding-bottom: 2px;
+            margin-bottom: 16px !important;    /* 아래 표와 딱 붙어 보이던 것 띄움 */
+            padding-bottom: 0 !important;
         }}
+        [data-testid="stTabPanel"] {{ padding-top: 6px !important; }}
         [data-testid="stTab"],
         button[data-baseweb="tab"] {{
             height: auto !important; min-height: 0 !important;
             padding: 8px 15px !important; margin: 0 !important;
             border-radius: 10px !important;
-            /* 선택 안 된 탭은 중립 회색. weak_bg(연한 파랑)를 쓰면 전부 활성처럼 보인다 */
-            background: {THEME_COLORS["surface"]} !important;
-            border: 1px solid {THEME_COLORS["border"]} !important;
-            color: {THEME_COLORS["body"]} !important;
+            /* 선택 안 된 탭은 연노랑. 회색은 화면 배경과 섞여 '칸'으로 안 보였고,
+               연한 파랑(weak_bg)은 전부 선택된 것처럼 보여서 노랑으로 갔다. */
+            background: #FFF8E5 !important;
+            border: 1px solid #F0E2BC !important;
+            color: #6B5E3C !important;
             font-family: {THEME_FONT_STACK} !important;
             font-weight: 600 !important; font-size: 13.5px !important;
             white-space: nowrap;
@@ -647,9 +651,9 @@ def inject_theme():
         }}
         [data-testid="stTab"]:hover,
         button[data-baseweb="tab"]:hover {{
-            background: {THEME_COLORS["weak_bg"]} !important;
-            border-color: {THEME_COLORS["primary"]} !important;
-            color: {THEME_COLORS["primary"]} !important;
+            background: #FDEFC8 !important;
+            border-color: #E0C979 !important;
+            color: #5A4E2E !important;
         }}
         [data-testid="stTab"][aria-selected="true"],
         button[data-baseweb="tab"][aria-selected="true"] {{
