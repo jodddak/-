@@ -630,8 +630,16 @@ def inject_theme():
             overflow-x: visible !important;
             border-bottom: none !important;
             box-shadow: none !important;
-            margin-bottom: 16px !important;    /* 아래 표와 딱 붙어 보이던 것 띄움 */
+            margin-bottom: 20px !important;    /* 아래 내용과 딱 붙어 보이던 것 띄움 */
             padding-bottom: 0 !important;
+        }}
+        /* ⚠️ 탭 아래 회색 줄은 border가 아니라 **tablist의 ::after** 로 그려진다.
+           (높이 2px · 반투명 회색) border-bottom:none 으로는 안 지워져서,
+           칸 바로 밑에 줄이 딱 붙어 보였다. 선택 표시를 배경색으로 바꿨으니 줄은 뺀다. */
+        [data-testid="stTabs"] [role="tablist"]::after,
+        [data-testid="stTabs"] [role="tablist"]::before {{
+            display: none !important; content: none !important;
+            height: 0 !important; background: transparent !important;
         }}
         [data-testid="stTabPanel"] {{ padding-top: 6px !important; }}
         [data-testid="stTab"],
