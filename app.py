@@ -14637,12 +14637,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 예전 값(116/44 · 460 · 상한 2200)은 줄 높이를 낮게 잡아 안쪽에 스크롤바가
             # 생겼다. 안쪽 바 없이 페이지째로 내려 보게 넉넉히 준다.
             row_h = 157 if show_img else 59
+            # 판정 코멘트(우수·부진 개수 + 다음 액션)는 '읽을 거리'가 아니라 결론이라
+            # 표 위에 둔다. 기준 설명·차이 안내만 표 아래로 내렸다.
+            if cmt:
+                st.markdown(cmt, unsafe_allow_html=True)
             st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
                                   scrolling=False)
 
-            # ── 표 아래 ── 판정 코멘트 → 경고·안내 → 읽는 법
-            if cmt:
-                st.markdown(cmt, unsafe_allow_html=True)
+            # ── 표 아래 ── 경고·안내 → 읽는 법
             for _kind, _txt in notes:
                 if _kind == "info":
                     st.info(_txt)
