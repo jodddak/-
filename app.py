@@ -614,27 +614,27 @@ def inject_theme():
            매체 탭이 11개까지 늘면서 기본 밑줄 탭으로는 양끝이 잘리고, 어느 게 선택된
            건지도 밑줄 하나로만 구분돼 잘 안 보였다. 알약 버튼으로 바꾸고 줄바꿈을
            허용해서, 개수가 늘어도 다 보이고 선택된 탭이 한눈에 들어오게 한다. */
-        /* 선택자를 testid에 묶지 않는다 — 스트림릿 버전에 따라 stTabs가 안 붙을 때가
-           있어서 스타일이 통째로 안 먹는다. baseweb 속성만 보면 버전을 안 탄다. */
+        /* ── 탭을 알약 버튼으로 ──
+           ⚠️ 선택자 주의. 이 앱의 스트림릿은 탭을 **<div data-testid="stTab">** 로 그린다.
+           <button data-baseweb="tab"> 이 아니다 — 실제 DOM을 찍어서 확인한 값이다.
+             div[role="tablist"]                      flex · overflow-x:auto · nowrap
+              └ div[data-testid="stTab"][aria-selected]
+                 ├ div[data-testid="stMarkdownContainer"] > p   ← 글자
+                 └ div                                          ← 밑줄 표시줄
+           옛 버전(button[data-baseweb="tab"])도 같이 적어둔다. 둘 중 있는 쪽만 먹는다. */
+        [data-testid="stTabs"] [role="tablist"],
         div[data-baseweb="tab-list"] {{
             gap: 7px !important;
-            flex-wrap: wrap !important;      /* 잘리는 대신 다음 줄로 */
-            overflow: visible !important;
+            flex-wrap: wrap !important;        /* 잘리는 대신 다음 줄로 */
+            overflow-x: visible !important;
             border-bottom: none !important;
             box-shadow: none !important;
             padding-bottom: 2px;
         }}
-        /* 탭을 가로 스크롤로 감싸는 래퍼가 있으면 그것도 풀어준다 */
-        div[data-baseweb="tab-list"] > div {{ overflow: visible !important; }}
-        /* 기본 밑줄 하이라이트 제거 — 버튼 배경으로 선택을 표시한다 */
-        [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{
-            display: none !important; background: transparent !important;
-        }}
+        [data-testid="stTab"],
         button[data-baseweb="tab"] {{
-            height: auto !important;
-            min-height: 0 !important;
-            padding: 8px 15px !important;
-            margin: 0 !important;
+            height: auto !important; min-height: 0 !important;
+            padding: 8px 15px !important; margin: 0 !important;
             border-radius: 10px !important;
             /* 선택 안 된 탭은 중립 회색. weak_bg(연한 파랑)를 쓰면 전부 활성처럼 보인다 */
             background: {THEME_COLORS["surface"]} !important;
@@ -645,23 +645,31 @@ def inject_theme():
             white-space: nowrap;
             transition: background .12s, color .12s, border-color .12s;
         }}
+        [data-testid="stTab"]:hover,
         button[data-baseweb="tab"]:hover {{
             background: {THEME_COLORS["weak_bg"]} !important;
             border-color: {THEME_COLORS["primary"]} !important;
             color: {THEME_COLORS["primary"]} !important;
         }}
+        [data-testid="stTab"][aria-selected="true"],
         button[data-baseweb="tab"][aria-selected="true"] {{
             background: {THEME_COLORS["foreground"]} !important;
             border-color: {THEME_COLORS["foreground"]} !important;
             color: #FFFFFF !important;
         }}
-        /* 탭 글자는 <p>로 한 겹 더 감싸여 나온다 — 거기까지 안 맞추면
-           색·굵기·글씨체가 겉돌아서 버튼만 바뀌고 글자는 그대로 보인다 */
-        button[data-baseweb="tab"] [data-testid="stMarkdownContainer"],
-        button[data-baseweb="tab"] p {{
+        /* 글자는 <p>로 한 겹 더 싸여 나온다 — 여기까지 안 맞추면 버튼만 바뀌고
+           글자 색·굵기는 그대로 남는다 */
+        [data-testid="stTab"] [data-testid="stMarkdownContainer"] p,
+        button[data-baseweb="tab"] [data-testid="stMarkdownContainer"] p {{
             font-family: {THEME_FONT_STACK} !important;
             font-size: 13.5px !important; font-weight: 600 !important;
             color: inherit !important; margin: 0 !important; line-height: 1.2 !important;
+        }}
+        /* 선택 표시는 배경색으로 하므로 기본 밑줄 막대는 지운다
+           (stTab 안의 마지막 빈 div가 그 막대다) */
+        [data-testid="stTab"] > div:last-child:not([data-testid]),
+        [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{
+            display: none !important; background: transparent !important;
         }}
 
         [data-testid="stPopover"] {{ width: fit-content !important; }}
