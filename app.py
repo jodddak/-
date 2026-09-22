@@ -15672,12 +15672,38 @@ def render_ga_channel_funnel_page(
         agg_sp = lambda col: sum(float(spend_map.get(c, {}).get(col, 0) or 0) for c in ad_media)
         ad_imp, ad_clk, ad_cost = agg_sp("impressions"), agg_sp("clicks"), agg_sp("cost_incl_vat")
 
+        # ── 맨즈탭(정액 보장형)은 이 퍼널에서만 뺀다 ──────────────
+        # 맨즈탭 노출은 4억이 넘어 광고 노출 전체의 98.6%를 혼자 차지한다. 그대로 두면
+        # 노출→클릭이 0.0%로 찍혀서 첫 칸이 판단에 아무 쓸모가 없다(실제 나머지 매체 CTR은 1%대).
+        # 보장형 노출은 경매형 노출과 성격이 아예 달라서 한 칸에 같이 세면 안 되는 숫자다.
+        #
+        # **노출만 빼면 안 된다** — 클릭·방문은 남아서 CTR이 이번엔 거꾸로 부풀고,
+        # 클릭→방문이 100%를 넘는 그림이 나온다. 그래서 **다섯 칸 전부에서** 뺀다.
+        # 아래 매체별 표와 TOTAL, 위 KPI는 그대로 둔다 — 거기서는 맨즈탭도 실적이다.
+        _fx_ch = [c for c in ad_media if "맨즈탭" in str(c)]
+        _fx = {k: 0.0 for k in ("imp", "clk", "cost", "new", "ret",
+                                "signup", "new_conv", "ret_conv")}
+        for _c in _fx_ch:
+            _sp = spend_map.get(_c, {})
+            _fx["imp"] += float(_sp.get("impressions", 0) or 0)
+            _fx["clk"] += float(_sp.get("clicks", 0) or 0)
+            _fx["cost"] += float(_sp.get("cost_incl_vat", 0) or 0)
+            _mr = media[media["key"] == _c]
+            if not _mr.empty:
+                for _k in ("new", "ret", "signup", "new_conv", "ret_conv"):
+                    _fx[_k] += float(_mr.iloc[0].get(_k, 0) or 0)
+
+        def _ex(v, key):
+            return max(0.0, float(v or 0) - _fx[key])
+
+        f_imp, f_clk = _ex(ad_imp, "imp"), _ex(ad_clk, "clk")
+
         if is_new:
             stages = [
-                ("노출", ad_imp), ("클릭", ad_clk),
-                ("신규 방문", float(ad_row["new"]) if ad_row is not None else 0),
-                ("회원가입", float(ad_row["signup"]) if ad_row is not None else 0),
-                ("첫구매", float(ad_row["new_conv"]) if ad_row is not None else 0),
+                ("노출", f_imp), ("클릭", f_clk),
+                ("신규 방문", _ex(ad_row["new"] if ad_row is not None else 0, "new")),
+                ("회원가입", _ex(ad_row["signup"] if ad_row is not None else 0, "signup")),
+                ("첫구매", _ex(ad_row["new_conv"] if ad_row is not None else 0, "new_conv")),
             ]
             bench = FUNNEL_BENCHMARK_NEW
             badge, title = "ACQUISITION", "노출에서 첫구매까지"
@@ -15687,9 +15713,9 @@ def render_ga_channel_funnel_page(
             head, rowfn = HEAD_NEW, _v4_row_new
         else:
             stages = [
-                ("재노출", ad_imp), ("재클릭", ad_clk),
-                ("재방문", float(ad_row["ret"]) if ad_row is not None else 0),
-                ("재구매", float(ad_row["ret_conv"]) if ad_row is not None else 0),
+                ("재노출", f_imp), ("재클릭", f_clk),
+                ("재방문", _ex(ad_row["ret"] if ad_row is not None else 0, "ret")),
+                ("재구매", _ex(ad_row["ret_conv"] if ad_row is not None else 0, "ret_conv")),
             ]
             bench = FUNNEL_BENCHMARK_RETURN
             badge, title = "RETENTION", "재노출에서 재구매까지"
@@ -15697,6 +15723,15 @@ def render_ga_channel_funnel_page(
                    "노출·클릭이 광고에만 있는 숫자라 <b>이 퍼널은 광고 유입만</b> 봅니다 — "
                    "위 KPI·아래 TOTAL(자연유입·기타 포함)보다 작은 게 정상입니다.")
             head, rowfn = HEAD_RET, _v4_row_ret
+
+        # 뺐으면 뺐다고 그 자리에 적는다 — 숫자가 조용히 작아지면 '왜 다르지'가 된다.
+        if _fx_ch and _fx["imp"] > 0:
+            _fx_share = (_fx["imp"] / ad_imp * 100) if ad_imp > 0 else 0
+            sub += (f' <b>{" · ".join(_fx_ch)}</b>은 정액(보장형) 상품이라 이 퍼널에서만 '
+                    f'뺐습니다 — 노출 {_fx["imp"]:,.0f}({_fx_share:.0f}%) · '
+                    f'클릭 {_fx["clk"]:,.0f} · 광고비 {_fx["cost"]:,.0f}원 별도. '
+                    '보장형 노출은 경매형과 성격이 달라 같이 세면 전환율이 0%로 뭉개집니다. '
+                    '<b>아래 매체별 표와 TOTAL에는 그대로</b> 들어 있습니다.')
 
         def verdict_of(r, cost):
             rev = float(r.get("new_rev" if is_new else "ret_rev", 0) or 0)
