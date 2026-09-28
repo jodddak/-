@@ -9091,6 +9091,42 @@ def _meta_insights(acct: str, params: dict, timeout: int = 60):
     return rows
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def meta_campaign_names() -> dict:
+    """{매체 탭 이름: [캠페인 이름…]} — 계정의 캠페인 목록 **통째로**.
+
+    소재별 표의 캠페인 이름을 관리자 이름으로 통일하려면 '어떤 이름들이 있는지'를
+    알아야 한다. 소재 실적에 붙어 들어온 이름만 쓰면, 지금 꺼져 있는 캠페인
+    (STCO_시즌베스트처럼)은 목록에 없어서 GA 이름 그대로 남는다.
+    캠페인 목록은 가볍고 자주 안 변해서 한 시간 캐시로 충분하다.
+    """
+    import requests
+
+    cfg = _secrets_section("meta_ads") or {}
+    if not cfg.get("access_token"):
+        return {}
+    ver = str(cfg.get("api_version", "v21.0")).strip()
+    out = {}
+    for ch, acct in _meta_accounts():
+        names = []
+        url = f"https://graph.facebook.com/{ver}/{acct}/campaigns"
+        p = {"fields": "name", "limit": 500, "access_token": cfg["access_token"]}
+        try:
+            while url:
+                payload = requests.get(url, params=p, timeout=30).json()
+                if "error" in payload:
+                    break
+                names += [str(d.get("name") or "").strip()
+                          for d in payload.get("data", []) if d.get("name")]
+                url = (payload.get("paging") or {}).get("next")
+                p = None
+        except Exception:
+            pass
+        if names:
+            out.setdefault(_gc_channel(ch), []).extend(names)
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
 def meta_visible_accounts() -> tuple:
     """이 토큰으로 **실제로 볼 수 있는** 광고 계정 목록. ([(id, 이름)], 오류문구)
 
@@ -14975,15 +15011,41 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         _c2c.setdefault(_gc, set()).add(_mc)
                 _c2c = {k: next(iter(v)) for k, v in _c2c.items() if len(v) == 1}
 
-                # ② 못 배운 이름은 이 매체의 캠페인 이름 목록과 조각으로 맞춰본다.
-                #    (아직 매체 데이터가 안 붙은 과거 줄까지 같은 이름으로 통일된다)
+                # ② 못 배운 이름은 이 매체의 **캠페인 이름 목록 전체**와 조각으로 맞춘다.
+                #    이름 후보를 넓게 모으는 게 핵심이다 — 이 기간 소재에 붙어 들어온
+                #    이름만 보면, 지금 꺼져 있는 캠페인(STCO_시즌베스트)은 목록에 없어서
+                #    GA 이름 그대로 남는다. 그래서 세 군데서 긁어모은다.
                 _mnames = set()
-                for _k, _m in media_map.items():
+                for _k, _m in media_map.items():           # 이 기간 소재에 붙은 이름
                     if _k[0] in ch_keep:
                         _mnames.update(c for c in (_m.get("campaigns") or []) if c)
+                if (ad_creative is not None and not ad_creative.empty
+                        and "campaign" in ad_creative.columns):
+                    _ac = ad_creative[ad_creative["channel"].map(
+                        lambda c: _gc_channel(c) in ch_keep)]          # 저장된 전 기간
+                    _mnames.update(str(v).strip() for v in _ac["campaign"].dropna()
+                                   if str(v).strip())
+                try:
+                    _mnames.update(meta_campaign_names().get(label, []))   # 메타 계정 전체
+                except Exception:
+                    pass
                 _ga_names = {c for cl in rows.get("camp_list", []) if cl for c in cl}
                 for _g, _n in _gc_camp_dict(_mnames, _ga_names - set(_c2c)).items():
                     _c2c.setdefault(_g, _n)
+
+                # 못 바꾼 이름이 있으면 그 자리에서 알려준다 — 조용히 두면
+                # '왜 어떤 건 STCO_로 나오고 어떤 건 아니지'에서 또 막힌다.
+                _untr = sorted({c for c in _ga_names
+                                if c not in _c2c and str(c).lower() not in _GC_NO_CAMP})
+                if _untr:
+                    notes.append((
+                        "caption",
+                        "캠페인 이름을 광고 관리자 이름으로 못 바꾼 값 — "
+                        + ", ".join(f"`{c}`" for c in _untr[:8])
+                        + (f" 외 {len(_untr) - 8}개" if len(_untr) > 8 else "")
+                        + f". 이 매체 캠페인 이름 후보 {len(_mnames)}개 중에 짝이 "
+                        "없거나(이름 규칙이 다름), 후보가 둘 이상이라 고르지 못한 "
+                        "경우입니다(`STCO_아우터` / `STCO_아우터_전환`처럼)."))
 
                 _keys = []
                 for _, r in rows.iterrows():
