@@ -8388,6 +8388,25 @@ FUNNEL_V4_CSS = """
 .fv4-tbl th { color:#8a8a7c; font-weight:700; font-size:12.5px; letter-spacing:.01em;
   text-align:right; padding:11px 12px; background:#F7F6EF; white-space:nowrap;
   border-bottom:1px solid #E3E1DC; position:sticky; top:0; z-index:2; }
+/* 소재 탭 안의 신규/리타겟팅 고르개 — 라디오 동그라미를 지우고 버튼처럼 보이게.
+   매체 탭과 같은 생김새여야 '탭 안의 탭'으로 읽힌다. */
+div[data-testid="stElementContainer"]:has(> div > div > div[role="radiogroup"]) {
+    margin-bottom: 2px !important; }
+div[role="radiogroup"] { gap: 8px !important; flex-wrap: wrap !important; }
+div[role="radiogroup"] > label {
+    background:#FFF8E5 !important; border:1px solid #F0E2BC !important;
+    border-radius:10px !important; padding:6px 14px !important; margin:0 !important;
+    cursor:pointer !important; }
+div[role="radiogroup"] > label:hover {
+    background:#FDEFC8 !important; border-color:#E0C979 !important; }
+div[role="radiogroup"] > label > div:first-child { display:none !important; }
+div[role="radiogroup"] > label p {
+    font-size:13px !important; font-weight:700 !important; color:#6B5E3C !important;
+    margin:0 !important; }
+div[role="radiogroup"] > label:has(input:checked) {
+    background:#191f28 !important; border-color:#191f28 !important; }
+div[role="radiogroup"] > label:has(input:checked) p { color:#FFFFFF !important; }
+
 /* 표 바로 위 '중복 포함' 안내 — TOTAL 칸 안에 넣었더니 줄이 뭉개져서 밖으로 뺐다 */
 .fv4-dup { background:#FFF7ED; border:1px solid #FED7AA; border-left:3px solid #EA580C;
            border-radius:8px; padding:9px 12px; margin:0 0 10px 0;
@@ -13848,6 +13867,26 @@ def _gc_parse_content(v):
 
 _GC_NO_CAMP = ("", "nan", "none", "(not set)", "(미설정)", "(캠페인 없음)")
 
+# 타겟팅을 '신규 발굴'과 '리타겟팅' 둘로 가른다.
+# 판단 기준이 아예 다르다 — 리타겟팅은 원래 ROAS가 높게 나오는 게 정상이라
+# 둘을 섞어 평균을 내면 신규 소재가 전부 부진해 보이고, 예산을 잘못 옮기게 된다.
+#
+# 타겟팅 이름만으로는 부족하다. 크리테오는 utm에 타겟팅이 안 붙고 캠페인 이름
+# (다이나믹_리텐션 / 스태틱_리텐션)에만 들어 있어서 캠페인·소재명까지 같이 본다.
+_GC_RT_WORDS = ("방문자", "리텐션", "리타겟", "retention", "retarget", "remarket", "_rt")
+_GC_NEW_WORDS = ("관심", "유사", "신규", "lookalike", "prospect", "broad", "인구")
+GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT = "TOTAL", "신규타겟팅", "리타겟팅"
+
+
+def _gc_target_group(row) -> str:
+    """이 줄이 신규 발굴인지 리타겟팅인지. 못 가리면 '기타'(TOTAL에서만 보인다)."""
+    blob = " ".join(str(row.get(k) or "") for k in ("target", "campaign", "creative")).lower()
+    if any(w in blob for w in _GC_RT_WORDS):
+        return GC_SEG_RT
+    if any(w in blob for w in _GC_NEW_WORDS):
+        return GC_SEG_NEW
+    return "기타"
+
 
 def _gc_camp_parts(name) -> set:
     """캠페인 이름을 조각으로 쪼갠다. 'STCO_셔츠_전환' → {stco, 셔츠, 전환}."""
@@ -15358,6 +15397,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             keep = [label]
             ch_keep = keep
             rows = rows_all[rows_all["channel"].isin(keep)].copy()
+
+            # ── 신규 / 리타겟팅 나눠보기 ──────────────────────────
+            # 리타겟팅은 ROAS가 높게 나오는 게 정상이라, 신규와 같은 표에서 평균을 내면
+            # 신규 소재가 전부 '부진'으로 찍힌다. 판단 기준이 달라서 갈라 봐야 한다.
+            _seg_n = _seg_r = 0
+            if not rows.empty:
+                rows["_seg"] = [_gc_target_group(r) for _, r in rows.iterrows()]
+                _seg_n = int((rows["_seg"] == GC_SEG_NEW).sum())
+                _seg_r = int((rows["_seg"] == GC_SEG_RT).sum())
+            seg = GC_SEG_ALL
+            if _seg_n and _seg_r:      # 한쪽만 있으면 굳이 고르게 하지 않는다
+                seg = st.radio(
+                    "보기", [GC_SEG_ALL, f"{GC_SEG_NEW} ({_seg_n})",
+                             f"{GC_SEG_RT} ({_seg_r})"],
+                    horizontal=True, key=f"gc_seg_{ti}", label_visibility="collapsed")
+                seg = (GC_SEG_NEW if seg.startswith(GC_SEG_NEW)
+                       else GC_SEG_RT if seg.startswith(GC_SEG_RT) else GC_SEG_ALL)
+            if seg != GC_SEG_ALL and not rows.empty:
+                rows = rows[rows["_seg"] == seg].copy()
+                if rows.empty:
+                    st.info(f"이 매체에 **{seg}** 줄이 없습니다.")
+                    continue
             # GA 줄이 없어도 매체 리포트에 실적이 있으면 표를 그린다.
             # 외부몰이 그렇다 — 스마트스토어로 보내서 자사몰 GA4에 세션이 안 잡히므로
             # GA 줄이 아예 없다. 여기서 끊으면 노출·클릭·광고비도 못 보게 된다.
@@ -15533,6 +15594,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 타겟팅·캠페인·매체 탭에서는 그 매체 합계에 넣는다(합계가 매체 관리자와 맞게).
             leftovers = [(k, v) for k, v in media_map.items()
                          if k[0] in ch_keep and id(v) not in _matched]
+            if seg != GC_SEG_ALL:
+                # GA에 못 붙은 매체 소재도 이름·캠페인으로 같은 기준을 적용한다.
+                leftovers = [
+                    (k, v) for k, v in leftovers
+                    if _gc_target_group({"target": "", "campaign": v.get("campaign"),
+                                         "creative": v.get("name") or k[1]}) == seg]
 
             if level != "소재":
                 # 소재 줄에 붙은 매체 실적을 원하는 단위로 다시 합친다.
@@ -15732,9 +15799,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             card = (
                 FUNNEL_V4_CSS
                 + '<div class="fv4-wrap"><div class="fv4-card">'
-                f'<span class="fv4-badge-dark">{level}별</span>'
-                f'<div class="fv4-card-title">{label} · {level}별 '
-                f'{"매체 신고" if _media_basis else "GA"} 성과</div>'
+                # 배지에는 '소재별'처럼 이미 아는 말 대신 **지금 무엇을 보고 있는지**를 적는다.
+                + (f'<span class="fv4-badge-dark">{seg}</span>'
+                   if seg != GC_SEG_ALL else
+                   f'<span class="fv4-badge-dark">{level}별 · 전체</span>')
+                + f'<div class="fv4-card-title">{label} · {level}별 '
+                f'{"매체 신고" if _media_basis else "GA"} 성과'
+                + (f' <span style="color:#6B5E3C;font-weight:700;">— {seg}</span>'
+                   if seg != GC_SEG_ALL else '')
+                + '</div>'
                 f'<div class="fv4-card-sub">{_card_sub}</div>'
                 + table + '</div></div>'
                 + """
