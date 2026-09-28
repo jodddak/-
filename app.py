@@ -8328,6 +8328,9 @@ FUNNEL_V4_CSS = """
 .fv4-tbl th { color:#8a8a7c; font-weight:700; font-size:12.5px; letter-spacing:.01em;
   text-align:right; padding:11px 12px; background:#F7F6EF; white-space:nowrap;
   border-bottom:1px solid #E3E1DC; position:sticky; top:0; z-index:2; }
+/* 방문자 열의 '중복' 꼬리표 — 날짜·매체로 쪼개 센 값이라 실제 사람 수보다 크다는 표시 */
+.fv4-tbl th sup { font-size:9px; font-weight:700; color:#C2410C; margin-left:2px;
+                  letter-spacing:0; vertical-align:super; }
 .fv4-tbl th:first-child { border-radius:8px 0 0 0; }
 .fv4-tbl th:last-child  { border-radius:0 8px 0 0; }
 .fv4-tbl th:first-child, .fv4-tbl th:nth-child(2) { text-align:left; }
@@ -8683,10 +8686,14 @@ def _v4_row_ret(name, r, cost, extra_cls=""):
         f'<td data-v="{roas if roas else -1:.2f}">{roas_txt}</td>')
 
 
-HEAD_NEW = ["채널", "총 방문자", "신규 방문자", "신규 비율", "회원가입", "가입률",
-            "첫구매", "첫구매율", "신규 매출", "광고비", "가입 CAC", "첫구매 CAC",
-            "신규 ROAS", "판정"]
-HEAD_RET = ["채널", "총 방문자", "재방문자", "신규 방문자", "재방문 비율", "재구매", "재구매율",
+# 방문자 열에 '중복'을 박아둔다. 이 표의 방문자는 날짜×매체 단위로 센 것을 더한 값이라
+# 위 KPI(기간 전체를 한 번에 물어본 실제 사람 수)보다 늘 크다. 열 이름에 안 적어두면
+# 표를 먼저 보고 'KPI랑 왜 다르지'에서 매번 막힌다.
+HEAD_NEW = ["채널", "총 방문자<sup>중복</sup>", "신규 방문자<sup>중복</sup>", "신규 비율",
+            "회원가입", "가입률", "첫구매", "첫구매율", "신규 매출", "광고비",
+            "가입 CAC", "첫구매 CAC", "신규 ROAS", "판정"]
+HEAD_RET = ["채널", "총 방문자<sup>중복</sup>", "재방문자<sup>중복</sup>",
+            "신규 방문자<sup>중복</sup>", "재방문 비율", "재구매", "재구매율",
             "재구매 매출", "객단가", "광고비", "재구매 CAC", "재구매 ROAS", "판정"]
 
 
@@ -15755,7 +15762,18 @@ def render_ga_channel_funnel_page(
         if not buckets.empty:
             tot = buckets[["users", "new", "ret", "signup", "new_conv", "new_rev",
                            "ret_conv", "ret_rev", "conv", "rev"]].sum()
-            brows_sum = rowfn("TOTAL", tot, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
+            # TOTAL 줄의 방문자는 **날짜×매체로 센 걸 더한 값**이라 위 KPI(실제 사람 수)보다
+            # 크다. 캡션에 써놨지만 표를 먼저 보게 되니 안 읽힌다 — 숫자 바로 옆에 붙인다.
+            # (신규는 한 사람당 한 번뿐이라 거의 안 불어나고, 재방문자가 올 때마다 세어져서
+            #  총 방문자만 크게 부푼다. 그 차이를 같이 보여주면 오해가 없다.)
+            _lbl = "TOTAL"
+            _dup = float(tot.get("users", 0) or 0) - float(users_now or 0)
+            if _site_now.get("ok") and _dup > 0:
+                _lbl = ('TOTAL<span class="fv4-bk-sub">'
+                        f'방문자는 날짜·매체 <b>중복 포함</b> — 실제 사람은 '
+                        f'{users_now:,.0f}명(신규 {new_now:,.0f}명) · 중복 {_dup:,.0f}명'
+                        '</span>')
+            brows_sum = rowfn(_lbl, tot, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
 
         # ── ② 광고 매체별 상세 ──
         mrows = []
