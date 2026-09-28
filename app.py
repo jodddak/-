@@ -8608,8 +8608,10 @@ def _v4_actions_html(media, spend_map, is_new, start, end) -> str:
             keep.append(rec)
         else:
             down.append(rec)
-    up.sort(key=lambda x: -(x[5] or 0))
-    down.sort(key=lambda x: (x[5] or 0))
+    # 표본이 넉넉한 매체를 앞으로. 1만원 쓴 매체가 ROAS 900%라고 헤드라인을
+    # 가져가면 '메타를 늘리세요' 같은 진짜 제안이 묻힌다.
+    up.sort(key=lambda x: (x[1] < CP_SMALL_SAMPLE_SPEND, -(x[5] or 0)))
+    down.sort(key=lambda x: (x[1] < CP_SMALL_SAMPLE_SPEND, (x[5] or 0)))
 
     if up and down:
         head = f"<b>{up[0][0]}</b>를 늘리고 <b>{down[0][0]}</b>를 줄이세요."
@@ -8633,7 +8635,9 @@ def _v4_actions_html(media, spend_map, is_new, start, end) -> str:
         detail = (f'{base_lbl} {base:,.0f}명 → {kind_lbl} {conv:,.0f}건'
                   + (f' · {kind_lbl} CAC \u20a9{cac:,.0f}' if cac else ''))
         roas_s = f'{roas:,.0f}%' if roas else '—'
-        return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{ch}</b> — '
+        small = ('  <span class="cp-tag hold">표본 작음</span>'
+                 if 0 < cost < CP_SMALL_SAMPLE_SPEND else '')
+        return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{ch}</b>{small} — '
                 f'{axis} ROAS {roas_s} · 집행 \u20a9{cost:,.0f}<br>'
                 f'<span class="cp-rec-det">{detail} → {act}</span></li>')
 
@@ -8650,8 +8654,8 @@ def _v4_actions_html(media, spend_map, is_new, start, end) -> str:
         items.append(li(r, "유지", "keep", "현 수준 유지"))
     for ch, cost, rev, conv, base, roas in hold:
         items.append(f'<li><span class="cp-tag hold">판단 보류</span> <b>{ch}</b> — '
-                     f'집행 \u20a9{cost:,.0f}로 표본이 작습니다<br>'
-                     f'<span class="cp-rec-det">{CP_MIN_SPEND_FOR_JUDGE:,}원 넘을 때까지 판단 유보</span></li>')
+                     f'집행 \u20a9{cost:,.0f} — 판단할 만한 금액이 아닙니다<br>'
+                     f'<span class="cp-rec-det">{CP_MIN_SPEND_FOR_JUDGE:,}원은 넘어야 합니다</span></li>')
     for ch, cost, rev, conv, base, roas in skip:
         why = (f'매출 \u20a9{rev:,.0f}은 잡히는데 광고비가 없어 ROAS 계산 불가'
                if cost <= 0 else '판단 근거 부족')
@@ -8665,7 +8669,8 @@ def _v4_actions_html(media, spend_map, is_new, start, end) -> str:
         f'<div class="cp-rec-sub">{sub}</div>'
         f'<ul class="cp-rec-list">{"".join(items)}</ul>'
         f'<div class="cp-rec-foot">기준: {axis} ROAS 목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}% · '
-        f'집행 {CP_MIN_SPEND_FOR_JUDGE:,}원 미만은 판단 보류 · '
+        f'집행 {CP_MIN_SPEND_FOR_JUDGE:,}원 미만만 판단 보류 · '
+        f'{CP_SMALL_SAMPLE_SPEND:,}원 미만은 <b>표본 작음</b>으로 표시하되 판단은 합니다 · '
         f'예산 이동은 한 번에 {CP_STEP*100:.0f}%씩 · 조회 기간 {start} ~ {end}</div>'
         '</div></div>')
 
@@ -11681,7 +11686,12 @@ def _cp_int(v):
         return "0"
 
 
-CP_MIN_SPEND_FOR_JUDGE = 100_000   # 이보다 적게 쓴 매체는 성과를 단정하지 않는다
+# 집행이 적어도 **일단 판단은 해준다.** 예전엔 10만원(주간이면 70만원) 문턱을 못 넘으면
+# 전부 '판단 보류'로 빠져서, 정작 보고서에서 읽을 줄이 두어 개밖에 안 남았다.
+# 이제 문턱은 '아예 말을 못 할 만큼 적은 금액'까지만 낮추고, 그 위로는 판단하되
+# 표본이 작으면 그렇다고 한 줄 붙인다 — 숨기는 것보다 조건을 밝히는 쪽이 쓸모 있다.
+CP_MIN_SPEND_FOR_JUDGE = 10_000     # 이보다 적으면 그때만 판단 보류
+CP_SMALL_SAMPLE_SPEND = 100_000     # 이보다 적으면 판단은 하되 '표본 작음'을 붙인다
 CP_STEP = 0.10                     # 증액·감액 제안은 한 번에 10%씩 (급격한 이동 금지)
 
 
@@ -11716,8 +11726,9 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
         else:
             down.append((m, cost, roas))
 
-    up.sort(key=lambda x: -x[2])
-    down.sort(key=lambda x: x[2])
+    # 표본이 넉넉한 매체를 앞으로 — 헤드라인을 소액 매체에 뺏기지 않게
+    up.sort(key=lambda x: (x[1] < CP_SMALL_SAMPLE_SPEND, -x[2]))
+    down.sort(key=lambda x: (x[1] < CP_SMALL_SAMPLE_SPEND, x[2]))
     days = (end - start).days + 1
 
     # 헤드라인
@@ -11736,7 +11747,7 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
         sub = f"판단 가능한 매체가 모두 목표 구간({OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%) 안에 있습니다."
     else:
         head = "아직 판단할 만한 데이터가 없습니다."
-        sub = "광고비가 연동된 매체가 없거나 집행액이 너무 적습니다."
+        sub = "광고비가 연동된 매체가 없거나 집행액이 1만원도 안 됩니다."
 
     def line(m, cost, roas, kind):
         move = cost * CP_STEP
@@ -11751,7 +11762,9 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
         else:
             act = "현 수준 유지"
             tag, cls = "유지", "keep"
-        return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{m}</b> — '
+        small = ('  <span class="cp-tag hold">표본 작음</span>'
+                 if 0 < cost < CP_SMALL_SAMPLE_SPEND else '')
+        return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{m}</b>{small} — '
                 f'ROAS {roas:,.0f}% · 집행 {cost:,.0f}원 → {act}</li>')
 
     items = []
@@ -11764,8 +11777,8 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
     for m, c, r in hold:
         rr = "—" if (r is None or pd.isna(r)) else f"{r:,.0f}%"
         items.append(f'<li><span class="cp-tag hold">판단 보류</span> <b>{m}</b> — '
-                     f'집행 {c:,.0f}원으로 표본이 작습니다 (ROAS {rr}). '
-                     f'{CP_MIN_SPEND_FOR_JUDGE:,.0f}원 넘을 때까지 판단 유보</li>')
+                     f'집행 {c:,.0f}원 — 판단할 만한 금액이 아닙니다 (ROAS {rr}). '
+                     f'{CP_MIN_SPEND_FOR_JUDGE:,.0f}원은 넘어야 합니다</li>')
     for m, why in skip:
         items.append(f'<li><span class="cp-tag skip">판단 제외</span> <b>{m}</b> — {why}</li>')
 
@@ -11776,7 +11789,8 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
         f'<div class="cp-rec-sub">{sub}</div>'
         f'<ul class="cp-rec-list">{"".join(items)}</ul>'
         f'<div class="cp-rec-foot">기준: GA-ROAS 목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}% · '
-        f'집행 {CP_MIN_SPEND_FOR_JUDGE:,.0f}원 미만은 판단 보류 · '
+        f'집행 {CP_MIN_SPEND_FOR_JUDGE:,.0f}원 미만만 판단 보류 · '
+        f'{CP_SMALL_SAMPLE_SPEND:,.0f}원 미만은 <b>표본 작음</b>으로 표시하되 판단은 합니다 · '
         f'예산 이동은 한 번에 {CP_STEP*100:.0f}%씩만 제안합니다 (조회 기간 {start} ~ {end}, {days}일)</div>'
         '</div></div>'
     )
