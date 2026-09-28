@@ -1312,7 +1312,7 @@ def _load_page(client, table_name, page, since=None, name=None):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_table(name: str) -> pd.DataFrame:
+def _load_table_raw(name: str) -> pd.DataFrame:
     """Supabase에서 테이블 한 벌을 받아온다.
 
     예전에는 1000행씩 '순서대로' 받았다. ga_creative_daily처럼 3만 행이 넘는 테이블은
@@ -1389,6 +1389,48 @@ def load_table(name: str) -> pd.DataFrame:
         page += 1
     return pd.DataFrame(rows)
 
+
+
+# ── 우리 팀 유입이 아닌 소스/매체 ─────────────────────────────
+# 같은 GA4 속성에 다른 팀 광고도 같이 들어온다. 메타는 계정을 나눠 쓰는데
+# 그쪽은 소스를 `meta`로, 우리(대행사)는 `Facebook`으로 심는다.
+# 캠페인 이름(VIBESHIFT)으로 걸러봤지만 '모션프리수트'처럼 이름이 겹치지 않는
+# 캠페인이 계속 새로 생겨서 그때마다 숫자가 섞였다. 소스 자체로 자르는 게 확실하다.
+# Secrets [ga4] exclude_sources = "meta,teamx" 로 더 넣을 수 있다.
+GA_EXCLUDED_SOURCES_DEFAULT = "meta"
+
+
+def _ga_excluded_sources() -> tuple:
+    cfg = _secrets_section("ga4") or {}
+    raw = str(cfg.get("exclude_sources") or "")
+    out = [w.strip().lower() for w in GA_EXCLUDED_SOURCES_DEFAULT.split(",") if w.strip()]
+    for w in raw.split(","):
+        w = w.strip().lower()
+        if w and w not in out:
+            out.append(w)
+    return tuple(out)
+
+
+def _ga_sm_excluded(sm) -> bool:
+    """'meta / cpc'처럼 소스가 제외 대상이면 True. 'Facebook / Facebook_Feed'는 남는다."""
+    s = str(sm or "").strip().lower()
+    return s.split("/")[0].strip() in _ga_excluded_sources()
+
+
+def load_table(name: str) -> pd.DataFrame:
+    """테이블을 읽되, GA 표에서는 **다른 팀 소스를 통째로 걷어낸다.**
+
+    거르는 자리를 여기 하나로 둔 이유: GA 데이터를 읽는 화면이 채널 성과·소재별·퍼널·
+    메일까지 여러 곳이라, 화면마다 따로 걸면 어디 하나는 반드시 빠진다.
+    (실제로 캠페인 이름으로만 거르던 때 소재별 표에 '모션프리수트 140,074원'이 남았다.)
+    """
+    df = _load_table_raw(name)
+    if (name in ("ga_channel_daily", "ga_creative_daily")
+            and df is not None and not df.empty and "source_medium" in df.columns):
+        keep = ~df["source_medium"].map(_ga_sm_excluded)
+        if not keep.all():
+            df = df[keep].copy()
+    return df
 
 def delete_ad_creative_for_channel(channel: str) -> bool:
     """ad_creative_daily에서 한 매체 행을 통째로 지운다.
