@@ -13405,6 +13405,36 @@ def _gc_parse_content(v):
 _GC_NO_CAMP = ("", "nan", "none", "(not set)", "(미설정)", "(캠페인 없음)")
 
 
+def _gc_camp_parts(name) -> set:
+    """캠페인 이름을 조각으로 쪼갠다. 'STCO_셔츠_전환' → {stco, 셔츠, 전환}."""
+    return {p.strip().lower() for p in re.split(r"[_\-\s/]+", str(name or "")) if p.strip()}
+
+
+def _gc_camp_dict(media_names, ga_names) -> dict:
+    """GA의 utm_campaign을 매체 관리자 캠페인명으로 바꾸는 사전.
+
+    한 표 안에 '추석세일'과 'STCO_수트_전환'이 섞여 보이던 문제 때문에 만든다.
+    매체 API 이름이 아직 안 붙은 줄(과거 데이터 등)도 같은 이름으로 맞춰준다.
+
+    **조각으로 맞춘다** — 'STCO_셔츠_전환'을 {stco, 셔츠, 전환}으로 쪼개고
+    utm_campaign '셔츠'가 그 안에 있으면 짝으로 본다. 단순 포함(in)으로 하면
+    '셔츠'가 'STCO_니트셔츠_전환'에도 걸려서 엉뚱한 이름이 붙는다.
+
+    후보가 둘 이상이면 **바꾸지 않는다.** 틀린 이름을 적느니 GA 원래 값이 낫다
+    (STCO_아우터 / STCO_아우터_전환처럼 이름이 겹치는 경우가 실제로 있다).
+    """
+    out = {}
+    names = [str(n).strip() for n in media_names if str(n or "").strip()]
+    for g in ga_names:
+        g = str(g or "").strip()
+        if not g or g.lower() in _GC_NO_CAMP:
+            continue
+        hits = [n for n in names if g.lower() in _gc_camp_parts(n)]
+        if len(set(hits)) == 1:
+            out[g] = hits[0]
+    return out
+
+
 def _gc_key_html(title, campaigns, target) -> str:
     """소재 줄의 이름칸 — 윗줄 '날짜_소재명', 아랫줄 '캠페인 · 타겟팅'.
 
@@ -14936,6 +14966,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 못 붙은 줄에도 같은 이름을 쓴다. 한 GA 이름이 매체 캠페인 여러 개로
             # 갈리면 번역하지 않는다 — 틀린 이름을 적느니 원래 값이 낫다.
             if level == "소재" and not rows.empty:
+                # ① 같은 소재에 GA 이름과 매체 이름이 둘 다 붙은 줄에서 짝을 배운다(가장 정확)
                 _c2c = {}
                 for _, r in rows.iterrows():
                     _mc = str((r["_media"] or {}).get("campaign") or "").strip()
@@ -14943,6 +14974,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     if _mc and _gc and _gc.lower() not in _GC_NO_CAMP:
                         _c2c.setdefault(_gc, set()).add(_mc)
                 _c2c = {k: next(iter(v)) for k, v in _c2c.items() if len(v) == 1}
+
+                # ② 못 배운 이름은 이 매체의 캠페인 이름 목록과 조각으로 맞춰본다.
+                #    (아직 매체 데이터가 안 붙은 과거 줄까지 같은 이름으로 통일된다)
+                _mnames = set()
+                for _k, _m in media_map.items():
+                    if _k[0] in ch_keep:
+                        _mnames.update(c for c in (_m.get("campaigns") or []) if c)
+                _ga_names = {c for cl in rows.get("camp_list", []) if cl for c in cl}
+                for _g, _n in _gc_camp_dict(_mnames, _ga_names - set(_c2c)).items():
+                    _c2c.setdefault(_g, _n)
 
                 _keys = []
                 for _, r in rows.iterrows():
