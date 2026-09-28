@@ -10039,36 +10039,72 @@ def fetch_meta_creative_images(days: int = 60) -> dict:
     return out
 
 
-def sync_meta_creative_images(progress=None) -> tuple:
+META_IMG_WORKERS = 12        # 동시에 받아 올릴 장수
+META_IMG_BUDGET_SEC = 90     # 한 번에 쓸 최대 시간 — 넘으면 다음 동기화로 넘긴다
+
+
+def sync_meta_creative_images(progress=None, max_seconds: int = META_IMG_BUDGET_SEC,
+                              workers: int = META_IMG_WORKERS) -> tuple:
     """메타 배너를 받아 Storage에 올린다. (올린 수, 건너뛴 수, 오류목록)
 
     이미 올라가 있는 소재는 건너뛴다 — 매번 수백 장을 다시 올릴 이유가 없다.
+
+    **한 장씩 받지 않는다.** 예전엔 300장이 넘으면 5~10분씩 걸려서 화면이 멈춰 있었다.
+    받기·올리기 둘 다 네트워크 대기라 동시에 돌리면 시간이 거의 장수에 비례하지 않는다.
+
+    그래도 처음 한 번은 장수가 많으므로 **시간 예산**을 둔다. 다 못 채우면 그만두고
+    다음 동기화 때 이어서 받는다 — 이미 올린 건 건너뛰니 몇 번이면 다 채워진다.
+    대시보드를 열 때마다 몇 분씩 붙잡아두는 것보다 이게 낫다.
     """
     client = get_supabase_client()
     if client is None:
         return 0, 0, ["Supabase에 연결되어 있지 않습니다."]
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
     import requests
+
     have = set(_gc_stored_image_index().keys())
     found = fetch_meta_creative_images()
-    done, skip, errs = 0, 0, []
-    for i, (name_key, src) in enumerate(found.items(), start=1):
-        stem = _safe_storage_name(name_key)
-        if stem in have:
-            skip += 1
-            continue
+    todo = [(k, v) for k, v in found.items() if _safe_storage_name(k) not in have]
+    skip = len(found) - len(todo)
+    if not todo:
+        return 0, skip, []
+
+    sess = requests.Session()          # 연결을 재사용한다 — 매번 새로 붙는 값이 크다
+
+    def _one(item):
+        name_key, src = item
         try:
-            raw = requests.get(src, timeout=30).content
-            path = f"{GC_IMAGE_FOLDER}/{stem}.jpeg"
+            raw = sess.get(src, timeout=30).content
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
-                path, raw, {"content-type": "image/jpeg", "upsert": "true"})
-            done += 1
+                f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.jpeg", raw,
+                {"content-type": "image/jpeg", "upsert": "true"})
+            return True, None
         except Exception as e:
-            if len(errs) < 3:
-                errs.append(f"{name_key}: {str(e)[:80]}")
-        if progress and i % 10 == 0:
-            progress(f"메타 배너 {i}/{len(found)}장 처리 중...")
+            return False, f"{name_key}: {str(e)[:80]}"
+
+    done, errs, left = 0, [], 0
+    t0 = _time.time()
+    batch = max(workers, 1) * 2
+    for bi in range(0, len(todo), batch):
+        if _time.time() - t0 > max_seconds:
+            left = len(todo) - bi
+            break
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for ok, err in ex.map(_one, todo[bi:bi + batch]):
+                if ok:
+                    done += 1
+                elif len(errs) < 3:
+                    errs.append(err)
+        if progress:
+            progress(f"메타 배너 {min(bi + batch, len(todo)):,}/{len(todo):,}장 "
+                     f"({_time.time() - t0:.0f}초)")
     if done:
         _gc_stored_image_index.clear()
+    if left:
+        errs.append(f"{left}장은 시간이 걸려 다음 동기화 때 이어받습니다 "
+                    "(이미 받은 건 다시 안 받습니다)")
     return done, skip, errs
 
 
