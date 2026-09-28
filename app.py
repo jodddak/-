@@ -13402,22 +13402,37 @@ def _gc_parse_content(v):
     return target or "(미설정)", ymd, name or "(미설정)"
 
 
-def _gc_key_html(title, campaign, target, n_camp=1) -> str:
+_GC_NO_CAMP = ("", "nan", "none", "(not set)", "(미설정)", "(캠페인 없음)")
+
+
+def _gc_key_html(title, campaigns, target) -> str:
     """소재 줄의 이름칸 — 윗줄 '날짜_소재명', 아랫줄 '캠페인 · 타겟팅'.
 
     아랫줄에 매체명을 쓰던 자리다. 탭이 이미 매체라서 중복이었고, 그 자리에 캠페인을
     넣으면 같은 소재가 어느 캠페인에서 돌았는지 바로 보인다.
-    한 소재·한 타겟팅이 여러 캠페인에 걸쳐 있으면 '외 N'을 붙인다 — 숫자는 이미 합쳐진
-    줄인데 캠페인 하나만 적어두면 그 캠페인 실적으로 읽힌다.
+
+    한 소재가 캠페인 두 개에 걸쳐 있으면 **둘 다 적는다**(`시즌베스트 + 아우터`).
+    처음엔 '외 1'로 줄였는데 그게 무슨 뜻인지 읽는 사람이 알 수가 없었다.
+    셋 이상일 때만 '외 N개 캠페인'으로 줄인다 — 그때는 이름을 다 적어도 안 읽힌다.
     """
-    c = str(campaign or "").strip()
-    if c.lower() in ("", "nan", "none", "(not set)", "(미설정)"):
-        c = "(캠페인 없음)"
-    try:
-        more = f" 외 {int(n_camp) - 1}" if int(n_camp or 1) > 1 else ""
-    except Exception:
-        more = ""
-    return f'{title}<span class="gc-sub">{c}{more} · {target}</span>'
+    if campaigns is None:
+        campaigns = []
+    elif isinstance(campaigns, str):
+        campaigns = [campaigns]
+    names, seen = [], set()
+    for c in campaigns:
+        c = str(c or "").strip()
+        if c.lower() in _GC_NO_CAMP or c in seen:
+            continue
+        seen.add(c)
+        names.append(c)
+    if not names:
+        label = "캠페인 없음"
+    elif len(names) <= 2:
+        label = " + ".join(names)
+    else:
+        label = f"{names[0]} 외 {len(names) - 1}개 캠페인"
+    return f'{title}<span class="gc-sub">{label} · {target}</span>'
 
 
 def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
@@ -13425,7 +13440,7 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
     cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev",
             "cre_name", "cre_label", "cre_title", "cre_date", "creative",
-            "target", "campaign", "n_camp"]
+            "target", "campaign", "n_camp", "camp_list"]
     if cre is None or cre.empty:
         return pd.DataFrame(columns=cols)
     g = cre.copy()
@@ -13540,18 +13555,19 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         cre_label=("cre_label", "first"), cre_title=("cre_title", "first"),
         creative=("creative", "first"),
         target=("target", "first"), campaign=("campaign", "first"),
-        n_camp=("campaign", "nunique"))
-    out["_n_camp"] = out["n_camp"]
+        n_camp=("campaign", "nunique"),
+        # 이름을 다 들고 있어야 '시즌베스트 + 아우터'처럼 적을 수 있다.
+        camp_list=("campaign", lambda s: list(dict.fromkeys(
+            [str(v).strip() for v in s if str(v or "").strip()]))))
 
     if level == "소재":
         # 아랫줄의 매체명을 캠페인명으로 바꾼다.
         # 탭 자체가 이미 '메타 (자사몰)'이라 줄마다 또 쓰는 건 자리 낭비였다.
         # 여기서 넣는 건 GA의 utm_campaign이고, 매체 API가 준 **진짜 캠페인 이름**이
         # 있으면 화면에서 그걸로 덮어쓴다(_gc_key_html을 같이 쓴다).
-        out["key"] = [
-            _gc_key_html(t, c, g, n)
-            for t, c, g, n in zip(out["cre_title"], out["campaign"],
-                                  out["target"], out["n_camp"])]
+        out["key"] = [_gc_key_html(t, c, g)
+                      for t, c, g in zip(out["cre_title"], out["camp_list"],
+                                         out["target"])]
     return out.sort_values("rev", ascending=False)[cols]
 
 
@@ -13610,13 +13626,19 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     if "source" in c.columns:
         for _, r in c.drop_duplicates(subset=["channel", "creative"], keep="last").iterrows():
             _src_of[(r["channel"], r["creative"])] = str(r["source"])
-    # 매체 관리자에 적힌 진짜 캠페인 이름 — 광고비가 가장 많이 나간 줄을 대표로 쓴다.
-    # (GA의 utm_campaign은 줄여 적은 값이라 관리자 화면과 이름이 다르다.)
+    # 매체 관리자에 적힌 진짜 캠페인 이름. 같은 소재를 캠페인 두 곳에 올리는 일이 있어
+    # (수피마티셔츠 = 셔츠 + 시즌베스트) **이름을 전부** 들고 간다. 여기서 하나만 남기면
+    # 그 줄의 광고비는 둘을 합친 값인데 이름은 한쪽만 적히는 꼴이 된다.
+    # 순서는 광고비가 많이 나간 쪽부터.
     if "campaign" in c.columns:
         _cc = c[c["campaign"].astype(str).str.strip().ne("")]
-        for _, r in (_cc.sort_values("cost_incl_vat", ascending=False)
-                     .drop_duplicates(subset=["channel", "creative"]).iterrows()):
-            _camp_of[(r["channel"], r["creative"])] = str(r["campaign"]).strip()
+        if not _cc.empty:
+            _agg = (_cc.groupby(["channel", "creative", "campaign"], as_index=False)
+                    ["cost_incl_vat"].sum()
+                    .sort_values("cost_incl_vat", ascending=False))
+            for _, r in _agg.iterrows():
+                _camp_of.setdefault((r["channel"], r["creative"]), []).append(
+                    str(r["campaign"]).strip())
     for _, r in g.iterrows():
         k = (_gc_channel(r["channel"]), _creative_image_key(r["creative"]))
         out[k] = {"impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
@@ -13628,7 +13650,8 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                   # 어디서 온 값인지 남긴다. 'API'로 뭉뚱그리면 GFA처럼 파일로
                   # 올린 것까지 API라고 표시돼 화면 설명이 틀려진다.
                   "src": _src_of.get((r["channel"], r["creative"]), "api"),
-                  "campaign": _camp_of.get((r["channel"], r["creative"]), "")}
+                  "campaigns": _camp_of.get((r["channel"], r["creative"]), [])}
+        out[k]["campaign"] = (out[k]["campaigns"] or [""])[0]
     return out
 
 
@@ -14903,20 +14926,34 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _matched = set()
             rows["_media"] = _gc_attach_media(rows, media_map, _matched)
 
-            # 소재 줄 아랫줄의 캠페인 이름을 **매체 관리자 이름**으로 덮어쓴다.
-            # GA의 utm_campaign은 '추석세일'처럼 줄여 적은 값이라 광고 관리자의
-            # 'STCO_추석세일_전환'과 달라서, 관리자 화면과 대조할 때 매번 한 단계
-            # 번역이 필요했다. 매체 API가 준 이름이 있으면 그게 정답이다.
+            # 소재 줄 아랫줄의 캠페인 이름을 **매체 관리자 이름**으로 맞춘다.
+            # GA의 utm_campaign은 '수트'처럼 줄여 적은 값이라 광고 관리자의
+            # 'STCO_수트_전환'과 달라서, 관리자 화면과 대조할 때 한 단계 번역이 필요했다.
+            #
+            # 문제는 **섞이는 것**이다. 매체 API 이름이 붙은 줄은 'STCO_수트_전환',
+            # 못 붙은 줄은 '수트'로 나와서 한 표 안에 두 이름이 같이 보였다.
+            # 그래서 이 탭 안에서 붙은 줄들로 **'수트 → STCO_수트_전환' 사전을 만들어**
+            # 못 붙은 줄에도 같은 이름을 쓴다. 한 GA 이름이 매체 캠페인 여러 개로
+            # 갈리면 번역하지 않는다 — 틀린 이름을 적느니 원래 값이 낫다.
             if level == "소재" and not rows.empty:
-                rows["key"] = [
-                    _gc_key_html(
-                        r["cre_title"],
-                        (str((r["_media"] or {}).get("campaign") or "").strip()
-                         or r.get("campaign")),
-                        r["target"],
-                        1 if str((r["_media"] or {}).get("campaign") or "").strip()
-                        else r.get("n_camp", 1))
-                    for _, r in rows.iterrows()]
+                _c2c = {}
+                for _, r in rows.iterrows():
+                    _mc = str((r["_media"] or {}).get("campaign") or "").strip()
+                    _gc = str(r.get("campaign") or "").strip()
+                    if _mc and _gc and _gc.lower() not in _GC_NO_CAMP:
+                        _c2c.setdefault(_gc, set()).add(_mc)
+                _c2c = {k: next(iter(v)) for k, v in _c2c.items() if len(v) == 1}
+
+                _keys = []
+                for _, r in rows.iterrows():
+                    _mcs = [c for c in ((r["_media"] or {}).get("campaigns") or [])
+                            if str(c).strip()]
+                    if _mcs:
+                        _names = _mcs            # 매체가 준 이름 — 여러 개면 여러 개 다
+                    else:
+                        _names = [_c2c.get(c, c) for c in (r.get("camp_list") or [])]
+                    _keys.append(_gc_key_html(r["cre_title"], _names, r["target"]))
+                rows["key"] = _keys
             # 매체에는 있는데 GA에서 못 찾은 소재 — 소재 탭에서는 줄로 세우고,
             # 타겟팅·캠페인·매체 탭에서는 그 매체 합계에 넣는다(합계가 매체 관리자와 맞게).
             leftovers = [(k, v) for k, v in media_map.items()
