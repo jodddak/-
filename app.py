@@ -13601,11 +13601,17 @@ def upload_ga_creative_images(files) -> tuple:
     for f in files:
         stem = str(getattr(f, "name", "")).rsplit(".", 1)
         name_key = _creative_image_key(stem[0])
-        ext = (stem[1].lower() if len(stem) > 1 else "png")
-        if ext == "jpg":
-            ext = "jpeg"
+        ext = "jpeg"          # 아래에서 정사각 JPEG으로 맞춰 올린다
         try:
             data = f.getvalue() if hasattr(f, "getvalue") else f.read()
+            try:
+                # 직접 올린 것도 API로 받은 것과 같은 규격(1200×1200)으로 맞춘다.
+                # 한 표 안에서 비율이 섞이면 소재끼리 눈으로 비교가 안 된다.
+                data = _square_jpeg(data)
+            except Exception:
+                ext = (stem[1].lower() if len(stem) > 1 else "png")
+                if ext == "jpg":
+                    ext = "jpeg"
             path = f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.{ext}"
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
                 path, data, {"content-type": f"image/{ext}", "upsert": "true"})
@@ -13656,19 +13662,35 @@ def _gc_stored_image_index() -> dict:
             continue
         if ver:   # 같은 소재를 다시 올렸을 때 브라우저 캐시가 옛 이미지를 안 보여주게
             u = f"{u}{'&' if '?' in u else '?'}v={re.sub(r'[^0-9]', '', ver)[:14]}"
-        out[stem] = u
-    return out
+        # 같은 소재가 확장자만 다르게 두 개 있을 수 있다(옛 .png + 새로 맞춘 .jpeg).
+        # 이름순으로 덮으면 옛 png가 이겨서 '다시 받아도 안 바뀌는' 일이 생긴다.
+        # 항상 **최근에 올라온 파일**을 쓴다.
+        prev = out.get(stem)
+        if prev and prev[0] >= ver:
+            continue
+        out[stem] = (ver, u)
+    return {k: v[1] for k, v in out.items()}
 
 
 def _gc_pick_image(row, img_map: dict, store_idx: dict):
-    """소재 한 줄에 붙일 이미지 URL. 리포트에 박혀 온 것 → 직접 올린 것 순으로 본다."""
-    for k in _gc_image_keys(row):
-        if k in img_map:
-            return img_map[k]
-        if store_idx:
+    """소재 한 줄에 붙일 이미지 URL. **Storage 것을 먼저** 본다.
+
+    순서를 뒤집은 이유: Storage에는 매체 API에서 받아 정사각 1200×1200으로 맞춰둔
+    이미지와 직접 올린 이미지가 들어간다. 대행사 리포트 엑셀에 박혀 온 이미지는
+    비율이 제각각이고(가로형·세로형 혼재) 오래된 것도 섞여 있다.
+    예전 순서(리포트 먼저)에서는 정사각으로 새로 받아 올려도 리포트 이미지가 계속
+    이겨서 화면이 그대로였다 — 이미지를 다시 받아도 안 바뀌던 이유가 이거다.
+    리포트 이미지는 Storage에 아직 없는 소재의 **대체재**로만 쓴다.
+    """
+    keys = _gc_image_keys(row)
+    if store_idx:
+        for k in keys:
             hit = store_idx.get(_safe_storage_name(k))
             if hit:
                 return hit
+    for k in keys:
+        if k in img_map:
+            return img_map[k]
     return None
 
 
