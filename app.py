@@ -10454,6 +10454,69 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
 CRITEO_CREATIVE_DIM_CANDIDATES = ["Ad", "AdId"]
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_criteo_id_names(days: int = 45) -> dict:
+    """크리테오 **ID → 이름** 표. {'682609': '다이나믹_리텐션'}
+
+    왜 필요한가: 크리테오 다이나믹 광고는 링크에 소재명을 못 넣어서 `utm_id`에
+    **숫자 ID**가 박힌다. 그래서 GA에는 '682609'로, 매체 API에는 '다이나믹_리텐션'으로
+    들어와 같은 광고가 표에 두 줄로 갈라졌다 —
+    한 줄은 광고비만(818,673원), 다른 줄은 매출만(1,415,952원) 있는 꼴이라
+    양쪽 다 ROAS를 못 냈다.
+
+    이 표를 소재명 별칭에 얹어주면 숫자 ID가 이름으로 바뀌면서 두 줄이 한 줄로 합쳐진다.
+    (별칭은 '보여줄 이름'인 동시에 '매체 실적을 찾는 키'로도 쓰인다.)
+    """
+    cfg = _secrets_section("criteo")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return {}
+    try:
+        token = _criteo_token(cfg)
+    except Exception:
+        return {}
+    adv = str(cfg.get("advertiser_id", "") or "").strip()
+    end = date.today() - timedelta(days=1)
+    start = end - timedelta(days=max(1, days) - 1)
+    vers = ([str(cfg["api_version"]).strip()] if cfg.get("api_version") else []) \
+        + CRITEO_VERSION_CANDIDATES
+    out = {}
+    for ver in vers:
+        try:
+            adv_ids = adv or _criteo_advertiser_ids(token, ver)
+        except Exception:
+            continue
+        if not adv_ids:
+            continue
+        # 광고 단위를 먼저, 안 되면 묶음(광고세트) 단위로. 둘 다 utm_id에 박힐 수 있다.
+        for id_key, name_key in (("AdId", "Ad"), ("AdSetId", "AdSet"),
+                                 ("AdsetId", "Adset")):
+            r = _criteo_post(f"/{ver}/statistics/report", token, {
+                "advertiserIds": adv_ids,
+                "dimensions": [id_key, name_key],
+                "metrics": ["Displays"],
+                "currency": str(cfg.get("currency", "KRW")).strip(),
+                "startDate": str(start), "endDate": str(end), "format": "json",
+            })
+            if r is None or r.status_code >= 400:
+                continue
+            try:
+                payload = r.json()
+            except Exception:
+                continue
+            rows = (payload.get("Rows") or payload.get("rows") or []) \
+                if isinstance(payload, dict) else (payload or [])
+            for d in rows:
+                if not isinstance(d, dict):
+                    continue
+                i = str(d.get(id_key) or d.get(id_key.lower()) or "").strip()
+                n = str(d.get(name_key) or d.get(name_key.lower()) or "").strip()
+                if i and n and i != n and not n.isdigit():
+                    out.setdefault(i, n)
+        if out:
+            break
+    return out
+
+
 def _criteo_post(path: str, token: str, body: dict, tries: int = 3):
     """크리테오 report 호출. 429(호출 제한)면 쉬었다가 다시 던진다.
 
@@ -15035,6 +15098,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # UTM에 박힌 옛 이름을 지금 쓰는 이름으로 바꿔 보여준다.
     alias_df = load_table("creative_alias")
     alias = creative_alias_map(alias_df)
+    # 크리테오 다이나믹 광고는 utm_id에 숫자 ID가 박혀서, GA에는 '682609'로
+    # 매체 API에는 '다이나믹_리텐션'으로 들어와 같은 광고가 두 줄로 갈라진다.
+    # ID → 이름 표를 별칭에 얹어 한 줄로 합친다(직접 등록한 별칭이 있으면 그게 우선).
+    _cri_names = {}
+    try:
+        _cri_names = fetch_criteo_id_names()
+    except Exception:
+        _cri_names = {}
+    for _id, _nm in _cri_names.items():
+        alias.setdefault(_creative_image_key(_id), _nm)
 
     def _alias_panel():
         with st.expander(f"✏️ 소재명 바꿔 보기 ({len(alias)}개 등록됨) — "
@@ -15045,6 +15118,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "여기에 적어두면 **화면에 보이는 이름만** 바뀌고, 매체 리포트·이미지 매칭은 "
                 "UTM 원본으로 그대로 돌아갑니다(과거 데이터가 안 깨집니다)."
             )
+            if _cri_names:
+                st.success(
+                    f"크리테오 ID→이름 **{len(_cri_names)}개**를 API에서 자동으로 "
+                    "받아 쓰고 있습니다 — "
+                    + ", ".join(f"`{k}` → {v}" for k, v in list(_cri_names.items())[:4])
+                    + ". 크리테오 다이나믹 광고는 utm_id에 숫자 ID가 박혀서, 이게 없으면 "
+                    "광고비 줄과 매출 줄이 따로 놉니다. 아래에 직접 등록하시면 그게 우선입니다."
+                )
+            else:
+                st.caption(
+                    "크리테오 ID→이름 표를 API에서 못 받았습니다. 숫자만 있는 소재"
+                    "(예: `682609`)가 보이면 아래에 직접 등록해 주세요 — "
+                    "그러면 광고비 줄과 매출 줄이 한 줄로 합쳐집니다."
+                )
             _base = (alias_df[CREATIVE_ALIAS_COLS].copy()
                      if (alias_df is not None and not alias_df.empty
                          and "utm_name" in alias_df.columns)
