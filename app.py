@@ -14462,8 +14462,11 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
                    px: int = 90, progress=None) -> bytes:
     """매체별로 시트를 나눈 엑셀을 만든다. sheets = {탭이름: [행 dict, ...]}"""
     from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, TwoCellAnchor
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
+
+    EMU = 9525      # 1픽셀 = 9525 EMU (엑셀 그림 좌표 단위)
 
     # 캠페인·타겟팅·구분을 따로 둬야 엑셀에서 필터와 피벗이 된다.
     # (예전엔 'STCO_수트_전환 · 패션관심타겟'을 한 칸에 넣어서 타겟팅별로 못 갈랐다)
@@ -14541,7 +14544,23 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
                 if b:
                     try:
                         img = XLImage(io.BytesIO(b))
-                        ws.add_image(img, f"{get_column_letter(cols.index('이미지') + 1)}{rrow}")
+                        # 그림을 **셀에 묶는다**(두 지점 앵커 + editAs="twoCell").
+                        #
+                        # 기본 방식은 그림이 시트 위에 '떠 있는' 상태라, 필터를 걸어 행을
+                        # 숨겨도 그림만 그 자리에 남는다 — 엉뚱한 줄에 남의 소재 사진이
+                        # 붙어 보이던 이유다. 두 지점 앵커로 시작 셀과 끝 셀을 못 박으면
+                        # 엑셀이 '셀에 맞춰 이동·크기 변경'으로 다루면서 행이 숨을 때
+                        # 그림도 같이 숨는다.
+                        # 오프셋은 0으로 둔다 — 음수 오프셋을 넣으면 엑셀 버전에 따라
+                        # 파일을 '복구'하려 든다. 셀 한 칸을 꽉 채우면 충분하다.
+                        _c0 = cols.index("이미지")          # 0-based 열 번호
+                        img.anchor = TwoCellAnchor(
+                            editAs="twoCell",
+                            _from=AnchorMarker(col=_c0, colOff=0,
+                                               row=rrow - 1, rowOff=0),
+                            to=AnchorMarker(col=_c0 + 1, colOff=0,
+                                            row=rrow, rowOff=0))
+                        ws.add_image(img)
                     except Exception:
                         pass
                 if rec.get("_img"):
