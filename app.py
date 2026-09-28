@@ -4667,6 +4667,9 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
         "conversions": conv,
         "revenue": num(df[c_rv]) if c_rv else 0.0,
         "source": MEDIA_REPORT_CREATIVE_SOURCE,
+        # 리포트에 적힌 캠페인 이름 그대로 — 소재별 표 아랫줄에 띄운다.
+        # (GA의 utm_campaign은 줄여 적은 값이라 광고 관리자 화면과 다르다.)
+        "campaign": ch_raw.astype(str).str.strip() if c_cmp else "",
     })
     if not vat_included:
         rows["cost_incl_vat"] = rows["cost_incl_vat"] * 1.1
@@ -5056,8 +5059,7 @@ def save_uploaded_file(f, kind: str) -> str:
             msg += f" · ⚠️ 소재별 읽기 실패: {_cre_err}"
         elif cre is not None and not cre.empty:
             try:
-                n2 = save_table("ad_creative_daily", cre,
-                                "report_date,channel,creative,source", name)
+                n2 = save_ad_creative(cre, name)
                 _chs2 = ", ".join(sorted(cre["channel"].unique()))
                 msg += (f" · 소재별 {n2}행 · {cre['creative'].nunique()}개 소재 "
                         f"({_chs2})")
@@ -5600,8 +5602,7 @@ def render_upload_panel():
                 _msg = f"저장 완료! 광고비 {n}행"
                 if mr_cre is not None and not mr_cre.empty:
                     try:
-                        n2 = save_table("ad_creative_daily", mr_cre,
-                                        "report_date,channel,creative,source", mr_file.name)
+                        n2 = save_ad_creative(mr_cre, mr_file.name)
                         _msg += (f" · 소재별 {n2}행 "
                                  f"({mr_cre['creative'].nunique()}개 소재 · "
                                  f"{', '.join(sorted(mr_cre['channel'].unique()))})")
@@ -9943,12 +9944,36 @@ def render_gfa_token_helper():
 # 소재명은 매체가 준 이름을 그대로 쓴다. UTM의 날짜_소재명과 같은 꼴이라(260902_말라네울수트)
 # GA 쪽과 그 키로 붙는다.
 # ══════════════════════════════════════════════════════════════
+# campaign — **매체 관리자에 실제로 적혀 있는 캠페인 이름**(예: STCO_추석세일_전환).
+# GA의 utm_campaign(추석세일)은 추적용으로 줄여 적는 값이라 광고 관리자 화면과 다르다.
+# 소재별 표에서 "이 소재가 어느 캠페인 거냐"를 볼 때는 관리자 이름이어야 바로 통한다.
 AD_CREATIVE_COLS = ["report_date", "channel", "creative", "impressions", "clicks",
-                    "cost_incl_vat", "conversions", "revenue", "source"]
+                    "cost_incl_vat", "conversions", "revenue", "source", "campaign"]
 
 
 def _empty_creative():
     return pd.DataFrame(columns=AD_CREATIVE_COLS)
+
+
+AD_CREATIVE_KEY = "report_date,channel,creative,source"
+
+
+def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
+    """ad_creative_daily 저장. **campaign 열이 아직 없는 DB도 견딘다.**
+
+    campaign은 나중에 붙인 열이라, Supabase에서 ALTER TABLE을 아직 안 돌렸으면
+    저장이 통째로 실패한다 — 그러면 캠페인 이름 하나 때문에 소재 실적 전체가 안 들어와
+    화면이 빈다. 이름은 못 보여도 숫자는 들어와야 하므로, 실패하면 campaign을 빼고
+    다시 저장하고 무엇을 하면 되는지 한 번만 알려준다.
+    """
+    n = save_table("ad_creative_daily", df, AD_CREATIVE_KEY, source_file)
+    if n or "campaign" not in getattr(df, "columns", []):
+        return n
+    n = save_table("ad_creative_daily", df.drop(columns=["campaign"]),
+                   AD_CREATIVE_KEY, source_file)
+    if n:
+        st.session_state["ad_creative_no_campaign"] = True
+    return n
 
 
 def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
@@ -9971,6 +9996,7 @@ def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
                 rows.append({
                     "report_date": d.get("date_start"), "channel": ch,
                     "creative": str(d.get("ad_name") or "").strip(),
+                    "campaign": str(d.get("campaign_name") or "").strip(),
                     "impressions": float(d.get("impressions") or 0),
                     "clicks": _meta_link_clicks(d),
                     # 메타 spend는 VAT 별도라 다른 매체와 단위를 맞추려면 1.1을 곱한다
@@ -10178,6 +10204,7 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
                     "report_date": res.get("segments", {}).get("date"),
                     "channel": "구글",
                     "creative": str((res.get("assetGroup") or {}).get("name") or "").strip(),
+                    "campaign": str((res.get("campaign") or {}).get("name") or "").strip(),
                     "impressions": float(m.get("impressions") or 0),
                     "clicks": float(m.get("clicks") or 0),
                     # 구글 비용은 VAT 별도(마이크로 단위)
@@ -10435,6 +10462,9 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
             "report_date": d.get("Day") or d.get("day") or d.get("date"),
             "channel": "크리테오",
             "creative": _name,
+            # 크리테오는 차원에 따라 캠페인명을 줄 때도 있고 안 줄 때도 있다.
+            # 없으면 빈 값으로 두고, 화면에서는 GA의 utm_campaign으로 물러난다.
+            "campaign": str(d.get("CampaignName") or d.get("campaignName") or "").strip(),
             "impressions": _f("Displays", "displays"),
             "clicks": _f("Clicks", "clicks"),
             # 크리테오 청구액은 VAT 포함으로 들어온다(기존 광고비 페처와 동일 기준)
@@ -10459,10 +10489,19 @@ def _creative_frame(rows: list) -> pd.DataFrame:
         return _empty_creative()
     for c in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue"):
         out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0)
-    # 같은 날 같은 소재가 여러 캠페인에 걸쳐 있으면 합산한다
-    out = out.groupby(["report_date", "channel", "creative", "source"],
-                      as_index=False)[["impressions", "clicks", "cost_incl_vat",
-                                       "conversions", "revenue"]].sum()
+    if "campaign" not in out.columns:
+        out["campaign"] = ""
+    out["campaign"] = out["campaign"].astype(str).str.strip()
+    # 같은 날 같은 소재가 여러 캠페인에 걸쳐 있으면 합산한다.
+    # 캠페인 이름은 광고비가 가장 많이 나간 쪽을 대표로 쓴다 — 한 소재가 여러 캠페인에
+    # 걸리는 일은 드물고, 걸렸을 때 '주로 어디서 돌았나'를 보여주는 게 맞다.
+    _key = ["report_date", "channel", "creative", "source"]
+    _camp = (out.sort_values("cost_incl_vat", ascending=False)
+             .drop_duplicates(subset=_key)[_key + ["campaign"]])
+    out = out.groupby(_key, as_index=False)[["impressions", "clicks", "cost_incl_vat",
+                                             "conversions", "revenue"]].sum()
+    out = out.merge(_camp, on=_key, how="left")
+    out["campaign"] = out["campaign"].fillna("")
     return out[AD_CREATIVE_COLS]
 
 
@@ -10547,8 +10586,7 @@ def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
             if progress:
                 progress(f"· {label} 0행")
             continue
-        n = save_table("ad_creative_daily", df,
-                       "report_date,channel,creative,source", f"{label} 소재 API")
+        n = save_ad_creative(df, f"{label} 소재 API")
         saved[label] = n
         total += n
         if progress:
@@ -13364,12 +13402,30 @@ def _gc_parse_content(v):
     return target or "(미설정)", ymd, name or "(미설정)"
 
 
+def _gc_key_html(title, campaign, target, n_camp=1) -> str:
+    """소재 줄의 이름칸 — 윗줄 '날짜_소재명', 아랫줄 '캠페인 · 타겟팅'.
+
+    아랫줄에 매체명을 쓰던 자리다. 탭이 이미 매체라서 중복이었고, 그 자리에 캠페인을
+    넣으면 같은 소재가 어느 캠페인에서 돌았는지 바로 보인다.
+    한 소재·한 타겟팅이 여러 캠페인에 걸쳐 있으면 '외 N'을 붙인다 — 숫자는 이미 합쳐진
+    줄인데 캠페인 하나만 적어두면 그 캠페인 실적으로 읽힌다.
+    """
+    c = str(campaign or "").strip()
+    if c.lower() in ("", "nan", "none", "(not set)", "(미설정)"):
+        c = "(캠페인 없음)"
+    try:
+        more = f" 외 {int(n_camp) - 1}" if int(n_camp or 1) > 1 else ""
+    except Exception:
+        more = ""
+    return f'{title}<span class="gc-sub">{c}{more} · {target}</span>'
+
+
 def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
              exclude=None, alias: dict = None) -> pd.DataFrame:
     """소재 데이터를 원하는 단위(매체/캠페인/소재)로 접는다."""
     cols = ["key", "channel", "sessions", "new", "signup", "conv", "rev",
             "cre_name", "cre_label", "cre_title", "cre_date", "creative",
-            "target", "campaign"]
+            "target", "campaign", "n_camp"]
     if cre is None or cre.empty:
         return pd.DataFrame(columns=cols)
     g = cre.copy()
@@ -13483,7 +13539,19 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         cre_name=("cre_name", "first"), cre_date=("cre_date", "first"),
         cre_label=("cre_label", "first"), cre_title=("cre_title", "first"),
         creative=("creative", "first"),
-        target=("target", "first"), campaign=("campaign", "first"))
+        target=("target", "first"), campaign=("campaign", "first"),
+        n_camp=("campaign", "nunique"))
+    out["_n_camp"] = out["n_camp"]
+
+    if level == "소재":
+        # 아랫줄의 매체명을 캠페인명으로 바꾼다.
+        # 탭 자체가 이미 '메타 (자사몰)'이라 줄마다 또 쓰는 건 자리 낭비였다.
+        # 여기서 넣는 건 GA의 utm_campaign이고, 매체 API가 준 **진짜 캠페인 이름**이
+        # 있으면 화면에서 그걸로 덮어쓴다(_gc_key_html을 같이 쓴다).
+        out["key"] = [
+            _gc_key_html(t, c, g, n)
+            for t, c, g, n in zip(out["cre_title"], out["campaign"],
+                                  out["target"], out["n_camp"])]
     return out.sort_values("rev", ascending=False)[cols]
 
 
@@ -13538,10 +13606,17 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
         return out
     g = c.groupby(["channel", "creative"], as_index=False)[
         ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
-    _src_of = {}
+    _src_of, _camp_of = {}, {}
     if "source" in c.columns:
         for _, r in c.drop_duplicates(subset=["channel", "creative"], keep="last").iterrows():
             _src_of[(r["channel"], r["creative"])] = str(r["source"])
+    # 매체 관리자에 적힌 진짜 캠페인 이름 — 광고비가 가장 많이 나간 줄을 대표로 쓴다.
+    # (GA의 utm_campaign은 줄여 적은 값이라 관리자 화면과 이름이 다르다.)
+    if "campaign" in c.columns:
+        _cc = c[c["campaign"].astype(str).str.strip().ne("")]
+        for _, r in (_cc.sort_values("cost_incl_vat", ascending=False)
+                     .drop_duplicates(subset=["channel", "creative"]).iterrows()):
+            _camp_of[(r["channel"], r["creative"])] = str(r["campaign"]).strip()
     for _, r in g.iterrows():
         k = (_gc_channel(r["channel"]), _creative_image_key(r["creative"]))
         out[k] = {"impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
@@ -13552,7 +13627,8 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                   "channel": r["channel"], "name": str(r["creative"]),
                   # 어디서 온 값인지 남긴다. 'API'로 뭉뚱그리면 GFA처럼 파일로
                   # 올린 것까지 API라고 표시돼 화면 설명이 틀려진다.
-                  "src": _src_of.get((r["channel"], r["creative"]), "api")}
+                  "src": _src_of.get((r["channel"], r["creative"]), "api"),
+                  "campaign": _camp_of.get((r["channel"], r["creative"]), "")}
     return out
 
 
@@ -13968,6 +14044,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 메타는 계정이 둘이라, 어느 계정이 막힌 건지 따로 알려준다.
     for _k, _v in (st.session_state.get("meta_account_errors") or {}).items():
         st.warning(f"**{_k}** — {_v}")
+    # 캠페인 이름 열이 아직 없으면 한 번 알려준다 — 숫자는 멀쩡히 들어오지만
+    # 소재 아랫줄이 GA의 utm_campaign(줄여 적은 이름)으로 남는다.
+    if st.session_state.get("ad_creative_no_campaign"):
+        st.info(
+            "소재의 **캠페인 이름**을 저장할 자리가 아직 없습니다 — 숫자는 정상이고, "
+            "아랫줄만 GA의 `utm_campaign`(예: `추석세일`)으로 나옵니다. "
+            "Supabase → SQL Editor에서 아래 한 줄을 실행한 뒤 **소재 데이터 동기화**를 "
+            "한 번 누르시면 광고 관리자 이름(`STCO_추석세일_전환`)으로 바뀝니다.",
+            icon="ℹ️")
+        st.code("alter table public.ad_creative_daily add column if not exists campaign text;",
+                language="sql")
 
     c1, c2 = st.columns([3, 1])
     with c2:
@@ -14815,6 +14902,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         m["_media_basis"] = True
             _matched = set()
             rows["_media"] = _gc_attach_media(rows, media_map, _matched)
+
+            # 소재 줄 아랫줄의 캠페인 이름을 **매체 관리자 이름**으로 덮어쓴다.
+            # GA의 utm_campaign은 '추석세일'처럼 줄여 적은 값이라 광고 관리자의
+            # 'STCO_추석세일_전환'과 달라서, 관리자 화면과 대조할 때 매번 한 단계
+            # 번역이 필요했다. 매체 API가 준 이름이 있으면 그게 정답이다.
+            if level == "소재" and not rows.empty:
+                rows["key"] = [
+                    _gc_key_html(
+                        r["cre_title"],
+                        (str((r["_media"] or {}).get("campaign") or "").strip()
+                         or r.get("campaign")),
+                        r["target"],
+                        1 if str((r["_media"] or {}).get("campaign") or "").strip()
+                        else r.get("n_camp", 1))
+                    for _, r in rows.iterrows()]
             # 매체에는 있는데 GA에서 못 찾은 소재 — 소재 탭에서는 줄로 세우고,
             # 타겟팅·캠페인·매체 탭에서는 그 매체 합계에 넣는다(합계가 매체 관리자와 맞게).
             leftovers = [(k, v) for k, v in media_map.items()
@@ -14959,7 +15061,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         leftovers, key=lambda x: -float(x[1].get("cost", 0) or 0)):
                     _nm = str(m.get("name") or name_k)
                     _row = pd.Series({
-                        "key": (f'{_nm}<span class="gc-sub">{ch_k} · '
+                        "key": (f'{_nm}<span class="gc-sub">'
+                                f'{str(m.get("campaign") or "").strip() or ch_k} · '
                                 f'GA 매칭 안 됨</span>'),
                         "sessions": 0.0, "conv": 0.0, "rev": 0.0,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
