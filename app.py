@@ -14386,9 +14386,25 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         label = _ops_kpi_status(roas) if cost > 0 else ""
 
     name, sub = _gc_plain(r["key"] if not isinstance(r, dict) else r.get("key", ""))
+
+    # 엑셀에서는 '캠페인 · 타겟팅'을 한 칸에 붙여 놓으면 필터도 피벗도 못 건다.
+    # 열을 갈라두면 엑셀에서 타겟팅별로 걸러 보는 게 클릭 두 번이면 끝난다.
+    _get = (r.get if isinstance(r, dict) else (lambda k, d=None: r[k] if k in r else d))
+    _camp = str(_get("campaign", "") or "").strip()
+    _tgt = str(_get("target", "") or "").strip()
+    if not is_total and sub and not (_camp or _tgt):
+        # leftovers처럼 rows에 없는 줄은 아랫줄 문자열에서 되꺼낸다
+        _parts = [p.strip() for p in sub.split("·")]
+        _camp = _parts[0] if _parts else ""
+        _tgt = _parts[1] if len(_parts) > 1 else ""
+    _seg = str(_get("_seg", "") or "") or (
+        _gc_target_group({"target": _tgt, "campaign": _camp, "creative": name})
+        if not is_total else "")
     return {
         "이름": "TOTAL" if is_total else name,
-        "구분": sub,
+        "캠페인": "" if is_total else _camp,
+        "타겟팅": "" if is_total else _tgt,
+        "구분": "" if is_total else _seg,
         "_img": img_url,
         "노출": imp, "클릭": clk, "CTR(%)": ctr, "CPC": (cost / clk) if clk else 0.0,
         "광고비(VAT+)": cost, "방문(세션)": ses,
@@ -14449,7 +14465,9 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
-    cols = ["이름", "구분"] + (["이미지"] if with_images else []) + [
+    # 캠페인·타겟팅·구분을 따로 둬야 엑셀에서 필터와 피벗이 된다.
+    # (예전엔 'STCO_수트_전환 · 패션관심타겟'을 한 칸에 넣어서 타겟팅별로 못 갈랐다)
+    cols = ["이름", "캠페인", "타겟팅", "구분"] + (["이미지"] if with_images else []) + [
         "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "방문(세션)",
         "구매", "매출", "객단가", "ROAS(%)", "판정", "기준"]
     # CTR·ROAS는 값이 이미 퍼센트 단위(110 = 110%)라 엑셀 기본 '백분율' 서식을 쓰면
@@ -14459,7 +14477,8 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": '0.00"%"', "CPC": '#,##0"원"',
               "광고비(VAT+)": '#,##0"원"', "방문(세션)": "#,##0", "구매": "#,##0",
               "매출": '#,##0"원"', "객단가": '#,##0"원"', "ROAS(%)": '#,##0"%"'}
-    width = {"이름": 34, "구분": 22, "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
+    width = {"이름": 30, "캠페인": 22, "타겟팅": 16, "구분": 12,
+             "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
              "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "방문(세션)": 11, "구매": 9,
              "매출": 15, "객단가": 12, "ROAS(%)": 11, "판정": 12, "기준": 11}
 
@@ -14477,6 +14496,10 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
 
     for tab, recs in sheets.items():
         ws = wb.create_sheet(_gc_safe_sheet(tab, used))
+        # 엑셀에서는 TOTAL을 **맨 아래로** 보낸다. 머리글 바로 밑에 두면 필터를 걸었을 때
+        # 합계까지 같이 걸러져 사라진다(화면에서는 맨 위 고정이 맞지만 엑셀은 다르다).
+        recs = ([r for r in recs if r.get("이름") != "TOTAL"]
+                + [r for r in recs if r.get("이름") == "TOTAL"])
         # 행 번호는 직접 센다. ws.append([])(빈 줄)는 max_row를 올리지 않아서,
         # max_row로 계산하면 머리글 서식이 한 줄 위에 칠해진다.
         ws["A1"] = f"{tab} · {level}별 GA 성과"
@@ -14525,6 +14548,13 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
                     done += 1
                     if progress and total_imgs:
                         progress(done / total_imgs)
+
+        # 머리글에 필터를 걸어둔다 — 받자마자 타겟팅·구분으로 걸러 볼 수 있게.
+        # (TOTAL 줄은 필터 범위에서 빼야 걸러도 합계가 안 사라진다)
+        _n_tot = sum(1 for r in recs if r.get("이름") == "TOTAL")
+        if rrow - _n_tot > hrow:
+            ws.auto_filter.ref = (f"A{hrow}:"
+                                  f"{get_column_letter(len(cols))}{rrow - _n_tot}")
 
     buf = io.BytesIO()
     wb.save(buf)
