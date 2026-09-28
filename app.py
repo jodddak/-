@@ -2907,6 +2907,22 @@ def gfa_tab_of(text) -> str | None:
     return None
 
 
+def gfa_tab_or_mo(text) -> str:
+    """기기를 못 읽은 GFA는 **모바일로 본다.**
+
+    캠페인명에 `_PC`/`_MO`가 안 붙은 줄이 조금씩 남는데(9/14~9/27: `데일리_전환`
+    50,410원 · 2건), 그걸 '미분류'로 빼두면 PC 탭에도 MO 탭에도 안 들어가서
+    소재별 합계가 채널 성과보다 그만큼 작아진다. GFA 지면은 사실상 모바일이고
+    실제로 확인해도 모바일이라, 미분류로 버리지 말고 모바일에 넣는다.
+    """
+    tab = gfa_tab_of(text)
+    if tab:
+        return tab
+    s = str(text or "")
+    ext = ("외부몰" in s) or ("스마트스토어" in s)
+    return GFA_MO_EXT if ext else GFA_MO_OWN
+
+
 def _map_creative_channel(inferred_channel: str, campaign_series: pd.Series) -> pd.Series:
     """행별 매체탭 라벨을 계산. 현재 미운영 매체는 None을 반환해 화면/저장에서 제외되도록 한다."""
     idx = campaign_series.index
@@ -4694,8 +4710,9 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
         base = _mr_channel_of(v, fname)
         if base.startswith("네이버 GFA"):
             ext = base.endswith("_외부몰")
-            tab = gfa_tab_of(f"{v} {'외부몰' if ext else '자사몰'}")
-            channels.append(tab or ("네이버 GFA (외부몰)" if ext else "네이버 GFA"))
+            # 기기 표시가 없으면 모바일로 본다 — GA 쪽과 같은 규칙이어야
+            # 소재별 표에서 광고비와 매출이 같은 탭에 모인다.
+            channels.append(gfa_tab_or_mo(f"{v} {'외부몰' if ext else '자사몰'}"))
         else:
             channels.append(base)
 
@@ -11292,6 +11309,75 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
     return out
 
 
+def _cp_media_matcher(master: pd.DataFrame):
+    """소스/매체 → 매체명. 채널 성과가 쓰는 규칙 그대로(완전일치 → 긴 부분일치)."""
+    def norm(s):
+        return "".join(str(s or "").lower().split())
+
+    exact, partial = {}, []
+    for _, m in master.sort_values("sort_order").iterrows():
+        for kw in str(m.get("utm_match") or "").split(","):
+            kw = norm(kw)
+            if kw:
+                exact.setdefault(kw, m["media"])
+                partial.append((len(kw), kw, m["media"]))
+    partial.sort(key=lambda x: -x[0])
+
+    def match(sm):
+        k = norm(sm)
+        if k in exact:
+            return exact[k]
+        for _, kw, mm in partial:
+            if kw in k:
+                return mm
+        return None
+    return match
+
+
+def _cp_ga_reclass(master: pd.DataFrame, start: date, end: date) -> dict:
+    """소스/매체로는 틀리게 분류된 GA 구매·매출을 **매체끼리 옮긴다.**
+
+    채널 성과가 쓰는 ga_channel_daily에는 캠페인이 없어서, 소스/매체가 잘못 심긴 줄을
+    거기서는 바로잡을 방법이 없다. ga_creative_daily에는 캠페인이 있으므로 여기서
+    '얼마를 어디로 옮겨야 하는지'만 계산해 화면에서 더하고 뺀다.
+
+    지금 잡는 것: 애드부스트 링크가 `utm_medium=GFA`로 나가 일반 GFA로 들어온 줄.
+    돌려주는 값: {(보낸 매체, 받을 매체): {conv, rev, names}}
+    """
+    out = {}
+    try:
+        cre = load_table("ga_creative_daily")
+    except Exception:
+        return out
+    if cre is None or cre.empty or "source_medium" not in cre.columns:
+        return out
+    c = cre.copy()
+    c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+    c = c[(c["report_date"] >= start) & (c["report_date"] <= end)]
+    if c.empty:
+        return out
+    if "campaign" not in c.columns:
+        return out
+    for col in ("conversions", "revenue"):
+        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+    c["_to"] = [_ga_media_fix(sm, cp) for sm, cp in zip(c["source_medium"], c["campaign"])]
+    c = c[c["_to"].notna()]
+    if c.empty:
+        return out
+    match = _cp_media_matcher(master)
+    for _, r in c.iterrows():
+        src = match(r["source_medium"])
+        dst = r["_to"]
+        if not src or src == dst:
+            continue
+        e = out.setdefault((src, dst), {"conv": 0.0, "rev": 0.0, "names": {}})
+        e["conv"] += float(r["conversions"])
+        e["rev"] += float(r["revenue"])
+        _n = str(r.get("campaign") or "")
+        e["names"][_n] = e["names"].get(_n, 0.0) + float(r["revenue"])
+    return out
+
+
 def _cp_excluded_ga(master: pd.DataFrame, start: date, end: date) -> dict:
     """제외 대상(마케팅팀 등) 캠페인의 GA 구매·매출을 **매체별로** 집계한다.
 
@@ -12118,6 +12204,17 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         if _m in ga_map:
             ga_map[_m]["conv"] = max(0.0, ga_map[_m]["conv"] - _v["conv"])
             ga_map[_m]["rev"] = max(0.0, ga_map[_m]["rev"] - _v["rev"])
+
+    # 소스/매체가 잘못 심겨 다른 매체로 들어온 구매·매출을 제자리로 옮긴다.
+    # (애드부스트 링크가 utm_medium=GFA로 나가 GFA_자사몰에 섞이던 건)
+    _rc_ga = _cp_ga_reclass(mst, start, end)
+    for (_src, _dst), _v in _rc_ga.items():
+        if _src in ga_map:
+            ga_map[_src]["conv"] = max(0.0, ga_map[_src]["conv"] - _v["conv"])
+            ga_map[_src]["rev"] = max(0.0, ga_map[_src]["rev"] - _v["rev"])
+        if _dst in ga_map:
+            ga_map[_dst]["conv"] += _v["conv"]
+            ga_map[_dst]["rev"] += _v["rev"]
     # 기간이 여러 달에 걸치면(최근 30일, 1~8월 직접 지정) 그 달들의 예산을 전부 더한다.
     # 예전엔 시작일이 속한 한 달 예산만 써서, 8개월 광고비를 1개월 예산으로 나눠 소진율이
     # 800%처럼 나왔다.
@@ -12215,6 +12312,20 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "ℹ️ 온라인팀 성과가 아니라서 **광고비와 매출을 같이 뺀 것**: "
             + " / ".join(_bits)
             + " — GA4에서 직접 보시면 이 금액이 포함돼 있어 숫자가 더 큽니다."
+        )
+
+    # 매체를 옮긴 게 있으면 그 자리에서 밝힌다 — 조용히 옮기면 GA4 화면과 안 맞는 이유를 못 찾는다.
+    if _rc_ga:
+        _bits = []
+        for (_s, _d), _v in sorted(_rc_ga.items(), key=lambda kv: -kv[1]["rev"]):
+            _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:2])
+            _bits.append(f"**{_s} → {_d}** 구매 {_v['conv']:,.0f}건 · "
+                         f"매출 {_v['rev']:,.0f}원 (캠페인 {_nm})")
+        st.caption(
+            "ℹ️ 소스/매체가 잘못 심겨 다른 매체로 들어온 것을 제자리로 옮겼습니다: "
+            + " / ".join(_bits)
+            + " — 랜딩 URL의 `utm_medium`을 고치면(애드부스트는 `GFA_애드부스트`) "
+            "이 보정이 필요 없어집니다."
         )
 
     # 메타 광고비에서 캠페인 단위로 빼낸 것 (같은 계정에 다른 팀 캠페인이 있을 때)
@@ -13236,6 +13347,34 @@ def _gc_tab_sort_key(c) -> str:
     return _GC_TAB_ORDER_FIX.get(c, str(c))
 
 
+ADBOOST_MEDIA = "GFA_애드부스트"          # 매체 정의(media_master)에 쓰는 이름
+ADBOOST_TAB = "네이버 애드부스트"          # 소재별 화면의 탭 이름
+
+
+def _is_adboost_campaign(campaign) -> bool:
+    s = str(campaign or "").lower().replace(" ", "")
+    return ("애드부스트" in s) or ("adboost" in s) or ("advoost" in s)
+
+
+def _ga_media_fix(source_medium, campaign):
+    """소스/매체만으로는 틀리게 분류되는 줄을 캠페인 이름으로 바로잡는다.
+
+    애드부스트는 원래 `utm_medium=GFA_애드부스트`로 심는데, 일부 링크가
+    `utm_medium=GFA`로 나가서 GA에는 일반 GFA로 들어온다.
+    (9/14~9/27: `Naver / GFA` + 캠페인 `애드부스트` = 매출 185,142원 · 2건)
+    그대로 두면 GFA_자사몰 매출이 부풀고 애드부스트는 실제보다 작게 나온다.
+    캠페인 이름이 '애드부스트'면 소스/매체가 뭐라 적혀 있든 애드부스트다.
+
+    돌려주는 값: 옮겨야 할 매체 이름, 옮길 필요 없으면 None.
+    """
+    sm = str(source_medium or "").lower()
+    if "gfa" not in sm:
+        return None
+    if "애드부스트" in sm or "adboost" in sm:
+        return None                       # 이미 애드부스트로 잘 들어왔다
+    return ADBOOST_MEDIA if _is_adboost_campaign(campaign) else None
+
+
 def _gc_ga_channel(channel, campaign) -> str:
     """GA 줄의 매체명. GFA는 utm_campaign에서 기기(PC/MO)와 몰(자사/외부)을 읽는다.
 
@@ -13244,12 +13383,15 @@ def _gc_ga_channel(channel, campaign) -> str:
     거기서 읽는다. 기기를 못 읽으면 '네이버 GFA'(미상)로 남긴다 — 억지로 안 나눈다.
     """
     base = _gc_channel(channel)
+    # 애드부스트 링크가 utm_medium=GFA로 나간 줄은 GFA가 아니라 애드부스트다.
+    if base.startswith("네이버 GFA") and _is_adboost_campaign(campaign):
+        return ADBOOST_TAB
     if base in ("네이버 GFA", "네이버 GFA (외부몰)"):
         # 채널명에서 이미 외부몰인 걸 알았으면 캠페인에 그 말이 없어도 외부몰이다.
         blob = str(campaign or "")
         if base.endswith("(외부몰)") and "외부몰" not in blob:
             blob += " 외부몰"
-        return gfa_tab_of(blob) or base
+        return gfa_tab_or_mo(blob)
     return base
 
 
