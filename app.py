@@ -10165,13 +10165,132 @@ def fetch_meta_creative_images(days: int = 60) -> dict:
     return out
 
 
+CREATIVE_IMG_PX = 1200       # Storage에 올릴 소재 이미지 크기 (정사각 1200×1200)
+
+
+def _square_jpeg(raw: bytes, px: int = CREATIVE_IMG_PX) -> bytes:
+    """어떤 비율로 들어오든 **가운데를 잘라 정사각 1200×1200 JPEG**으로 맞춘다.
+
+    소재 이미지가 매체·자산마다 1:1 / 1.91:1 / 4:5로 제각각이라, 표에 나란히 놓으면
+    어떤 건 꽉 차고 어떤 건 위아래 띠가 생겨 비교가 산만해진다. 화면 CSS로도 잘라
+    보여주지만 엑셀로 받으면 원본 비율이 그대로 나와서 또 제각각이 된다.
+    저장할 때 한 번 맞춰두면 화면·엑셀이 같이 정리된다.
+    """
+    im = Image.open(io.BytesIO(raw))
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+    w, h = im.size
+    if w != h:                                   # 가운데 기준 정사각 크롭
+        side = min(w, h)
+        im = im.crop(((w - side) // 2, (h - side) // 2,
+                      (w - side) // 2 + side, (h - side) // 2 + side))
+    if im.size[0] != px:
+        im = im.resize((px, px), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, format="JPEG", quality=88, optimize=True)
+    return buf.getvalue()
+
+
+def fetch_google_creative_images() -> dict:
+    """구글 P-MAX 애셋그룹의 배너를 {정규화 소재명: 이미지 URL}로 받아온다.
+
+    P-MAX는 애셋그룹 하나에 이미지를 **여러 비율로** 올린다
+    (SQUARE 1:1 / MARKETING 1.91:1 / PORTRAIT 4:5). 지금은 대행사 리포트에 박혀 온
+    이미지를 쓰다 보니 그룹마다 비율이 달라 표가 들쭉날쭉했다.
+    여기서는 **정사각 자산을 먼저** 고르고, 없으면 가장 1:1에 가까운 큰 자산을 쓴다.
+    """
+    cfg = _secrets_section("google_ads")
+    need = ["developer_token", "client_id", "client_secret", "refresh_token", "customer_id"]
+    if not cfg or any(not cfg.get(k) for k in need):
+        return {}
+    import requests
+
+    tok = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={"client_id": cfg["client_id"], "client_secret": cfg["client_secret"],
+              "refresh_token": cfg["refresh_token"], "grant_type": "refresh_token"},
+        timeout=60).json()
+    if "access_token" not in tok:
+        return {}
+    cid = str(cfg["customer_id"]).replace("-", "").strip()
+    headers = {"Authorization": f"Bearer {tok['access_token']}",
+               "developer-token": str(cfg["developer_token"]).strip(),
+               "Content-Type": "application/json"}
+    if cfg.get("login_customer_id"):
+        headers["login-customer-id"] = str(cfg["login_customer_id"]).replace("-", "").strip()
+
+    query = (
+        "SELECT asset_group.name, campaign.name, asset_group_asset.field_type, "
+        "asset.image_asset.full_size.url, asset.image_asset.full_size.width_pixels, "
+        "asset.image_asset.full_size.height_pixels "
+        "FROM asset_group_asset "
+        "WHERE asset_group_asset.field_type IN "
+        "('SQUARE_MARKETING_IMAGE','MARKETING_IMAGE','PORTRAIT_MARKETING_IMAGE')"
+    )
+    candidates = []
+    if cfg.get("api_version"):
+        candidates.append(str(cfg["api_version"]).strip())
+    candidates += [f"v{n}" for n in range(GOOGLE_ADS_VER_MAX, GOOGLE_ADS_VER_MIN - 1, -1)]
+
+    best = {}      # 소재명 → (점수, url)
+    for ver in candidates:
+        try:
+            r = requests.post(
+                f"https://googleads.googleapis.com/{ver}/customers/{cid}/googleAds:searchStream",
+                headers=headers, json={"query": query}, timeout=90)
+        except Exception:
+            continue
+        if r.status_code == 404:
+            continue
+        if r.status_code >= 400:
+            continue
+        for batch in (r.json() or []):
+            for res in batch.get("results", []):
+                if _google_campaign_excluded((res.get("campaign") or {}).get("name")):
+                    continue
+                nm = _creative_image_key(
+                    str((res.get("assetGroup") or {}).get("name") or "").strip())
+                full = (((res.get("asset") or {}).get("imageAsset") or {}).get("fullSize") or {})
+                url = full.get("url")
+                if not nm or not url:
+                    continue
+                w = float(full.get("widthPixels") or 0)
+                h = float(full.get("heightPixels") or 0)
+                ftype = str((res.get("assetGroupAsset") or {}).get("fieldType") or "")
+                # 점수: 정사각 자산 > 비율이 1:1에 가까움 > 크기가 큼
+                square = 1 if ftype == "SQUARE_MARKETING_IMAGE" or (w and w == h) else 0
+                ratio_gap = abs((w / h) - 1) if (w and h) else 9
+                score = (square, -ratio_gap, w * h)
+                if nm not in best or score > best[nm][0]:
+                    best[nm] = (score, url)
+        break
+    return {k: v[1] for k, v in best.items()}
+
+
 META_IMG_WORKERS = 12        # 동시에 받아 올릴 장수
 META_IMG_BUDGET_SEC = 90     # 한 번에 쓸 최대 시간 — 넘으면 다음 동기화로 넘긴다
 
 
-def sync_meta_creative_images(progress=None, max_seconds: int = META_IMG_BUDGET_SEC,
+def sync_google_creative_images(progress=None, force: bool = False,
+                                max_seconds: int = META_IMG_BUDGET_SEC,
+                                workers: int = META_IMG_WORKERS) -> tuple:
+    """구글 P-MAX 배너를 받아 Storage에 올린다. (올린 수, 건너뛴 수, 오류목록)"""
+    return _sync_creative_images(fetch_google_creative_images(), "구글", progress,
+                                 force, max_seconds, workers)
+
+
+def sync_meta_creative_images(progress=None, force: bool = False,
+                              max_seconds: int = META_IMG_BUDGET_SEC,
                               workers: int = META_IMG_WORKERS) -> tuple:
-    """메타 배너를 받아 Storage에 올린다. (올린 수, 건너뛴 수, 오류목록)
+    """메타 배너를 받아 Storage에 올린다. (올린 수, 건너뛴 수, 오류목록)"""
+    return _sync_creative_images(fetch_meta_creative_images(), "메타", progress,
+                                 force, max_seconds, workers)
+
+
+def _sync_creative_images(found: dict, label: str, progress=None, force: bool = False,
+                          max_seconds: int = META_IMG_BUDGET_SEC,
+                          workers: int = META_IMG_WORKERS) -> tuple:
+    """소재 배너를 받아 **정사각 1200×1200으로 맞춰** Storage에 올린다.
 
     이미 올라가 있는 소재는 건너뛴다 — 매번 수백 장을 다시 올릴 이유가 없다.
 
@@ -10190,9 +10309,11 @@ def sync_meta_creative_images(progress=None, max_seconds: int = META_IMG_BUDGET_
 
     import requests
 
+    if not found:
+        return 0, 0, []
     have = set(_gc_stored_image_index().keys())
-    found = fetch_meta_creative_images()
-    todo = [(k, v) for k, v in found.items() if _safe_storage_name(k) not in have]
+    todo = [(k, v) for k, v in found.items()
+            if force or _safe_storage_name(k) not in have]
     skip = len(found) - len(todo)
     if not todo:
         return 0, skip, []
@@ -10203,6 +10324,10 @@ def sync_meta_creative_images(progress=None, max_seconds: int = META_IMG_BUDGET_
         name_key, src = item
         try:
             raw = sess.get(src, timeout=30).content
+            try:
+                raw = _square_jpeg(raw)      # 비율이 제각각이라 1200×1200으로 맞춘다
+            except Exception:
+                pass                         # 이미지를 못 열면 원본 그대로 올린다
             client.storage.from_(CREATIVE_IMAGE_BUCKET).upload(
                 f"{GC_IMAGE_FOLDER}/{_safe_storage_name(name_key)}.jpeg", raw,
                 {"content-type": "image/jpeg", "upsert": "true"})
@@ -10224,7 +10349,7 @@ def sync_meta_creative_images(progress=None, max_seconds: int = META_IMG_BUDGET_
                 elif len(errs) < 3:
                     errs.append(err)
         if progress:
-            progress(f"메타 배너 {min(bi + batch, len(todo)):,}/{len(todo):,}장 "
+            progress(f"{label} 배너 {min(bi + batch, len(todo)):,}/{len(todo):,}장 "
                      f"({_time.time() - t0:.0f}초)")
     if done:
         _gc_stored_image_index.clear()
@@ -14307,13 +14432,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # ③ 메타 배너 이미지 — 광고(ad)에 붙은 크리에이티브 썸네일을 받아 Storage에 넣는다.
             #    메타가 주는 썸네일 URL은 서명이 들어 있어 시간이 지나면 만료되므로
             #    화면에 바로 쓰지 않고 우리 쪽에 복사해둔다.
-            st.write("③ 메타 배너 이미지")
-            try:
-                _im_new, _im_skip, _im_err = sync_meta_creative_images(progress=st.write)
-                st.write(f"   ✅ 새로 {_im_new}장 · 이미 있음 {_im_skip}장"
-                         + (f" · ⚠️ {_im_err[0]}" if _im_err else ""))
-            except Exception as _e:
-                st.write(f"   ⚠️ 건너뜀 — {str(_e)[:100]}")
+            st.write("③ 소재 배너 이미지 (1200×1200으로 맞춰 저장)")
+            for _lbl, _fn in (("메타", sync_meta_creative_images),
+                              ("구글 P-MAX", sync_google_creative_images)):
+                try:
+                    _im_new, _im_skip, _im_err = _fn(progress=st.write)
+                    st.write(f"   {_lbl} — 새로 {_im_new}장 · 이미 있음 {_im_skip}장"
+                             + (f" · ⚠️ {_im_err[0]}" if _im_err else ""))
+                except Exception as _e:
+                    st.write(f"   {_lbl} ⚠️ 건너뜀 — {str(_e)[:100]}")
             _st2.update(label=f"소재 데이터 동기화 완료 (GA {n:,}행 · 매체 {n2:,}행)",
                         state="complete")
         # 바로 아래에서 st.rerun()을 하면 지금 그린 경고가 통째로 사라진다.
@@ -14529,6 +14656,30 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "표에서 **이미지 없음**으로 뜨는 것만 채우시면 됩니다. "
                 f"현재 직접 올려둔 이미지 {len(store_idx)}장."
             )
+            st.markdown("---")
+            st.caption(
+                "**비율이 제각각인 옛 이미지 고치기** — 예전에 저장된 배너는 가로형"
+                "(1.91:1)·세로형이 섞여 있어 표에서 들쭉날쭉합니다. 아래를 누르면 매체 "
+                "API에서 다시 받아 **정사각 1200×1200으로 맞춰** 덮어씁니다. "
+                "구글 P-MAX는 정사각 자산이 있으면 그걸 먼저 씁니다."
+            )
+            _rc1, _rc2 = st.columns(2)
+            for _c, _lbl, _fn in ((_rc1, "구글 P-MAX", sync_google_creative_images),
+                                  (_rc2, "메타", sync_meta_creative_images)):
+                if _c.button(f"🖼️ {_lbl} 이미지 다시 받기 (덮어쓰기)",
+                             key=f"gc_img_redo_{_lbl}", use_container_width=True):
+                    with st.status(f"{_lbl} 이미지를 다시 받는 중...", expanded=True) as _s5:
+                        try:
+                            _n, _sk, _er = _fn(progress=st.write, force=True)
+                            st.write(f"✅ {_n}장 새로 맞춰 올렸습니다")
+                            for _e in _er[:3]:
+                                st.write(f"⚠️ {_e}")
+                            _s5.update(label=f"{_lbl} 이미지 {_n}장 완료", state="complete")
+                        except Exception as _e:
+                            _s5.update(label=f"실패 — {str(_e)[:120]}", state="error")
+                    _gc_stored_image_index.clear()
+                    st.cache_data.clear()
+                    st.rerun()
 
     _panels["img_upload"] = _img_upload_panel
 
