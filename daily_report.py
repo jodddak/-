@@ -82,7 +82,12 @@ DASHBOARD_URL = env("DASHBOARD_URL")
 # ── 판정 기준 (app.py와 같은 값) ───────────────────────────────
 KPI_ROAS_LOW = 200        # 목표 하단(%)
 KPI_ROAS_HIGH = 300       # 목표 상단(%)
-MIN_SPEND_PER_DAY = 100_000   # 하루 기준 표본 문턱. 주간은 일수만큼 곱해서 쓴다.
+# 집행이 적어도 **일단 판단은 해준다.** 예전엔 하루 10만원(주간이면 70만원) 문턱을
+# 못 넘으면 전부 '판단 보류'로 빠져서, 메일에서 읽을 줄이 두어 개밖에 안 남았다.
+# 이제 문턱은 '아예 말을 못 할 금액'까지만 낮추고, 그 위로는 판단하되 표본이 작으면
+# 그렇다고 붙인다 — 숨기는 것보다 조건을 밝히는 쪽이 쓸모 있다.
+MIN_JUDGE_SPEND = 10_000      # 기간 합계가 이보다 적을 때만 판단 보류
+MIN_SPEND_PER_DAY = 100_000   # 하루 기준 '표본 작음' 표시 문턱. 주간은 일수만큼 곱한다.
 STEP = 0.10               # 증액·감액은 한 번에 10%씩 (급격한 이동 금지)
 
 # 광고비 출처 우선순위 — 같은 날 여러 출처가 있으면 낮은 숫자가 이긴다.
@@ -320,8 +325,9 @@ def build_actions(df: pd.DataFrame, n_days: int = 1) -> tuple[str, list[dict], f
       기간이 길면 문턱도 같이 올린다(주간은 하루 문턱 × 7일). 안 그러면 주간에서는
       거의 모든 매체가 문턱을 넘어버려서 표본 검사가 무력해진다.
     """
-    floor = MIN_SPEND_PER_DAY * max(1, n_days)
-    floor_txt = (f"{n_days}일 합계 {floor:,.0f}원" if n_days > 1 else f"{floor:,.0f}원")
+    small = MIN_SPEND_PER_DAY * max(1, n_days)     # 이 아래면 '표본 작음'
+    floor = MIN_JUDGE_SPEND                        # 이 아래면 아예 판단 보류
+    small_txt = (f"{n_days}일 합계 {small:,.0f}원" if n_days > 1 else f"{small:,.0f}원")
 
     up, keep, down, hold, skip = [], [], [], [], []
     for _, r in df.iterrows():
@@ -343,8 +349,10 @@ def build_actions(df: pd.DataFrame, n_days: int = 1) -> tuple[str, list[dict], f
         else:
             down.append((m, cost, roas))
 
-    up.sort(key=lambda x: -x[2])
-    down.sort(key=lambda x: x[2])
+    # 표본이 넉넉한 매체를 앞으로 — 1만원 쓴 매체가 ROAS 900%라고 헤드라인을
+    # 가져가면 진짜 제안이 묻힌다.
+    up.sort(key=lambda x: (x[1] < small, -x[2]))
+    down.sort(key=lambda x: (x[1] < small, x[2]))
 
     if up and down:
         head = f"{up[0][0]}를 늘리고 {down[0][0]}를 줄이세요."
@@ -362,23 +370,27 @@ def build_actions(df: pd.DataFrame, n_days: int = 1) -> tuple[str, list[dict], f
         '+70만원'이라고 하면 하루 예산을 그만큼 올리라는 말로 읽혀서 위험하다."""
         return c * STEP / max(1, n_days)
 
+    def tail(c):
+        """표본이 작으면 그 사실을 문장 끝에 붙인다(제안 자체는 그대로 한다)."""
+        return "" if c >= small else f" · 표본 작음({small_txt} 미만)이라 확신은 낮습니다"
+
     items = []
     for m, c, ro in up:
         items.append({"tag": "증액 검토", "cls": "up", "media": m,
                       "text": f"ROAS {ro:,.0f}% · 집행 {c:,.0f}원 → 예산 +{STEP*100:.0f}% "
-                              f"(일 +{move(c):,.0f}원) 테스트 후 48시간 관찰"})
+                              f"(일 +{move(c):,.0f}원) 테스트 후 48시간 관찰" + tail(c)})
     for m, c, ro in down:
         items.append({"tag": "감액·점검", "cls": "down", "media": m,
                       "text": f"ROAS {ro:,.0f}% · 집행 {c:,.0f}원 → 예산 −{STEP*100:.0f}% "
-                              f"(일 −{move(c):,.0f}원) 또는 소재·타겟 점검 먼저"})
+                              f"(일 −{move(c):,.0f}원) 또는 소재·타겟 점검 먼저" + tail(c)})
     for m, c, ro in keep:
         items.append({"tag": "유지", "cls": "keep", "media": m,
-                      "text": f"ROAS {ro:,.0f}% · 집행 {c:,.0f}원 → 현 수준 유지"})
+                      "text": f"ROAS {ro:,.0f}% · 집행 {c:,.0f}원 → 현 수준 유지" + tail(c)})
     for m, c, ro in hold:
         rr = "—" if (ro is None or pd.isna(ro)) else f"{ro:,.0f}%"
         items.append({"tag": "판단 보류", "cls": "hold", "media": m,
-                      "text": f"집행 {c:,.0f}원으로 표본이 작습니다 (ROAS {rr}). "
-                              f"{floor_txt} 넘을 때까지 판단 유보"})
+                      "text": f"집행 {c:,.0f}원 — 판단할 만한 금액이 아닙니다 (ROAS {rr}). "
+                              f"{floor:,.0f}원은 넘어야 합니다"})
     for m, why in skip:
         items.append({"tag": "판단 제외", "cls": "skip", "media": m, "text": why})
     return head, items, floor
@@ -613,7 +625,7 @@ def render_html(weekly: bool, start: date, end: date, df: pd.DataFrame,
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px">{''.join(li)}</table>
       <div style="color:#5E6B2A;font-size:11.5px;margin-top:13px;line-height:1.6">
         기준: GA-ROAS 목표 {KPI_ROAS_LOW}~{KPI_ROAS_HIGH}% ·
-        집행 {floor:,.0f}원 미만은 판단 보류 ·
+        집행 {floor:,.0f}원 미만만 판단 보류(그 위는 표본이 작아도 판단합니다) ·
         예산 이동은 한 번에 {STEP*100:.0f}%씩만 제안합니다
       </div>
     </div>"""
