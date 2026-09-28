@@ -8328,6 +8328,11 @@ FUNNEL_V4_CSS = """
 .fv4-tbl th { color:#8a8a7c; font-weight:700; font-size:12.5px; letter-spacing:.01em;
   text-align:right; padding:11px 12px; background:#F7F6EF; white-space:nowrap;
   border-bottom:1px solid #E3E1DC; position:sticky; top:0; z-index:2; }
+/* 표 바로 위 '중복 포함' 안내 — TOTAL 칸 안에 넣었더니 줄이 뭉개져서 밖으로 뺐다 */
+.fv4-dup { background:#FFF7ED; border:1px solid #FED7AA; border-left:3px solid #EA580C;
+           border-radius:8px; padding:9px 12px; margin:0 0 10px 0;
+           font-size:12.5px; line-height:1.65; color:#7C2D12; }
+.fv4-dup b { color:#9A3412; }
 /* 방문자 열의 '중복' 꼬리표 — 날짜·매체로 쪼개 센 값이라 실제 사람 수보다 크다는 표시 */
 .fv4-tbl th sup { font-size:9px; font-weight:700; color:#C2410C; margin-left:2px;
                   letter-spacing:0; vertical-align:super; }
@@ -15758,7 +15763,7 @@ def render_ga_channel_funnel_page(
             else:
                 nm = f'<b>{b}</b>'
                 brows.append(rowfn(nm, s_, 0.0, "fv4-bk-row") + "<td></td></tr>")
-        brows_sum = ""
+        brows_sum, _dup_line = "", ""
         if not buckets.empty:
             tot = buckets[["users", "new", "ret", "signup", "new_conv", "new_rev",
                            "ret_conv", "ret_rev", "conv", "rev"]].sum()
@@ -15766,14 +15771,17 @@ def render_ga_channel_funnel_page(
             # 크다. 캡션에 써놨지만 표를 먼저 보게 되니 안 읽힌다 — 숫자 바로 옆에 붙인다.
             # (신규는 한 사람당 한 번뿐이라 거의 안 불어나고, 재방문자가 올 때마다 세어져서
             #  총 방문자만 크게 부푼다. 그 차이를 같이 보여주면 오해가 없다.)
-            _lbl = "TOTAL"
+            brows_sum = rowfn("TOTAL", tot, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
             _dup = float(tot.get("users", 0) or 0) - float(users_now or 0)
             if _site_now.get("ok") and _dup > 0:
-                _lbl = ('TOTAL<span class="fv4-bk-sub">'
-                        f'방문자는 날짜·매체 <b>중복 포함</b> — 실제 사람은 '
-                        f'{users_now:,.0f}명(신규 {new_now:,.0f}명) · 중복 {_dup:,.0f}명'
-                        '</span>')
-            brows_sum = rowfn(_lbl, tot, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
+                _dup_line = (
+                    '<div class="fv4-dup">'
+                    f'이 표의 <b>총 방문자 {float(tot.get("users", 0) or 0):,.0f}명</b>은 '
+                    '날짜·매체로 쪼개 센 것을 더한 값이라 <b>중복이 들어 있습니다.</b> '
+                    f'실제 사람은 <b>{users_now:,.0f}명</b>(신규 {new_now:,.0f}명) — '
+                    f'중복 {_dup:,.0f}명. 같은 사람이 여러 날·여러 경로로 오면 그만큼 '
+                    '더 세어집니다. <b>매체끼리 비교할 때만</b> 쓰세요.'
+                    '</div>')
 
         # ── ② 광고 매체별 상세 ──
         mrows = []
@@ -15803,12 +15811,10 @@ def render_ga_channel_funnel_page(
             f'<div class="fv4-card-title">{title}</div><div class="fv4-card-sub">{sub}</div>'
             + _v4_funnel_html(stages, bench)
             + '<div class="fv4-sec">채널 대분류</div>'
+            + _dup_line
             + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위 고정입니다. '
               '광고비는 신규·재방문으로 나눌 수 없어 <b>전액 기준</b>이라, '
-              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.<br>'
-              '<b>총 방문자 = 신규 방문자 + 재방문자</b>로 딱 맞습니다(GA4 방문수 기준). '
-              'GA4 보고서의 <b>총 사용자</b>는 중복을 뺀 사람 수라 이보다 작고 신규+재방문과도 '
-              '안 맞는데, 그 값은 매체별로 나눌 수가 없어 쓰지 않습니다.</div>'
+              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.</div>'
             + build_table("fvtblA", head, brows_sum, brows)
             + '<div class="fv4-sec">광고 매체별 상세</div>'
             + '<div class="fv4-bk-cap">위 표의 <b>광고</b> 줄을 매체로 쪼갠 것입니다 — '
