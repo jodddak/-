@@ -15015,23 +15015,33 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 #    이름 후보를 넓게 모으는 게 핵심이다 — 이 기간 소재에 붙어 들어온
                 #    이름만 보면, 지금 꺼져 있는 캠페인(STCO_시즌베스트)은 목록에 없어서
                 #    GA 이름 그대로 남는다. 그래서 세 군데서 긁어모은다.
-                _mnames = set()
-                for _k, _m in media_map.items():           # 이 기간 소재에 붙은 이름
+                #
+                # 후보는 **확신이 센 것부터** 세 단계로 본다. 한 단계에서 짝이 하나로
+                # 정해지면 거기서 끝낸다. 이렇게 하지 않으면 'STCO_아우터'와
+                # 'STCO_아우터_전환'처럼 이름이 겹칠 때 영영 못 고른다 —
+                # 실제로 돈이 나간 쪽이 답인데 계정 목록만 보면 둘 다 후보가 된다.
+                _p1 = set()                                # ① 이 기간 소재에 붙은 이름
+                for _k, _m in media_map.items():
                     if _k[0] in ch_keep:
-                        _mnames.update(c for c in (_m.get("campaigns") or []) if c)
+                        _p1.update(c for c in (_m.get("campaigns") or []) if c)
+                _p2 = set()                                # ② 저장된 전 기간 소재 데이터
                 if (ad_creative is not None and not ad_creative.empty
                         and "campaign" in ad_creative.columns):
                     _ac = ad_creative[ad_creative["channel"].map(
-                        lambda c: _gc_channel(c) in ch_keep)]          # 저장된 전 기간
-                    _mnames.update(str(v).strip() for v in _ac["campaign"].dropna()
-                                   if str(v).strip())
+                        lambda c: _gc_channel(c) in ch_keep)]
+                    _p2.update(str(v).strip() for v in _ac["campaign"].dropna()
+                               if str(v).strip())
+                _p3 = set()                                # ③ 계정의 캠페인 목록 전체
                 try:
-                    _mnames.update(meta_campaign_names().get(label, []))   # 메타 계정 전체
+                    _p3.update(meta_campaign_names().get(label, []))
                 except Exception:
                     pass
+                _mnames = _p1 | _p2 | _p3
+
                 _ga_names = {c for cl in rows.get("camp_list", []) if cl for c in cl}
-                for _g, _n in _gc_camp_dict(_mnames, _ga_names - set(_c2c)).items():
-                    _c2c.setdefault(_g, _n)
+                for _pool in (_p1, _p1 | _p2, _mnames):
+                    for _g, _n in _gc_camp_dict(_pool, _ga_names - set(_c2c)).items():
+                        _c2c.setdefault(_g, _n)
 
                 # 못 바꾼 이름이 있으면 그 자리에서 알려준다 — 조용히 두면
                 # '왜 어떤 건 STCO_로 나오고 어떤 건 아니지'에서 또 막힌다.
