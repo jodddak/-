@@ -12163,7 +12163,7 @@ def contract_gap_days(contracts: pd.DataFrame, channel: str,
     return out
 
 
-def _contract_gap_warning(ad_spend, start: date, end: date):
+def _contract_gap_warning(ad_spend, start: date, end: date, show: bool = True) -> int:
     """정액 계약 매체가 '돌고는 있는데 계약이 안 걸린' 기간을 잡아낸다.
 
     계약을 갱신하고 대시보드에 안 넣으면 그 기간 광고비가 통째로 0이 된다.
@@ -12174,15 +12174,15 @@ def _contract_gap_warning(ad_spend, start: date, end: date):
     try:
         saved_ct = load_table("ad_contract")
     except Exception:
-        return
+        return 0
     if ad_spend is None or ad_spend.empty:
-        return
+        return 0
     a = ad_spend.copy()
     a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
     a = a.dropna(subset=["_d"])
     a = a[(a["_d"] >= start) & (a["_d"] <= end)]
     if a.empty:
-        return
+        return 0
     for c in ("impressions", "clicks"):
         a[c] = pd.to_numeric(a.get(c), errors="coerce").fillna(0)
 
@@ -12194,8 +12194,8 @@ def _contract_gap_warning(ad_spend, start: date, end: date):
         ran = set(sub.loc[sub["impressions"] + sub["clicks"] > 0, "_d"])
         gap = sorted(ran & set(contract_gap_days(saved_ct, ch, start, end)))
         if gap:
-            msgs.append(f"**{ch}** — {gap[0]:%m/%d}~{gap[-1]:%m/%d} ({len(gap)}일)")
-    if msgs:
+            msgs.append(f"**{ch}** — {gap[0]:%m/%d}\\~{gap[-1]:%m/%d} ({len(gap)}일)")
+    if msgs and show:
         st.warning(
             "정액 계약이 비어 있는 기간이 있습니다: " + " · ".join(msgs) + "\n\n"
             "광고는 돌았는데(노출·클릭 있음) 계약이 안 걸려 있어 **그 기간 광고비가 0원**으로 "
@@ -12203,6 +12203,7 @@ def _contract_gap_warning(ad_spend, start: date, end: date):
             "**🗂️ 자료 입력 · 참고 → 📄 정액 계약 광고비**에 계약을 한 줄 추가하고 "
             "[저장하고 반영]을 눌러주세요."
         )
+    return len(msgs)
 
 
 def contracts_to_daily(contracts: pd.DataFrame) -> pd.DataFrame:
@@ -12255,18 +12256,21 @@ def _spend_gap_days(ga_daily, ad_spend, start: date, end: date):
     return len(ga_days), sorted(ga_days - sp_days)
 
 
-def _spend_gap_warning(ga_daily, ad_spend, start: date, end: date, where: str = "아래 **광고비 다시 받기**"):
+def _spend_gap_warning(ga_daily, ad_spend, start: date, end: date, where: str = "아래 **광고비 다시 받기**",
+                       show: bool = True) -> int:
     """매체 API는 처음 연동할 때 최근 30일만 받아온다. 그 전 기간을 고르면 GA 매출은
     8개월치인데 광고비는 1개월치라 ROAS가 몇 배로 부풀려 보인다(1~8월 보고 놀란 그 문제).
     광고비가 비어 있는 날을 세어 먼저 알려준다."""
     n_ga, gap = _spend_gap_days(ga_daily, ad_spend, start, end)
-    if n_ga and len(gap) >= 3:
+    hit = bool(n_ga and len(gap) >= 3)
+    if hit and show:
         st.warning(
             f"선택 기간 {n_ga}일 중 **{len(gap)}일은 매체 API 광고비가 없습니다** "
-            f"({gap[0]:%m/%d}~{gap[-1]:%m/%d}). GA 매출은 있는데 광고비가 빠져 있어 "
+            f"({gap[0]:%m/%d}\\~{gap[-1]:%m/%d}). GA 매출은 있는데 광고비가 빠져 있어 "
             f"이 기간의 ROAS·CAC·예산 소진율은 실제보다 좋게 나옵니다 — {where}로 "
             "그 기간을 지정해 채워주세요. (매체별 과거 조회 한도가 달라 일부는 안 채워질 수 있습니다)"
         )
+    return int(hit)
 
 
 GFA_OWN_MEDIA = "GFA_자사몰"      # 매체 정의(media_master)의 이름
@@ -12611,56 +12615,66 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "_order": int(r.get("sort_order") or 100),
         })
     df = pd.DataFrame(recs)
+    # ── 알림·보정 내역 ────────────────────────────────────
+    # 예전엔 표 위에 줄줄이 떠서 표가 한참 아래로 밀렸다. 매일 볼 건 표라서, 알림은 표 **아래**
+    # 접힌 패널로 모으고 제목에 건수(확인이 필요한 경고는 따로)만 보여준다.
     _ext_basis = sorted(df.loc[df["_basis"] == "매체", "매체"].unique()) if not df.empty else []
-    if _ext_basis:
-        st.caption(
-            "ℹ️ " + ", ".join(_ext_basis) + " 의 구매·매출은 **매체가 신고한 값**입니다 — "
-            "외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. "
-            "어트리뷰션 기준이 GA와 달라(보통 더 후합니다) 자사몰 매체와 나란히 "
-            "비교하진 마세요."
-        )
-
-    _spend_gap_warning(ga_daily, ad_spend, start, end)
-    _contract_gap_warning(ad_spend, start, end)
-    for _k, _v in (st.session_state.get("meta_account_errors") or {}).items():
-        st.warning(f"**{_k}** — {_v}")
-
-    # 온라인팀 성과가 아니라 뺀 것을 한 줄로 알려준다 — 광고비와 매출을 같이 빼야
-    # ROAS가 정직해진다. 조용히 빼면 'GA4에서 본 숫자와 왜 다르지'로 시간을 뺏긴다.
-    if _ex_ga:
-        _bits = []
-        for _m, _v in sorted(_ex_ga.items(), key=lambda kv: -kv[1]["rev"]):
-            _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:3])
-            _bits.append(f"**{_m}** 구매 {_v['conv']:,.0f}건 · 매출 {_v['rev']:,.0f}원 ({_nm})")
-        st.caption(
-            "ℹ️ 온라인팀 성과가 아니라서 **광고비와 매출을 같이 뺀 것**: "
-            + " / ".join(_bits)
-            + " — GA4에서 직접 보시면 이 금액이 포함돼 있어 숫자가 더 큽니다."
-        )
-
-    # 매체를 옮긴 게 있으면 그 자리에서 밝힌다 — 조용히 옮기면 GA4 화면과 안 맞는 이유를 못 찾는다.
-    if _rc_ga:
-        _bits = []
-        for (_s, _d), _v in sorted(_rc_ga.items(), key=lambda kv: -kv[1]["rev"]):
-            _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:2])
-            _bits.append(f"**{_s} → {_d}** 구매 {_v['conv']:,.0f}건 · "
-                         f"매출 {_v['rev']:,.0f}원 (캠페인 {_nm})")
-        st.caption(
-            "ℹ️ 소스/매체가 잘못 심겨 다른 매체로 들어온 것을 제자리로 옮겼습니다: "
-            + " / ".join(_bits)
-            + " — 랜딩 URL의 `utm_medium`을 고치면(애드부스트는 `GFA_애드부스트`) "
-            "이 보정이 필요 없어집니다."
-        )
-
-    # 메타 광고비에서 캠페인 단위로 빼낸 것 (같은 계정에 다른 팀 캠페인이 있을 때)
+    _meta_errs = st.session_state.get("meta_account_errors") or {}
     _mx = st.session_state.get("meta_excluded_campaigns") or {}
-    if _mx:
-        st.caption(
-            "ℹ️ 메타 광고비에서 뺀 캠페인 — "
-            + " / ".join(f"**{k}** {v:,.0f}원"
-                         for k, v in sorted(_mx.items(), key=lambda kv: -kv[1])[:5])
-            + " (가장 최근 동기화 기준)"
-        )
+    _n_warn = (_spend_gap_warning(ga_daily, ad_spend, start, end, show=False)
+               + _contract_gap_warning(ad_spend, start, end, show=False)
+               + len(_meta_errs))
+    _n_info = sum(1 for x in (_ext_basis, _ex_ga, _rc_ga, _mx) if x)
+
+    def _render_cp_notices():
+        if _ext_basis:
+            st.caption(
+                "ℹ️ " + ", ".join(_ext_basis) + " 의 구매·매출은 **매체가 신고한 값**입니다 — "
+                "외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. "
+                "어트리뷰션 기준이 GA와 달라(보통 더 후합니다) 자사몰 매체와 나란히 "
+                "비교하진 마세요."
+            )
+
+        _spend_gap_warning(ga_daily, ad_spend, start, end)
+        _contract_gap_warning(ad_spend, start, end)
+        for _k, _v in _meta_errs.items():
+            st.warning(f"**{_k}** — {_v}")
+
+        # 온라인팀 성과가 아니라 뺀 것을 한 줄로 알려준다 — 광고비와 매출을 같이 빼야
+        # ROAS가 정직해진다. 조용히 빼면 'GA4에서 본 숫자와 왜 다르지'로 시간을 뺏긴다.
+        if _ex_ga:
+            _bits = []
+            for _m, _v in sorted(_ex_ga.items(), key=lambda kv: -kv[1]["rev"]):
+                _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:3])
+                _bits.append(f"**{_m}** 구매 {_v['conv']:,.0f}건 · 매출 {_v['rev']:,.0f}원 ({_nm})")
+            st.caption(
+                "ℹ️ 온라인팀 성과가 아니라서 **광고비와 매출을 같이 뺀 것**: "
+                + " / ".join(_bits)
+                + " — GA4에서 직접 보시면 이 금액이 포함돼 있어 숫자가 더 큽니다."
+            )
+
+        # 매체를 옮긴 게 있으면 그 자리에서 밝힌다 — 조용히 옮기면 GA4 화면과 안 맞는 이유를 못 찾는다.
+        if _rc_ga:
+            _bits = []
+            for (_s, _d), _v in sorted(_rc_ga.items(), key=lambda kv: -kv[1]["rev"]):
+                _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:2])
+                _bits.append(f"**{_s} → {_d}** 구매 {_v['conv']:,.0f}건 · "
+                             f"매출 {_v['rev']:,.0f}원 (캠페인 {_nm})")
+            st.caption(
+                "ℹ️ 소스/매체가 잘못 심겨 다른 매체로 들어온 것을 제자리로 옮겼습니다: "
+                + " / ".join(_bits)
+                + " — 랜딩 URL의 `utm_medium`을 고치면(애드부스트는 `GFA_애드부스트`) "
+                "이 보정이 필요 없어집니다."
+            )
+
+        # 메타 광고비에서 캠페인 단위로 빼낸 것 (같은 계정에 다른 팀 캠페인이 있을 때)
+        if _mx:
+            st.caption(
+                "ℹ️ 메타 광고비에서 뺀 캠페인 — "
+                + " / ".join(f"**{k}** {v:,.0f}원"
+                             for k, v in sorted(_mx.items(), key=lambda kv: -kv[1])[:5])
+                + " (가장 최근 동기화 기준)"
+            )
 
     # ── 구분 필터 (KPI보다 위) ────────────────────────────
     # 필터를 KPI 아래에 두면 '자사몰'을 골라도 위 숫자는 전체라서 예산·ROAS를 잘못 읽게 된다.
@@ -12910,6 +12924,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 })();
 </script>"""
     st.components.v1.html(html, height=_h, scrolling=False)
+
+    if _n_warn or _n_info:
+        _lbl = "🔔 알림 · 보정 내역"
+        if _n_warn:
+            _lbl += f" — ⚠️ 확인 필요 {_n_warn}건"
+        if _n_info:
+            _lbl += f" · 참고 {_n_info}건"
+        with st.expander(_lbl, expanded=False):
+            _render_cp_notices()
 
     # 어느 매체에도 안 잡힌 GA 유입을 드러낸다. 조용히 사라지면 합계가 안 맞는 걸 눈치채기 어렵다.
     un = ga_map.get("_미매칭", {})
