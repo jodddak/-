@@ -2636,16 +2636,33 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
     return out
 
 
-def build_utm_channel_lookup(utm_map: pd.DataFrame) -> dict:
+# UTM 리스트 파일엔 없지만 **우리 메타로 보는** 옛 인스타그램 소스들 (담당자 확인 2026-09-30).
+# 예전에 쓰던 링크라 유입만 0~1건씩 들어오고 구매는 거의 없다 — 채널 퍼널의 유입 단계에서만
+# 의미가 있어서, 소재별 성과(소재명이 없어 빈 줄만 생긴다)에는 붙이지 않는다.
+# 기준 매체는 'Facebook / Facebook_Feed'가 UTM 리스트에서 받은 이름을 그대로 따른다.
+GA_META_EXTRA_SOURCES = ("ig / paid", "ig / social", "instagram.com / referral")
+GA_META_ANCHOR_SOURCE = "facebook / facebook_feed"
+GA_META_FALLBACK_CHANNEL = "(DA) 페이스북"
+
+
+def build_utm_channel_lookup(utm_map: pd.DataFrame, include_extra: bool = True) -> dict:
     """utm_channel_map 테이블(source_medium/channel)을 대소문자·공백 차이에 안전한
-    lookup dict로 바꾼다 — GA 원본 값이 'Naver / cpc'처럼 대소문자가 섞여 올 수 있어서."""
+    lookup dict로 바꾼다 — GA 원본 값이 'Naver / cpc'처럼 대소문자가 섞여 올 수 있어서.
+
+    include_extra=True면 UTM 리스트에 없는 옛 인스타 소스(GA_META_EXTRA_SOURCES)를
+    메타로 얹는다. 파일에 이미 적혀 있으면 파일 쪽을 따른다."""
     if utm_map is None or utm_map.empty:
         return {}
-    return {
+    out = {
         str(sm).strip().lower(): ch
         for sm, ch in zip(utm_map["source_medium"], utm_map["channel"])
         if pd.notna(sm) and pd.notna(ch)
     }
+    if include_extra:
+        meta_ch = out.get(GA_META_ANCHOR_SOURCE) or GA_META_FALLBACK_CHANNEL
+        for sm in GA_META_EXTRA_SOURCES:
+            out.setdefault(sm, meta_ch)
+    return out
 
 
 def _ga_daily_agg(ga_channel_inflow: pd.DataFrame) -> pd.DataFrame:
@@ -11935,6 +11952,9 @@ CP_CSS = """
 .cp-pace i{display:block;height:100%;background:#14181F;border-radius:3px}
 .cp-pace u{position:absolute;top:-3px;width:2px;height:11px;background:#E0654A;text-decoration:none}
 .cp-tot td{background:#F4F2ED;font-weight:800;border-top:2px solid #E3E1DC}
+/* GFA_자사몰 아래 기기별 하위 줄 — 합계에 이미 들어 있는 내역이라 한 톤 낮춘다 */
+.cp-subrow td{background:#FAFAF7;color:#5E646C;font-size:13.5px;padding-top:8px;padding-bottom:8px}
+.cp-tbl td.cp-subname{font-weight:600;color:#5E646C;padding-left:18px}
 .cp-note{font-size:14px;color:#6E747C;margin-top:12px;line-height:1.85}
 .cp-arrow{text-align:center;color:#9AA0A8;font-size:15px;padding-top:34px}
 /* NEXT BEST ACTION 카드 — 아래에 바로 다음 패널이 붙어 답답해서 여백을 뒀다 */
@@ -12247,6 +12267,99 @@ def _spend_gap_warning(ga_daily, ad_spend, start: date, end: date, where: str = 
             f"이 기간의 ROAS·CAC·예산 소진율은 실제보다 좋게 나옵니다 — {where}로 "
             "그 기간을 지정해 채워주세요. (매체별 과거 조회 한도가 달라 일부는 안 채워질 수 있습니다)"
         )
+
+
+GFA_OWN_MEDIA = "GFA_자사몰"      # 매체 정의(media_master)의 이름
+
+
+def _cp_gfa_device_split(master: pd.DataFrame, parent: dict, start: date, end: date) -> list:
+    """채널 성과의 GFA_자사몰 한 줄을 **PC / MO 하위 줄**로 펼친다.
+
+    합계 줄(예산·소진율·GA 매출)은 그대로 두고, 그 아래에 기기별 내역만 붙인다.
+    예산은 기기별로 잡혀 있지 않으니 하위 줄엔 넣지 않는다(임의로 쪼개면 추정치가 된다).
+
+      · 노출·클릭·광고비 → ad_creative_daily(대행사 리포트, 캠페인 _PC/_MO로 이미 갈라져 있음)의
+        기기별 **비중**으로 합계 줄을 나눈다. 리포트가 하루 이틀 늦게 올라와도 하위 줄 합이
+        합계 줄과 항상 같게 하려고 절대값 대신 비중을 쓴다.
+      · GA 구매·매출 → ga_creative_daily의 utm_campaign(_PC/_MO)으로 PC를 뽑고,
+        **MO = 합계 − PC**. 기기 표시가 없는 캠페인은 모바일로 본다(소재별 성과와 같은 규칙).
+        애드부스트로 옮긴 줄(utm_medium=GFA로 잘못 나간 링크)은 빼고 센다.
+
+    돌려주는 값: [{"매체": "PC", 노출, 클릭, 비용, GA구매, GA매출, GA ROAS, "_approx": bool}, ...]
+    나눌 근거가 없으면 빈 리스트.
+    """
+    tabs = (("PC", GFA_PC_OWN), ("MO", GFA_MO_OWN))
+
+    # ── 광고비 쪽: 기기별 비중 ──
+    share = {}           # metric -> {"PC": x, "MO": y}
+    raw_cost = 0.0
+    try:
+        acd = load_table("ad_creative_daily")
+    except Exception:
+        acd = None
+    if acd is not None and not acd.empty and "channel" in acd.columns:
+        a = acd.copy()
+        a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
+        a = a[(a["_d"] >= start) & (a["_d"] <= end)]
+        if not a.empty:
+            a["_tab"] = a["channel"].map(_gc_channel)
+            a = a[a["_tab"].isin([GFA_PC_OWN, GFA_MO_OWN])]
+            for col in ("impressions", "clicks", "cost_incl_vat"):
+                a[col] = pd.to_numeric(a.get(col), errors="coerce").fillna(0)
+            if not a.empty:
+                for col in ("impressions", "clicks", "cost_incl_vat"):
+                    share[col] = {lbl: float(a.loc[a["_tab"] == tab, col].sum())
+                                  for lbl, tab in tabs}
+                raw_cost = float(a["cost_incl_vat"].sum())
+
+    # ── GA 쪽: PC만 뽑고 나머지는 MO ──
+    pc_conv = pc_rev = 0.0
+    ga_ok = False
+    try:
+        cre = load_table("ga_creative_daily")
+    except Exception:
+        cre = None
+    if (cre is not None and not cre.empty and "source_medium" in cre.columns
+            and "campaign" in cre.columns):
+        c = cre.copy()
+        c["_d"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+        c = c[(c["_d"] >= start) & (c["_d"] <= end)]
+        if not c.empty:
+            match = _cp_media_matcher(master)
+            c = c[c["source_medium"].map(match) == GFA_OWN_MEDIA]
+            c = c[[_ga_media_fix(sm, cp) is None
+                   for sm, cp in zip(c["source_medium"], c["campaign"])]]
+            if not c.empty:
+                ga_ok = True
+                for col in ("conversions", "revenue"):
+                    c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+                is_pc = c["campaign"].map(lambda cp: gfa_tab_or_mo(cp) == GFA_PC_OWN)
+                pc_conv = float(c.loc[is_pc, "conversions"].sum())
+                pc_rev = float(c.loc[is_pc, "revenue"].sum())
+
+    if not share and not ga_ok:
+        return []
+
+    p_conv, p_rev = float(parent.get("GA구매") or 0), float(parent.get("GA매출") or 0)
+    pc_conv, pc_rev = min(pc_conv, p_conv), min(pc_rev, p_rev)
+    ga_part = {"PC": (pc_conv, pc_rev), "MO": (p_conv - pc_conv, p_rev - pc_rev)}
+
+    p_cost = float(parent.get("비용") or 0)
+    approx = bool(share) and p_cost > 0 and abs(raw_cost - p_cost) > max(1000.0, p_cost * 0.01)
+
+    out = []
+    for lbl, _tab in tabs:
+        rec = {"매체": lbl, "_approx": approx}
+        for col, key in (("impressions", "노출"), ("clicks", "클릭"), ("cost_incl_vat", "비용")):
+            s = share.get(col)
+            tot = sum(s.values()) if s else 0.0
+            rec[key] = (float(parent.get(key) or 0) * s[lbl] / tot) if tot > 0 else None
+        rec["GA구매"], rec["GA매출"] = (ga_part[lbl] if ga_ok else (None, None))
+        cost = rec["비용"]
+        rec["GA ROAS"] = ((rec["GA매출"] / cost * 100)
+                          if (cost and cost > 0 and rec["GA매출"] is not None) else None)
+        out.append(rec)
+    return out
 
 
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
@@ -12610,6 +12723,46 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     th = "".join(
         f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}<span class="cp-ar">&#8645;</span></th>'
         for h in heads)
+    # GFA_자사몰은 합계 줄 아래에 PC / MO 하위 줄을 붙인다 (예산은 합계 줄에만).
+    _gfa_subs, _gfa_approx = {}, False
+    try:
+        _gp = view[view["매체"] == GFA_OWN_MEDIA]
+        if not _gp.empty:
+            _subs = _cp_gfa_device_split(mst, _gp.iloc[0].to_dict(), start, end)
+            if _subs:
+                _gfa_subs[GFA_OWN_MEDIA] = _subs
+                _gfa_approx = any(s.get("_approx") for s in _subs)
+    except Exception as _e:
+        st.caption(f"GFA PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
+
+    def _sub_rows_html(parent_name, subs):
+        mute = '<span class="cp-mute">—</span>'
+        rows = []
+        for s in subs:
+            _imp, _clk, _cost = s["노출"], s["클릭"], s["비용"]
+            _ctr = (_clk / _imp * 100) if (_imp and _clk is not None) else None
+            _cpc = (_cost / _clk) if (_clk and _cost is not None) else None
+            fmt_i = lambda v: mute if v is None else _cp_int(v)
+            fmt_w = lambda v: mute if v is None else _cp_won(v)
+            dv = lambda v, p=0: f"{(-1 if v is None else v):.{p}f}"
+            _ctr_v = mute if _ctr is None else f"{_ctr:.2f}%"
+            _roas = s["GA ROAS"]
+            _roas_v = mute if _roas is None else f"{_roas:,.1f}%"
+            rows.append(
+                f'<tr class="cp-subrow" data-parent="{parent_name}">'
+                f'<td class="l"></td>'
+                f'<td class="l m cp-subname">└ {s["매체"]}</td>'
+                f'<td data-v="{dv(_imp)}">{fmt_i(_imp)}</td>'
+                f'<td data-v="{dv(_clk)}">{fmt_i(_clk)}</td>'
+                f'<td data-v="{dv(_ctr, 3)}">{_ctr_v}</td>'
+                f'<td data-v="{dv(_cpc)}">{fmt_w(_cpc)}</td>'
+                f'<td data-v="{dv(_cost)}">{fmt_w(_cost)}</td>'
+                f'<td data-v="{dv(s["GA구매"])}">{fmt_i(s["GA구매"])}</td>'
+                f'<td data-v="{dv(s["GA매출"])}">{fmt_w(s["GA매출"])}</td>'
+                f'<td data-v="{dv(_roas, 2)}">{_roas_v}</td>'
+                f'<td>{mute}</td><td>{mute}</td></tr>')
+        return "".join(rows)
+
     body = []
     for _, r in view.iterrows():
         badge = "cp-ext" if r["구분"] == "외부몰" else "cp-own"
@@ -12635,7 +12788,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         sub = f'<div class="sub">{src}</div>' if src else ""
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
         body.append(
-            f'<tr><td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
+            f'<tr data-name="{r["매체"]}"><td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
             f'<td class="l m">{r["매체"]}{sub}</td>'
             f'<td data-v="{r["노출"]:.0f}">{_cp_int(r["노출"])}</td>'
             f'<td data-v="{r["클릭"]:.0f}">{_cp_int(r["클릭"])}</td>'
@@ -12647,6 +12800,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             f'<td data-v="{nn(r["GA ROAS"]):.2f}">{roas_v}</td>'
             f'<td data-v="{r["월예산"]:.0f}">{bud}</td>'
             f'<td data-v="{nn(r["예산 소진율"]):.2f}">{pace_v}</td></tr>')
+        if r["매체"] in _gfa_subs:
+            body.append(_sub_rows_html(r["매체"], _gfa_subs[r["매체"]]))
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{view["GA매출"].sum() / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
@@ -12669,7 +12824,13 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         '· 네이버 브랜드검색은 정액(보장형) 상품이라 API가 집행액을 안 줍니다 — 노출·클릭만 API에서 오고 '
         '광고비는 위 칸에서 직접 넣습니다.<br>'
         '· 외부몰(쇼핑검색·맨즈탭 외부몰) 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 0으로 표시됩니다.'
-        '</div>'
+        + ('<br>· <b>└ PC / └ MO</b>는 GFA_자사몰의 기기별 내역입니다(합계에 이미 포함, 예산은 합계 줄에만). '
+           '광고비는 대행사 리포트의 기기 비중으로 나누고, GA 매출은 utm_campaign의 _PC/_MO로 가릅니다 — '
+           '기기 표시가 없는 캠페인은 MO로 봅니다.'
+           + (' <b>리포트가 이 기간 광고비와 달라(업로드 전 날짜 등) 기기별 광고비는 비중으로 나눈 값입니다.</b>'
+              if _gfa_approx else '')
+           if _gfa_subs else '')
+        + '</div>'
     )
     html = (
         CP_CSS
@@ -12696,7 +12857,13 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         var tb = tbl.tBodies[0];
         var rows = Array.prototype.slice.call(tb.rows);
         var total = rows.filter(function(r){return r.classList.contains('cp-tot');});
-        rows = rows.filter(function(r){return !r.classList.contains('cp-tot');});
+        // 하위 줄(└ PC / └ MO)은 따로 정렬하지 않고 항상 제 부모 줄 바로 밑에 붙인다.
+        var subs = {};
+        rows.filter(function(r){return r.classList.contains('cp-subrow');}).forEach(function(r){
+          var p = r.getAttribute('data-parent'); (subs[p] = subs[p] || []).push(r);
+        });
+        rows = rows.filter(function(r){
+          return !r.classList.contains('cp-tot') && !r.classList.contains('cp-subrow');});
         rows.sort(function(a,b){
           var x=val(a,i), y=val(b,i);
           if(typeof x==='number' && typeof y==='number'){
@@ -12706,7 +12873,11 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
           return asc ? String(x).localeCompare(String(y),'ko')
                      : String(y).localeCompare(String(x),'ko');
         });
-        rows.concat(total).forEach(function(r){tb.appendChild(r);});
+        rows.forEach(function(r){
+          tb.appendChild(r);
+          (subs[r.getAttribute('data-name')] || []).forEach(function(s){tb.appendChild(s);});
+        });
+        total.forEach(function(r){tb.appendChild(r);});
         for(var k=0;k<ths.length;k++){
           ths[k].querySelector('.cp-ar').textContent = (k===i) ? (asc?'\u2191':'\u2193') : '\u21C5';
         }
@@ -12723,7 +12894,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 본문 20 + 보조 19를 더해 약 63px. 머리글 41, 아래 설명글 약 100.
     # 조금 넉넉하게 잡고 scrolling=False로 둬서, 어긋나도 스크롤바 대신 여백만 생기게 한다.
     # (아래 스크립트가 실제 높이를 재서 다시 맞춰준다 — 되면 여백도 사라진다.)
-    _h = 41 + 63 * (len(view) + 1) + 110
+    _h = 41 + 63 * (len(view) + 1) + 46 * sum(len(v) for v in _gfa_subs.values()) + 110 \
+        + (40 if _gfa_subs else 0)
     html += """
 <script>
 (function(){
@@ -14596,7 +14768,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         '<div class="fv4-h2">GA 소재별 성과</div></div>', unsafe_allow_html=True)
 
     def _run_sync(reason: str, unlimited: bool = True):
-        cmap = (build_utm_channel_lookup(utm_map)
+        cmap = (build_utm_channel_lookup(utm_map, include_extra=False)
                 if utm_map is not None and not utm_map.empty else {})
         with st.status(f"소재 데이터를 받는 중... ({reason})", expanded=True) as _st2:
             st.write("① GA4 — 방문·구매·매출")
@@ -14790,7 +14962,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # 매체 판정은 저장된 channel을 믿지 않고 지금의 UTM 매핑으로 다시 입힌다.
     # 동기화할 때 매핑이 비어 있었거나 그 뒤에 매핑을 고쳤을 수 있어서, 화면 기준으로 맞춘다.
-    lookup = (build_utm_channel_lookup(utm_map)
+    lookup = (build_utm_channel_lookup(utm_map, include_extra=False)
               if utm_map is not None and not utm_map.empty else {})
     if lookup:
         d["channel"] = d["source_medium"].map(
@@ -15372,7 +15544,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "남습니다 — 화면이 GA4 보고서보다 클 때 여기를 누르시면 맞춰집니다."
             )
             if st.button("지우고 다시 받기", key="gc_repull", type="primary"):
-                _cmap = (build_utm_channel_lookup(utm_map)
+                _cmap = (build_utm_channel_lookup(utm_map, include_extra=False)
                          if utm_map is not None and not utm_map.empty else {})
                 with st.status(f"{start}~{end} 다시 받는 중...", expanded=True) as _st4:
                     _ok = True
