@@ -12946,7 +12946,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             )
             keys = sorted(un.get("keys", {}).items(), key=lambda x: -x[1])[:30]
             st.dataframe(
-                pd.DataFrame(keys, columns=["소스 / 매체", "GA 매출"]),
+                # 천 단위 쉼표 + 원 단위 반올림. Styler로 표시만 바꿔서 정렬은 숫자 그대로 된다.
+                pd.DataFrame(keys, columns=["소스 / 매체", "GA 매출"]).style.format(
+                    {"GA 매출": "{:,.0f}"}),
                 use_container_width=True, hide_index=True,
             )
 
@@ -12963,10 +12965,11 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             st.info("이 기간에 GA 데이터가 없습니다.")
         else:
             st.dataframe(
-                bd, use_container_width=True, hide_index=True,
+                bd.style.format({"구매": "{:,.0f}", "매출": "{:,.0f}"}),
+                use_container_width=True, hide_index=True,
                 column_config={
-                    "구매": st.column_config.NumberColumn("GA 구매", format="%d"),
-                    "매출": st.column_config.NumberColumn("GA 매출", format="₩%d"),
+                    "구매": st.column_config.Column("GA 구매"),
+                    "매출": st.column_config.Column("GA 매출"),
                 },
             )
             un = bd[bd["매체"] == "(미매칭)"]
