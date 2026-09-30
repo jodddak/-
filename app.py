@@ -12163,6 +12163,18 @@ def contract_gap_days(contracts: pd.DataFrame, channel: str,
     return out
 
 
+# 편집 표(data_editor)의 숫자 칸에 천 단위 쉼표를 넣는 서식.
+# 'localized'는 Streamlit 1.42부터 있다 — 그보다 낮으면 예전처럼 쉼표 없이 둔다(오류 대신).
+def _st_ver() -> tuple:
+    try:
+        return tuple(int(x) for x in st.__version__.split(".")[:2])
+    except Exception:
+        return (0, 0)
+
+
+ST_NUM_COMMA = "localized" if _st_ver() >= (1, 42) else "%d"
+
+
 def _contract_gap_warning(ad_spend, start: date, end: date, show: bool = True) -> int:
     """정액 계약 매체가 '돌고는 있는데 계약이 안 걸린' 기간을 잡아낸다.
 
@@ -12463,7 +12475,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                     "channel": st.column_config.SelectboxColumn("매체", options=CONTRACT_CHANNELS, required=True),
                     "start_date": st.column_config.DateColumn("계약 시작", format="YYYY-MM-DD", required=True),
                     "end_date": st.column_config.DateColumn("계약 종료", format="YYYY-MM-DD", required=True),
-                    "amount_incl_vat": st.column_config.NumberColumn("계약 총액(VAT 포함)", format="%d", min_value=0),
+                    "amount_incl_vat": st.column_config.NumberColumn("계약 총액(VAT 포함)", format=ST_NUM_COMMA, min_value=0),
                     "note": st.column_config.TextColumn("메모"),
                 },
             )
@@ -12473,7 +12485,10 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                     일수=("report_date", "count"), 합계=("cost_incl_vat", "sum"))
                 g["일 광고비"] = (g["합계"] / g["일수"]).round(0)
                 st.caption("저장하면 이렇게 펼쳐집니다 (일할)")
-                st.dataframe(g, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    g.rename(columns={"channel": "매체"}).style.format(
+                        {"일수": "{:,.0f}", "합계": "{:,.0f}", "일 광고비": "{:,.0f}"}),
+                    use_container_width=True, hide_index=True)
             if st.button("저장하고 반영", key="cp_contract_save", type="primary"):
                 e = ct_edit.dropna(subset=["channel", "start_date", "end_date"])
                 if e.empty:
