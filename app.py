@@ -8337,6 +8337,12 @@ FUNNEL_V4_CSS = """
 .fv4-chip.good { background:#E4F6DC; color:#2C7A3C; }
 .fv4-chip.warn { background:#FBF0CE; color:#8A6714; }
 .fv4-chip.hold { background:#EFEEE8; color:#767668; }
+.fv4-chip.off  { background:#C0273A; color:#FFFFFF; }
+.fv4-chip.up   { background:#2C7A3C; color:#FFFFFF; }
+.fv4-chip.keep { background:#EAF1FB; color:#2C5AA0; }
+/* 판정 칩 밑 사유 한 줄 — 왜 그 판정인지 바로 읽히게 */
+.gc-why { font-size:11px; color:#8a8a7c; margin-top:4px; line-height:1.4;
+          white-space:normal; max-width:210px; margin-left:auto; text-align:right; }
 .fv4-signal-title { color:#fdfdf7; font-size:14px; font-weight:700; margin-bottom:5px; }
 .fv4-signal-sub { color:#96968a; font-size:13.5px; line-height:1.5; }
 
@@ -8427,6 +8433,16 @@ div[role="radiogroup"] > label p {
 div[role="radiogroup"] > label:has(input:checked) {
     background:#191f28 !important; border-color:#191f28 !important; }
 div[role="radiogroup"] > label:has(input:checked) p { color:#FFFFFF !important; }
+
+/* 소재 운영 기준 코멘트 — 주간보고처럼 번호 매긴 문장 */
+.gc-cmt { background:#FFFBEA; border:1px solid #F0E2BC; border-radius:10px;
+          padding:12px 16px; margin:6px 0 12px; font-size:13.5px; line-height:1.75;
+          color:#3B3A33; }
+.gc-cmt > div { padding-left:1.2em; text-indent:-1.2em; }
+
+/* 타겟팅 / 품목 버튼 줄 앞의 작은 이름표 */
+.gc-flt-lbl { font-size:12.5px; font-weight:800; color:#8a8a7c; padding-top:9px;
+              letter-spacing:.02em; white-space:nowrap; }
 
 /* 표 바로 위 '중복 포함' 안내 — TOTAL 칸 안에 넣었더니 줄이 뭉개져서 밖으로 뺐다 */
 .fv4-dup { background:#FFF7ED; border:1px solid #FED7AA; border-left:3px solid #EA580C;
@@ -13993,6 +14009,173 @@ def _gc_pick_image(row, img_map: dict, store_idx: dict):
     return None
 
 
+# ══════════════════════════════════════════════════════════════
+# 소재 운영 기준 (2026-10 확정안 · 시트 '① 소재 운영 기준(안)')
+#
+# 예전 판정(_v4_verdict)은 '클릭 10회에 구매 0이면 미달 · ROAS 300% 이상 증액'처럼
+# 신규/리타겟팅을 구분하지 않고, 표본(광고비) 기준도 들쭉날쭉해서 실무에서 잘 안 봤다.
+# 아래는 담당자와 정한 기준이다. **판정은 ROAS로**, 다만 ROAS를 믿을 만큼 돈이
+# 쌓였는지(광고비 10만원 = 구매 1건 허용 광고비 4만원의 2.5배)를 먼저 본다.
+# 매체 예산 크기와 무관하게 '구매 1건 값'은 3~5만원대로 비슷해서 한 숫자로 쓴다.
+# 예산이 작아 10만원까지 안 가는 소재는 '등록 10일' 규칙이 대신 판정한다.
+# ══════════════════════════════════════════════════════════════
+CR_TARGET_ROAS = 200
+CR_M1 = 100_000                    # 1차 컷: 광고비 10만원 도달
+CR_M2 = 200_000                    # 2차 컷: 20만원 이상은 ROAS로
+CR_MIN_PURCH_M1 = {"신규": 1, "리타겟팅": 2}
+CR_OFF_ROAS = {"신규": 100, "리타겟팅": 150}     # 리타겟팅 150% (담당자 확정)
+CR_UP_ROAS = {"신규": 200, "리타겟팅": 300}
+CR_UP_MIN_PURCH = 3
+CR_JUDGE_DAYS = 10
+CR_TAIL_SPEND = 30_000
+CR_HIDDEN_PURCH, CR_HIDDEN_ROAS = 2, 300
+CR_CONC_X = 3.0                    # 매체 평균 광고비의 몇 배면 '예산 쏠림'
+
+CR_OFF, CR_CUT, CR_UP, CR_HIDDEN = "OFF 권장", "감액·교체 검토", "증액 검토", "확장 테스트"
+CR_KEEP, CR_HOLD_UP, CR_LEARN, CR_THIN = "유지", "유지(증액 보류)", "학습 중", "노출 부족"
+CR_EXCL = "판단 제외"
+# 칩 색 — 행동이 필요한 것만 진하게
+CR_CLS = {CR_OFF: "off", CR_CUT: "bad", CR_UP: "up", CR_HIDDEN: "good",
+          CR_KEEP: "keep", CR_HOLD_UP: "warn", CR_LEARN: "hold", CR_THIN: "hold",
+          CR_EXCL: "hold", "광고비 없음": "hold", "UTM 없음": "hold"}
+CR_ORDER = [CR_OFF, CR_CUT, CR_UP, CR_HIDDEN, CR_HOLD_UP, CR_KEEP, CR_LEARN, CR_THIN]
+
+
+def _cr_won(v: float) -> str:
+    v = float(v or 0)
+    return f"{v / 1e4:,.1f}만원" if v < 1e6 else f"{v / 1e4:,.0f}만원"
+
+
+def cr_judge(seg: str, spend: float, purch: float, roas: float, age_days=None,
+             avg_spend: float = None) -> tuple:
+    """(판정, 사유, 쏠림 여부). seg는 '신규' / '리타겟팅'."""
+    seg = "리타겟팅" if seg == "리타겟팅" else "신규"
+    spend, purch, roas = float(spend or 0), float(purch or 0), float(roas or 0)
+    conc = bool(avg_spend and avg_spend > 0 and spend >= CR_CONC_X * avg_spend
+                and roas < CR_TARGET_ROAS)
+    xs = f" · ⚡매체 평균의 {spend / avg_spend:.1f}배" if conc else ""
+    off, up = CR_OFF_ROAS[seg], CR_UP_ROAS[seg]
+    if spend >= CR_M2:
+        if roas < off:
+            return CR_OFF, f"{_cr_won(spend)} · ROAS {roas:,.0f}% (기준 {off}% 미만){xs}", conc
+        if seg == "리타겟팅" and roas < CR_TARGET_ROAS:
+            return CR_CUT, f"ROAS {roas:,.0f}% · OFF선 {off}%↑ 목표 {CR_TARGET_ROAS}% 미달{xs}", conc
+    if spend >= CR_M1:
+        need = CR_MIN_PURCH_M1[seg]
+        if purch < need:
+            return CR_OFF, f"{_cr_won(spend)} 도달 · 구매 {purch:,.0f}건(최소 {need}건){xs}", conc
+        if roas >= up and purch >= CR_UP_MIN_PURCH:
+            return CR_UP, f"ROAS {roas:,.0f}% · 구매 {purch:,.0f}건", conc
+        if seg == "신규" and roas < CR_TARGET_ROAS:
+            return CR_HOLD_UP, f"ROAS {roas:,.0f}% · 목표 {CR_TARGET_ROAS}% 미달 — 증액 금지{xs}", conc
+        return CR_KEEP, f"ROAS {roas:,.0f}% · 구매 {purch:,.0f}건{xs}", conc
+    if purch >= CR_HIDDEN_PURCH and roas >= CR_HIDDEN_ROAS:
+        return CR_HIDDEN, f"{_cr_won(spend)}으로 구매 {purch:,.0f}건 · ROAS {roas:,.0f}%", conc
+    if age_days is not None and age_days >= CR_JUDGE_DAYS:
+        if purch <= 0 and spend >= CR_TAIL_SPEND:
+            return CR_OFF, f"{age_days:.0f}일차 · {_cr_won(spend)} · 구매 0건", conc
+        if purch <= 0:
+            return CR_THIN, f"{age_days:.0f}일차에 {_cr_won(spend)} — 매체가 안 태움(정리)", conc
+        return CR_KEEP, f"ROAS {roas:,.0f}% · 구매 {purch:,.0f}건(소액)", conc
+    return CR_LEARN, f"{_cr_won(spend)} — 10만원 또는 10일까지 지켜봄", conc
+
+
+def _cr_seg_of(r) -> str:
+    g = r.get("_seg") if hasattr(r, "get") else None
+    if not g:
+        try:
+            g = _gc_target_group(r)
+        except Exception:
+            g = ""
+    return "리타겟팅" if g == GC_SEG_RT else "신규"
+
+
+def _cr_age(r, media) -> int | None:
+    """등록 후 지난 일수. 매체에 처음 광고비가 잡힌 날 → 없으면 소재명의 날짜(260909_)."""
+    d0 = (media or {}).get("_first")
+    if not d0:
+        ymd = str((r.get("cre_date") if hasattr(r, "get") else "") or "")
+        m = re.match(r"(\d{4})-?(\d{2})-?(\d{2})", ymd)
+        if not m:
+            m2 = re.match(r"^(\d{2})(\d{2})(\d{2})_", str(r.get("cre_title") or r.get("cre_name") or "")
+                          if hasattr(r, "get") else "")
+            if m2:
+                m = re.match(r"(\d{4})(\d{2})(\d{2})", "20" + "".join(m2.groups()))
+        if m:
+            try:
+                d0 = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except Exception:
+                d0 = None
+    if not d0:
+        return None
+    return max(0, (date.today() - d0).days)
+
+
+def cr_rule_for(r, media, avg_spend=None) -> tuple:
+    """표 한 줄의 (판정, 칩 클래스, 사유, 경과일). 화면·엑셀·코멘트가 전부 이걸 쓴다."""
+    m = media or {}
+    cost = float(m.get("cost", 0) or 0)
+    basis = bool(m.get("_media_basis"))
+    conv = float((m.get("media_conv") if basis else r.get("conv")) or 0)
+    rev = float((m.get("media_rev") if basis else r.get("rev")) or 0)
+    age = _cr_age(r, m)
+    if m.get("_unmatched") and not basis:
+        return "UTM 없음", "hold", "GA에서 못 찾음 — utm_content를 소재명과 맞춰주세요", age
+    if cost <= 0:
+        return "광고비 없음", "hold", "매체 광고비가 안 붙음(꺼짐·이름 불일치)", age
+    if basis and rev <= 0 and conv <= 0:
+        return CR_EXCL, "외부몰 — 매체가 구매를 못 봄(픽셀 미설치)", age
+    roas = rev / cost * 100
+    lab, why, _c = cr_judge(_cr_seg_of(r), cost, conv, roas, age, avg_spend)
+    if basis:
+        why += " · 매체 신고 기준"
+    return lab, CR_CLS.get(lab, "hold"), why, age
+
+
+def cr_comment_lines(items: list, label: str, tot_cost: float, tot_rev: float) -> list:
+    """주간보고 '특이사항 및 리뷰'처럼 번호 매길 문장들. items = [(이름, 판정, 사유, 광고비, ROAS, 구매)]."""
+    if tot_cost <= 0:
+        return [f"{label}은 선택 기간에 광고비가 붙은 소재가 없습니다."]
+    roas = tot_rev / tot_cost * 100
+    out = [f"{label} 광고비 {_cr_won(tot_cost)} · 매출 {_cr_won(tot_rev)} · ROAS {roas:,.0f}% — "
+           + ("목표 달성" if roas >= CR_TARGET_ROAS else f"목표({CR_TARGET_ROAS}%) {CR_TARGET_ROAS - roas:,.0f}%p 미달")
+           + f". 집행 소재 {sum(1 for x in items if x[3] > 0)}개."]
+    by = {}
+    for x in items:
+        by.setdefault(x[1], []).append(x)
+    up = sorted(by.get(CR_UP, []), key=lambda x: -x[3])
+    if up:
+        out.append(f"효율 우수(증액 검토) {len(up)}개 — "
+                   + ", ".join(f"{x[0]}(ROAS {x[4]:,.0f}%)" for x in up[:3])
+                   + ". 예산 +20% 이내 증액 또는 같은 소재로 타겟 그룹 확장을 권장합니다.")
+    else:
+        out.append("증액 기준(10만원↑·구매 3건↑·ROAS 신규 200%/리타겟팅 300%↑)을 채운 소재는 없습니다.")
+    hid = sorted(by.get(CR_HIDDEN, []), key=lambda x: -x[5])
+    if hid:
+        out.append(f"소액이지만 잘 파는 소재 {len(hid)}개(확장 테스트) — "
+                   + ", ".join(f"{x[0]} {_cr_won(x[3])}·{x[5]:,.0f}건" for x in hid[:3])
+                   + ". 매체가 예산을 안 태우는 중이라 별도 그룹으로 예산을 보장해볼 만합니다.")
+    off = sorted(by.get(CR_OFF, []), key=lambda x: -x[3])
+    if off:
+        s = sum(x[3] for x in off)
+        out.append(f"효율 저조(OFF 권장) {len(off)}개 · 광고비 {_cr_won(s)}(매체의 {s / tot_cost * 100:.0f}%). "
+                   f"가장 큰 건 {off[0][0]} — {off[0][2]}.")
+    cut = by.get(CR_CUT, [])
+    if cut:
+        out.append(f"감액·교체 검토 {len(cut)}개 — " + ", ".join(f"{x[0]}(ROAS {x[4]:,.0f}%)" for x in cut[:3])
+                   + ". 끌 정도는 아니지만 목표 미달이라 예산을 줄이거나 새 소재로 교체를 검토합니다.")
+    conc = [x for x in items if "⚡" in x[2]]
+    for x in sorted(conc, key=lambda x: -x[3])[:2]:
+        out.append(f"⚡ 예산 쏠림: {x[0]}에 {_cr_won(x[3])}이 몰렸는데 ROAS {x[4]:,.0f}% — 오늘 바로 점검이 필요합니다.")
+    thin = by.get(CR_THIN, [])
+    if thin:
+        out.append(f"노출 부족 {len(thin)}개(10일+·구매 0·3만원 미만) — 매체가 이미 안 태우는 소재라 정리하면 계정이 깔끔해집니다.")
+    nu = [x for x in items if x[1] == "UTM 없음" and x[3] > 0]
+    if nu:
+        out.append(f"UTM 없음 {len(nu)}개 · 광고비 {_cr_won(sum(x[3] for x in nu))} — 매출을 못 붙여 판단 불가. utm_content를 소재명과 맞춰주세요.")
+    return out
+
+
 def _gc_comment(rows: pd.DataFrame, label: str, avg_roas: float) -> str:
     """소재별 성과 화면과 같은 톤의 자동 코멘트. 표본이 작은 건 판단에서 뺀다."""
     if rows is None or rows.empty:
@@ -14102,6 +14285,39 @@ def _gc_target_group(row) -> str:
         return GC_SEG_RT
     if any(w in blob for w in _GC_NEW_WORDS):
         return GC_SEG_NEW
+    return "기타"
+
+
+# 품목 — 신규/리타겟팅과 별개로 '무엇을 파는 소재인가'로도 나눠 본다(PPT 4번, 2026-10).
+# 소재명이 가장 정확하다(같은 PMax 캠페인 안에 수트·셔츠 소재가 섞여 있다). 소재명에 품목
+# 말이 없을 때만(다이나믹_리텐션, 출근룩 등) 캠페인 이름(STCO_셔츠_전환)으로 물러난다.
+# 순서가 중요하다: '수트'를 먼저 봐야 '수트자켓'이 아우터로 안 빠진다.
+GC_ITEM_ALL = "전체"
+GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER = "수트", "아우터", "이너(셔츠 등)"
+GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER]
+_GC_ITEM_WORDS = [
+    (GC_ITEM_SUIT, ("수트", "슈트", "셋업", "정장", "suit")),
+    (GC_ITEM_OUTER, ("자켓", "재킷", "블레이저", "점퍼", "코트", "아우터", "패딩", "블루종",
+                     "jacket", "blazer", "coat")),
+    (GC_ITEM_INNER, ("셔츠", "니트", "티셔츠", "폴로", "맨투맨", "스웨터", "후드", "가디건",
+                     "이너", "터틀", "shirt", "knit", "tee")),
+]
+
+
+def _gc_item_of_text(text) -> str | None:
+    low = str(text or "").lower()
+    for item, words in _GC_ITEM_WORDS:
+        if any(w in low for w in words):
+            return item
+    return None
+
+
+def _gc_item_group(row) -> str:
+    """이 소재가 어느 품목인지. 소재명 → 캠페인 순으로 보고, 못 가리면 '기타'."""
+    for k in ("creative", "cre_title", "campaign"):
+        it = _gc_item_of_text(row.get(k))
+        if it:
+            return it
     return "기타"
 
 
@@ -14385,6 +14601,26 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     return out
 
 
+def _gc_first_spend(ad_creative: pd.DataFrame) -> dict:
+    """{(매체탭, 소재키): 처음 광고비가 잡힌 날}. 기간과 무관하게 전체에서 본다 —
+    '등록 몇 일차'는 조회 기간이 아니라 소재 자체의 나이라서."""
+    out = {}
+    if ad_creative is None or ad_creative.empty or "creative" not in ad_creative.columns:
+        return out
+    c = ad_creative[["report_date", "channel", "creative", "cost_incl_vat"]].copy()
+    c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+    c["cost_incl_vat"] = pd.to_numeric(c["cost_incl_vat"], errors="coerce").fillna(0)
+    c = c.dropna(subset=["report_date"])
+    c = c[c["cost_incl_vat"] > 0]
+    if c.empty:
+        return out
+    for (ch, cr), d0 in c.groupby(["channel", "creative"])["report_date"].min().items():
+        k = (_gc_channel(ch), _creative_image_key(cr))
+        if k not in out or d0 < out[k]:
+            out[k] = d0
+    return out
+
+
 def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> list:
     """소재 줄마다 매체 실적을 붙이되, 한 소재가 여러 줄로 쪼개졌으면 나눠 담는다.
 
@@ -14418,7 +14654,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 "cost": float(base.get("cost", 0) or 0) * w,
                 "media_conv": float(base.get("media_conv", 0) or 0) * w,
                 "channel": base.get("channel"), "name": base.get("name"),
-                "src": base.get("src"), "_split": len(idxs),
+                "src": base.get("src"), "_split": len(idxs), "_first": base.get("_first"),
                 # 판정은 쪼개기 전 '소재 전체 광고비'로 해야 한다 — 비중이 균등하지 않아
                 # 곱셈으로는 되돌릴 수 없으므로 원본을 그대로 들고 간다.
                 "_full_cost": float(base.get("cost", 0) or 0),
@@ -14513,7 +14749,16 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         # 성과가 나쁘다고 단정하면 안 된다 — UTM을 붙여야 판단이 가능해진다.
         label, cls = "UTM 없음", "hold"
         roas_txt = "-"
+    _why = ""
+    _rule = (media or {}).get("_rule")
+    if _rule:                       # 소재 운영 기준(2026-10) — 판정·사유·경과일
+        label, cls, _why, _age = _rule
+        if _age is not None:
+            _why = f"{_age}일차 · {_why}"
     chip = f'<span class="fv4-chip {cls}">{label}</span>'
+    if _why:
+        chip += (f'<div class="gc-why">'
+                 f'{str(_why).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")}</div>')
     if (media or {}).get("_total"):
         # 합계 줄은 KPI 대비만 보여준다 — 소재 판정 규칙(표본·클릭)은 합계에 적용할 게 아니다.
         if cost > 0:
@@ -14595,6 +14840,10 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         label = "광고비 없음"
     if (media or {}).get("_unmatched") and not _basis:
         label, roas = "UTM 없음", None
+    _why, _age = "", None
+    _rule = (media or {}).get("_rule")
+    if _rule and not is_total:
+        label, _c, _why, _age = _rule
     if is_total:
         label = _ops_kpi_status(roas) if cost > 0 else ""
 
@@ -14613,16 +14862,19 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
     _seg = str(_get("_seg", "") or "") or (
         _gc_target_group({"target": _tgt, "campaign": _camp, "creative": name})
         if not is_total else "")
+    _item = "" if is_total else (str(_get("_item", "") or "") or _gc_item_group(
+        {"creative": name, "campaign": _camp}))
     return {
         "이름": "TOTAL" if is_total else name,
         "캠페인": "" if is_total else _camp,
         "타겟팅": "" if is_total else _tgt,
         "구분": "" if is_total else _seg,
+        "품목": _item,
         "_img": img_url,
         "노출": imp, "클릭": clk, "CTR(%)": ctr, "CPC": (cost / clk) if clk else 0.0,
         "광고비(VAT+)": cost, "방문(세션)": ses,
         "구매": conv, "매출": rev, "객단가": aov,
-        "ROAS(%)": roas, "판정": label,
+        "ROAS(%)": roas, "판정": label, "사유": _why, "경과일": _age,
         # 구매·매출이 어디서 온 값인지. 외부몰만 매체 기준이라 섞어 더하면 안 된다.
         "기준": "매체(GFA)" if _basis else "GA4",
     }
@@ -14672,7 +14924,8 @@ def _gc_safe_sheet(name: str, used: set) -> str:
 
 
 def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = True,
-                   px: int = 90, progress=None) -> bytes:
+                   px: int = 90, progress=None, views: dict = None,
+                   notes: dict = None) -> bytes:
     """매체별로 시트를 나눈 엑셀을 만든다. sheets = {탭이름: [행 dict, ...]}"""
     from openpyxl.drawing.image import Image as XLImage
     from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, TwoCellAnchor
@@ -14683,9 +14936,9 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
 
     # 캠페인·타겟팅·구분을 따로 둬야 엑셀에서 필터와 피벗이 된다.
     # (예전엔 'STCO_수트_전환 · 패션관심타겟'을 한 칸에 넣어서 타겟팅별로 못 갈랐다)
-    cols = ["이름", "캠페인", "타겟팅", "구분"] + (["이미지"] if with_images else []) + [
+    cols = ["이름", "캠페인", "타겟팅", "구분", "품목"] + (["이미지"] if with_images else []) + [
         "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "방문(세션)",
-        "구매", "매출", "객단가", "ROAS(%)", "판정", "기준"]
+        "구매", "매출", "객단가", "ROAS(%)", "판정", "사유", "경과일", "기준"]
     # CTR·ROAS는 값이 이미 퍼센트 단위(110 = 110%)라 엑셀 기본 '백분율' 서식을 쓰면
     # 11000%가 된다. 그래서 숫자는 그대로 두고 표시만 %를 붙인다 —
     # 값이 숫자로 남아 있어야 정렬·필터·평균이 정상으로 돈다.
@@ -14693,10 +14946,11 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": '0.00"%"', "CPC": '#,##0"원"',
               "광고비(VAT+)": '#,##0"원"', "방문(세션)": "#,##0", "구매": "#,##0",
               "매출": '#,##0"원"', "객단가": '#,##0"원"', "ROAS(%)": '#,##0"%"'}
-    width = {"이름": 30, "캠페인": 22, "타겟팅": 16, "구분": 12,
+    width = {"이름": 30, "캠페인": 22, "타겟팅": 16, "구분": 12, "품목": 12,
              "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
              "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "방문(세션)": 11, "구매": 9,
-             "매출": 15, "객단가": 12, "ROAS(%)": 11, "판정": 12, "기준": 11}
+             "매출": 15, "객단가": 12, "ROAS(%)": 11, "판정": 14, "사유": 46, "경과일": 8,
+             "기준": 11}
 
     head_fill = PatternFill("solid", fgColor="14181F")
     head_font = Font(color="FFFFFF", bold=True, size=10)
@@ -14710,29 +14964,37 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     if with_images:
         total_imgs = sum(1 for recs in sheets.values() for r in recs if r.get("_img"))
 
-    for tab, recs in sheets.items():
-        ws = wb.create_sheet(_gc_safe_sheet(tab, used))
-        # 엑셀에서는 TOTAL을 **맨 아래로** 보낸다. 머리글 바로 밑에 두면 필터를 걸었을 때
-        # 합계까지 같이 걸러져 사라진다(화면에서는 맨 위 고정이 맞지만 엑셀은 다르다).
-        recs = ([r for r in recs if r.get("이름") != "TOTAL"]
-                + [r for r in recs if r.get("이름") == "TOTAL"])
-        # 행 번호는 직접 센다. ws.append([])(빈 줄)는 max_row를 올리지 않아서,
-        # max_row로 계산하면 머리글 서식이 한 줄 위에 칠해진다.
-        ws["A1"] = f"{tab} · {level}별 GA 성과"
-        ws["A2"] = f"조회 기간 {start} ~ {end}"
-        ws["B2"] = "노출·클릭·광고비=매체 실집행 / 구매·매출=GA4 / ROAS=GA 매출 ÷ 매체 광고비"
-        ws["A1"].font = Font(bold=True, size=13)
-        ws["A2"].font = Font(color="8A8A7C", size=9)
-        ws["B2"].font = Font(color="8A8A7C", size=9)
+    numfmt["경과일"] = '0"일"'
+    _good_set, _bad_set = (CR_UP, CR_HIDDEN), (CR_OFF, CR_CUT)
+    sec_fill = {"cmt": PatternFill("solid", fgColor="FFF2CC"),
+                "good": PatternFill("solid", fgColor="E2EFDA"),
+                "bad": PatternFill("solid", fgColor="FCE4D6"),
+                "all": PatternFill("solid", fgColor="EDEDED")}
+    verdict_fill = {CR_OFF: "F8CBAD", CR_CUT: "FCE4D6", CR_UP: "C6EFCE", CR_HIDDEN: "E2EFDA",
+                    CR_HOLD_UP: "FFF2CC", CR_KEEP: "DDEBF7"}
+    _thumb_cache = {}
+    if with_images:
+        # 우수·저조 목록에 같은 소재가 한 번 더 나오므로 그만큼 더 센다
+        total_imgs = sum(1 for recs in sheets.values() for r in recs if r.get("_img")
+                         and (r.get("판정") in _good_set + _bad_set)) + total_imgs
 
-        hrow = 4
+    def _section(ws, row, text, kind):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(cols))
+        c = ws.cell(row=row, column=1, value=text)
+        c.font, c.fill = Font(bold=True, size=11), sec_fill[kind]
+        c.alignment = Alignment(vertical="center")
+        ws.row_dimensions[row].height = 22
+        return row + 1
+
+    def _header(ws, row):
         for i, c in enumerate(cols, start=1):
-            cell = ws.cell(row=hrow, column=i, value=c)
+            cell = ws.cell(row=row, column=i, value=c)
             cell.fill, cell.font = head_fill, head_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
-            ws.column_dimensions[get_column_letter(i)].width = width.get(c, 12)
-        ws.freeze_panes = ws.cell(row=hrow + 1, column=1)
+        return row
 
+    def _rows(ws, hrow, recs):
+        nonlocal done
         rrow = hrow
         for rec in recs:
             rrow += 1
@@ -14747,46 +15009,101 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center",
-                                               wrap_text=(c == "이름"))
+                                               wrap_text=(c in ("이름", "사유")))
+                if c == "판정" and rec.get("판정") in verdict_fill:
+                    cell.fill = PatternFill("solid", fgColor=verdict_fill[rec["판정"]])
+                    cell.font = Font(bold=True)
                 if rec.get("이름") == "TOTAL":
                     cell.fill = tot_fill
                     cell.font = Font(bold=True)
             if with_images:
                 ws.row_dimensions[rrow].height = max(18, px * 0.75)
-                b = _gc_thumb_bytes(rec["_img"], px) if rec.get("_img") else None
+                url = rec.get("_img")
+                if url and url not in _thumb_cache:
+                    _thumb_cache[url] = _gc_thumb_bytes(url, px)
+                b = _thumb_cache.get(url) if url else None
                 if b:
                     try:
                         img = XLImage(io.BytesIO(b))
-                        # 그림을 **셀에 묶는다**(두 지점 앵커 + editAs="twoCell").
-                        #
-                        # 기본 방식은 그림이 시트 위에 '떠 있는' 상태라, 필터를 걸어 행을
-                        # 숨겨도 그림만 그 자리에 남는다 — 엉뚱한 줄에 남의 소재 사진이
-                        # 붙어 보이던 이유다. 두 지점 앵커로 시작 셀과 끝 셀을 못 박으면
-                        # 엑셀이 '셀에 맞춰 이동·크기 변경'으로 다루면서 행이 숨을 때
-                        # 그림도 같이 숨는다.
-                        # 오프셋은 0으로 둔다 — 음수 오프셋을 넣으면 엑셀 버전에 따라
-                        # 파일을 '복구'하려 든다. 셀 한 칸을 꽉 채우면 충분하다.
-                        _c0 = cols.index("이미지")          # 0-based 열 번호
+                        # 그림을 **셀에 묶는다**(두 지점 앵커 + editAs="twoCell") —
+                        # 필터로 행을 숨기면 그림도 같이 숨게. 오프셋은 0(음수면 엑셀이 '복구'하려 든다).
+                        _c0 = cols.index("이미지")
                         img.anchor = TwoCellAnchor(
                             editAs="twoCell",
-                            _from=AnchorMarker(col=_c0, colOff=0,
-                                               row=rrow - 1, rowOff=0),
-                            to=AnchorMarker(col=_c0 + 1, colOff=0,
-                                            row=rrow, rowOff=0))
+                            _from=AnchorMarker(col=_c0, colOff=0, row=rrow - 1, rowOff=0),
+                            to=AnchorMarker(col=_c0 + 1, colOff=0, row=rrow, rowOff=0))
                         ws.add_image(img)
                     except Exception:
                         pass
-                if rec.get("_img"):
+                if url:
                     done += 1
                     if progress and total_imgs:
-                        progress(done / total_imgs)
+                        progress(min(1.0, done / total_imgs))
+            elif rec.get("사유"):
+                ws.row_dimensions[rrow].height = 30
+        return rrow
 
-        # 머리글에 필터를 걸어둔다 — 받자마자 타겟팅·구분으로 걸러 볼 수 있게.
+    for tab, recs in sheets.items():
+        ws = wb.create_sheet(_gc_safe_sheet(tab, used))
+        # 엑셀에서는 TOTAL을 **맨 아래로** 보낸다. 머리글 바로 밑에 두면 필터를 걸었을 때
+        # 합계까지 같이 걸러져 사라진다(화면에서는 맨 위 고정이 맞지만 엑셀은 다르다).
+        recs = ([r for r in recs if r.get("이름") != "TOTAL"]
+                + [r for r in recs if r.get("이름") == "TOTAL"])
+        body_recs = [r for r in recs if r.get("이름") != "TOTAL"]
+        ws["A1"] = f"{tab} · {level}별 GA 성과"
+        ws["A2"] = (f"조회 기간 {start} ~ {end}"
+                    + (f" · 보기: {(views or {}).get(tab)}" if (views or {}).get(tab) else ""))
+        ws["B2"] = "노출·클릭·광고비=매체 실집행 / 구매·매출=GA4 / ROAS=GA 매출 ÷ 매체 광고비"
+        ws["A1"].font = Font(bold=True, size=13)
+        ws["A2"].font = Font(color="8A8A7C", size=9)
+        ws["B2"].font = Font(color="8A8A7C", size=9)
+        for i, c in enumerate(cols, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = width.get(c, 12)
+
+        row = 4
+        lines = (notes or {}).get(tab) or []
+        has_rule = any(r.get("판정") in CR_ORDER for r in body_recs)
+        if lines:
+            # ── 📝 코멘트 — 주간보고 '특이사항 및 리뷰'처럼 번호 매긴 문장 ──
+            row = _section(ws, row, "📝 코멘트", "cmt")
+            for i, t in enumerate(lines, 1):
+                ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(cols))
+                c = ws.cell(row=row, column=1, value=f"{i}. {t}")
+                c.alignment = Alignment(wrap_text=True, vertical="center")
+                ws.row_dimensions[row].height = 30 if len(t) < 110 else 44
+                row += 1
+            row += 1
+        if has_rule:
+            good = sorted([r for r in body_recs if r.get("판정") in _good_set],
+                          key=lambda r: (_good_set.index(r["판정"]), -float(r.get("매출") or 0)))
+            bad = sorted([r for r in body_recs if r.get("판정") in _bad_set],
+                         key=lambda r: (_bad_set.index(r["판정"]), -float(r.get("광고비(VAT+)") or 0)))
+            row = _section(ws, row, (f"✅ 효율 우수 — 증액 검토 (10만원↑·구매 {CR_UP_MIN_PURCH}건↑·ROAS 신규 "
+                                     f"{CR_UP_ROAS['신규']}% / 리타겟팅 {CR_UP_ROAS['리타겟팅']}%↑) + 확장 테스트 "
+                                     f"(10만원 미만·구매 {CR_HIDDEN_PURCH}건↑·ROAS {CR_HIDDEN_ROAS}%↑)"), "good")
+            _header(ws, row)
+            row = (_rows(ws, row, good) if good else
+                   (ws.cell(row=row + 1, column=1, value="기준을 채운 소재가 없습니다") and row + 1)) + 2
+            row = _section(ws, row, (f"⚠️ 효율 저조 — OFF 권장 / 감액·교체 검토 (광고비 큰 순) · "
+                                     f"OFF선: 10만원 도달 시 신규 구매 0 / 리타겟팅 2건 미만, 20만원↑ ROAS 신규 "
+                                     f"{CR_OFF_ROAS['신규']}% / 리타겟팅 {CR_OFF_ROAS['리타겟팅']}% 미만, "
+                                     f"10일↑·3만원↑·구매 0"), "bad")
+            _header(ws, row)
+            row = (_rows(ws, row, bad) if bad else
+                   (ws.cell(row=row + 1, column=1, value="기준에 걸린 소재가 없습니다") and row + 1)) + 2
+            row = _section(ws, row, "📋 전체 소재", "all")
+
+        hrow = _header(ws, row)
+        rrow = _rows(ws, hrow, recs)
+        ws.freeze_panes = None if (lines or has_rule) else ws.cell(row=hrow + 1, column=1)
+
+        # 머리글에 필터를 걸어둔다 — 받자마자 타겟팅·구분·품목·판정으로 걸러 볼 수 있게.
         # (TOTAL 줄은 필터 범위에서 빼야 걸러도 합계가 안 사라진다)
         _n_tot = sum(1 for r in recs if r.get("이름") == "TOTAL")
         if rrow - _n_tot > hrow:
             ws.auto_filter.ref = (f"A{hrow}:"
                                   f"{get_column_letter(len(cols))}{rrow - _n_tot}")
+        ws.sheet_view.zoomScale = 85
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -15113,6 +15430,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _api_channels = {ch for ch, _ in _api_map}
     media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
     media_map.update(_api_map)
+    # 등록 몇 일차인지 — 소재 운영 기준의 '10일' 판정에 쓴다
+    try:
+        _first_map = _gc_first_spend(ad_creative)
+    except Exception:
+        _first_map = {}
+    for _k, _v in media_map.items():
+        if _k in _first_map:
+            _v["_first"] = _first_map[_k]
 
     # ── 채널 성과와의 차이를 미리 계산해둔다 ─────────────────────
     # 두 화면은 GA4에 **서로 다른 질문**을 한다.
@@ -15339,6 +15664,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 자리만 먼저 잡아두고 맨 아래에서 채운다.
     export_slot = st.container()
     export_sheets = {}
+    export_views = {}       # 탭별로 고른 타겟팅·품목 — 엑셀 2행에 적는다
+    export_notes = {}       # 탭별 코멘트(번호 매긴 문장) — 엑셀 맨 위에 적는다
     tabs = st.tabs(tab_labels)
 
     def _folded_panel():
@@ -15667,24 +15994,70 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # ── 신규 / 리타겟팅 나눠보기 ──────────────────────────
             # 리타겟팅은 ROAS가 높게 나오는 게 정상이라, 신규와 같은 표에서 평균을 내면
             # 신규 소재가 전부 '부진'으로 찍힌다. 판단 기준이 달라서 갈라 봐야 한다.
+            # 매체에는 있는데 GA에서 못 찾은 소재도 같은 기준으로 세야 버튼 숫자가 맞는다.
+            # (버튼 숫자용 — 표에 실제로 붙이는 매칭은 아래에서 따로 한다)
+            _pre_ids = {id(m) for m in (_gc_lookup_media(r, media_map)
+                                        for _, r in rows.iterrows()) if m}
+            _left_all = [(k, v) for k, v in media_map.items()
+                         if k[0] in ch_keep and id(v) not in _pre_ids]
+
+            def _left_row(v, k):
+                return {"target": "", "campaign": v.get("campaign"),
+                        "creative": v.get("name") or k[1]}
+
             _seg_n = _seg_r = 0
             if not rows.empty:
                 rows["_seg"] = [_gc_target_group(r) for _, r in rows.iterrows()]
+                rows["_item"] = [_gc_item_group(r) for _, r in rows.iterrows()]
                 _seg_n = int((rows["_seg"] == GC_SEG_NEW).sum())
                 _seg_r = int((rows["_seg"] == GC_SEG_RT).sum())
+
+            # ── 타겟팅 / 품목 두 줄 버튼 (PPT 4번) ──
+            # '타겟팅'을 고르면 아래 품목 숫자도 그 안에서 다시 센다 — 두 단계로 좁혀 들어간다.
+            _fc1, _fc2 = st.columns([0.09, 0.91])
             seg = GC_SEG_ALL
             if _seg_n and _seg_r:      # 한쪽만 있으면 굳이 고르게 하지 않는다
-                seg = st.radio(
-                    "보기", [GC_SEG_ALL, f"{GC_SEG_NEW} ({_seg_n})",
-                             f"{GC_SEG_RT} ({_seg_r})"],
-                    horizontal=True, key=f"gc_seg_{ti}", label_visibility="collapsed")
+                _fc1.markdown('<div class="gc-flt-lbl">타겟팅</div>', unsafe_allow_html=True)
+                with _fc2:
+                    seg = st.radio(
+                        "타겟팅", [GC_SEG_ALL, f"{GC_SEG_NEW} ({_seg_n})",
+                                 f"{GC_SEG_RT} ({_seg_r})"],
+                        horizontal=True, key=f"gc_seg_{ti}", label_visibility="collapsed")
                 seg = (GC_SEG_NEW if seg.startswith(GC_SEG_NEW)
                        else GC_SEG_RT if seg.startswith(GC_SEG_RT) else GC_SEG_ALL)
             if seg != GC_SEG_ALL and not rows.empty:
                 rows = rows[rows["_seg"] == seg].copy()
-                if rows.empty:
-                    st.info(f"이 매체에 **{seg}** 줄이 없습니다.")
-                    continue
+
+            item = GC_ITEM_ALL
+            _item_cnt = {}
+            for _it in GC_ITEMS:
+                _n = int((rows["_item"] == _it).sum()) if not rows.empty else 0
+                _n += sum(1 for k, v in _left_all
+                          if _gc_item_group(_left_row(v, k)) == _it
+                          and (seg == GC_SEG_ALL or _gc_target_group(_left_row(v, k)) == seg))
+                if _n:
+                    _item_cnt[_it] = _n
+            if len(_item_cnt) >= 2:    # 품목이 하나뿐이면 고를 게 없다
+                _ic1, _ic2 = st.columns([0.09, 0.91])
+                _ic1.markdown('<div class="gc-flt-lbl">품목</div>', unsafe_allow_html=True)
+                with _ic2:
+                    _opts = [GC_ITEM_ALL] + [f"{k} ({n})" for k, n in _item_cnt.items()]
+                    item = st.radio("품목", _opts, horizontal=True, key=f"gc_item_{ti}",
+                                    label_visibility="collapsed")
+                item = next((k for k in GC_ITEMS if item.startswith(k)), GC_ITEM_ALL)
+            if item != GC_ITEM_ALL and not rows.empty:
+                rows = rows[rows["_item"] == item].copy()
+
+            # 지금 보고 있는 조건 — 배지·제목·엑셀 시트에 그대로 쓴다
+            _view_bits = [b for b in (seg if seg != GC_SEG_ALL else "",
+                                      item if item != GC_ITEM_ALL else "") if b]
+            view_lbl = " · ".join(_view_bits)
+            if _view_bits and rows.empty and not any(
+                    (seg == GC_SEG_ALL or _gc_target_group(_left_row(v, k)) == seg)
+                    and (item == GC_ITEM_ALL or _gc_item_group(_left_row(v, k)) == item)
+                    for k, v in _left_all):
+                st.info(f"이 매체에 **{view_lbl}** 소재가 없습니다.")
+                continue
             # GA 줄이 없어도 매체 리포트에 실적이 있으면 표를 그린다.
             # 외부몰이 그렇다 — 스마트스토어로 보내서 자사몰 GA4에 세션이 안 잡히므로
             # GA 줄이 아예 없다. 여기서 끊으면 노출·클릭·광고비도 못 보게 된다.
@@ -15866,6 +16239,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     (k, v) for k, v in leftovers
                     if _gc_target_group({"target": "", "campaign": v.get("campaign"),
                                          "creative": v.get("name") or k[1]}) == seg]
+            if item != GC_ITEM_ALL:
+                leftovers = [(k, v) for k, v in leftovers
+                             if _gc_item_group(_left_row(v, k)) == item]
 
             if level != "소재":
                 # 소재 줄에 붙은 매체 실적을 원하는 단위로 다시 합친다.
@@ -15936,6 +16312,23 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             tot_cost += _lo["cost"]
             avg_roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0.0
 
+            # ── 소재 운영 기준 판정 (소재 단위에서만) ──
+            # 쏠림 비교용 평균은 이 탭(지금 고른 타겟팅·품목) 안에서 광고비가 붙은 줄 기준.
+            _cr_items = []
+            if level == "소재":
+                _costs = [c for c in rows["_cost"] if c > 0] + [
+                    float(m.get("cost", 0) or 0) for _, m in leftovers
+                    if float(m.get("cost", 0) or 0) > 0]
+                _avg_sp = (sum(_costs) / len(_costs)) if _costs else None
+                _new_media = []
+                for _, r in rows.iterrows():
+                    _m = dict(r["_media"] or {})
+                    _m["_rule"] = cr_rule_for(r, _m, _avg_sp)
+                    _new_media.append(_m)
+                    _cr_items.append((str(r["_name"]), _m["_rule"][0], _m["_rule"][2],
+                                      float(r["_cost"]), float(r["_roas"]), float(r["conv"] or 0)))
+                rows["_media"] = _new_media
+
             # (미설정) 비중 경고 — 이 탭에 해당하는 것만
             sub = per[per["_gc_ch"] == label]
             t_ses = float(sub["sessions"].sum())
@@ -15968,14 +16361,30 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             notes.append((
                 "caption",
-                f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · "
-                f"클릭 {FUNNEL_ZERO_CONV_CLICKS}회 이상인데 구매 0이면 효율 미달 · "
-                f"광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
-                f"미만이면 판단 보류"))
+                f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · 판정 = 소재 운영 기준 "
+                f"(10만원 도달: 신규 구매 0 / 리타겟팅 2건 미만 OFF · 20만원↑: 신규 ROAS "
+                f"{CR_OFF_ROAS['신규']}% / 리타겟팅 {CR_OFF_ROAS['리타겟팅']}% 미만 OFF · "
+                f"10일↑·3만원↑·구매 0 OFF · 증액: 신규 {CR_UP_ROAS['신규']}% / 리타겟팅 "
+                f"{CR_UP_ROAS['리타겟팅']}%↑·구매 3건↑) — 자세한 건 아래 '이 표 읽는 법'"))
 
             # 채널 성과와의 차이는 코멘트 바로 밑에서 따로 그린다(_gap_panel).
             cmt = None
-            if not rows.empty:
+            if level == "소재":
+                # UTM 없음 줄도 코멘트에 넣는다(돈은 나갔으니까)
+                for (ch_k, name_k), m in leftovers:
+                    _cr_items.append((str(m.get("name") or name_k), "UTM 없음", "",
+                                      float(m.get("cost", 0) or 0), 0.0, 0.0))
+                if _media_basis:
+                    _rv = sum(float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"])
+                else:
+                    _rv = tot_rev
+                _lines = cr_comment_lines(_cr_items, label + (f" ({view_lbl})" if view_lbl else ""),
+                                          tot_cost, _rv)
+                export_notes[label] = _lines
+                cmt = ('<div class="gc-cmt">'
+                       + "".join(f"<div>{i}. {t}</div>" for i, t in enumerate(_lines, 1))
+                       + "</div>")
+            elif not rows.empty:
                 # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
                 # 실제로는 '알 수 없음'이라 '부진'이라고 단정하면 틀린 판단이 된다.
                 try:
@@ -16014,6 +16423,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     })
                     _url = _gc_pick_image(_row, img_map, store_idx)
                     _m_un = dict(m, _unmatched=True)
+                    if level == "소재":
+                        _m_un["_rule"] = cr_rule_for(_row, _m_un, _avg_sp)
                     body.append(_gc_row_html(_row, _m_un, "gc-unmatched",
                                              img_url=_url, show_img=show_img))
                     recs.append(_gc_row_record(_row, _m_un, img_url=_url))
@@ -16039,6 +16450,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 ) + sum(float(m.get("media_rev", 0) or 0) for _, m in leftovers)
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
             export_sheets[label] = [_gc_row_record(tot_r, tot_media, is_total=True)] + recs
+            export_views[label] = view_lbl
 
             # 머리글에서 출처를 못 박는다 — 'GA 매출'이라고 적어두면 GA가 준 값으로
             # 읽혀서, 나중에 다른 리포트와 안 맞을 때 원인을 못 찾는다.
@@ -16066,13 +16478,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 FUNNEL_V4_CSS
                 + '<div class="fv4-wrap"><div class="fv4-card">'
                 # 배지에는 '소재별'처럼 이미 아는 말 대신 **지금 무엇을 보고 있는지**를 적는다.
-                + (f'<span class="fv4-badge-dark">{seg}</span>'
-                   if seg != GC_SEG_ALL else
+                + (f'<span class="fv4-badge-dark">{view_lbl}</span>'
+                   if view_lbl else
                    f'<span class="fv4-badge-dark">{level}별 · 전체</span>')
                 + f'<div class="fv4-card-title">{label} · {level}별 '
                 f'{"매체 신고" if _media_basis else "GA"} 성과'
-                + (f' <span style="color:#6B5E3C;font-weight:700;">— {seg}</span>'
-                   if seg != GC_SEG_ALL else '')
+                + (f' <span style="color:#6B5E3C;font-weight:700;">— {view_lbl}</span>'
+                   if view_lbl else '')
                 + '</div>'
                 f'<div class="fv4-card-sub">{_card_sub}</div>'
                 + table + '</div></div>'
@@ -16138,12 +16550,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     "달라 서로 못 더합니다. ROAS는 **GA 매출 ÷ 매체 광고비**입니다.\n"
                     "- 광고비가 안 붙은 소재는 **광고비 없음**으로 둡니다 — 매체 리포트에 "
                     "없거나 소재명이 UTM과 달라 못 찾은 경우입니다.\n"
-                    f"- 판정 — 클릭 {FUNNEL_ZERO_CONV_CLICKS}회 이상인데 구매가 0이면 "
-                    "**효율 미달**. 경매형 매체는 반응이 좋은 소재에 예산을 몰아주므로, "
-                    "광고비가 적게 나간 것 자체가 이미 성과 신호입니다.\n"
-                    f"- 광고비 {FUNNEL_MIN_SPEND:,.0f}원 미만이면서 구매 {FUNNEL_MIN_CONV}건 "
-                    "미만일 때만 **판단 보류**. 표본은 타겟팅으로 쪼개기 전 "
-                    "**소재 전체 광고비**로 봅니다."
+                    "- **판정 = 소재 운영 기준** (소재 단위 · 매체×타겟팅 한 줄씩). 판정은 ROAS로 하되, "
+                    "ROAS를 믿을 만큼 돈이 쌓였는지를 먼저 봅니다.\n"
+                    f"  - **광고비 10만원 도달**: 신규 구매 0건 / 리타겟팅 {CR_MIN_PURCH_M1['리타겟팅']}건 미만 → **OFF 권장**\n"
+                    f"  - **20만원 이상**: 신규 ROAS {CR_OFF_ROAS['신규']}% / 리타겟팅 {CR_OFF_ROAS['리타겟팅']}% 미만 → **OFF 권장** · "
+                    f"리타겟팅 {CR_OFF_ROAS['리타겟팅']}~{CR_TARGET_ROAS}% → **감액·교체 검토** · "
+                    f"신규 100~{CR_TARGET_ROAS}% → **유지(증액 보류)**\n"
+                    f"  - **등록 {CR_JUDGE_DAYS}일 경과** (10만원 못 썼어도): 구매 0 & {CR_TAIL_SPEND // 10000}만원↑ → **OFF 권장** · "
+                    f"{CR_TAIL_SPEND // 10000}만원 미만 → **노출 부족**(매체가 안 태움, 정리)\n"
+                    f"  - **증액 검토**: 10만원↑ · 구매 {CR_UP_MIN_PURCH}건↑ · ROAS 신규 {CR_UP_ROAS['신규']}% / 리타겟팅 {CR_UP_ROAS['리타겟팅']}%↑ · "
+                    f"**확장 테스트**: 10만원 미만인데 구매 {CR_HIDDEN_PURCH}건↑ · ROAS {CR_HIDDEN_ROAS}%↑\n"
+                    f"  - **⚡ 예산 쏠림**: 광고비가 이 탭 평균의 {CR_CONC_X:.0f}배↑인데 목표 미달 — 사유에 표시\n"
+                    "  - 10만원 미만 & 10일 미만은 **학습 중**(판단 보류). 'n일차'는 매체에 처음 광고비가 잡힌 날부터 "
+                    "셉니다(없으면 소재명 날짜).\n"
+                    "- 타겟팅·캠페인·매체 단위로 볼 때는 예전 판정(평균 대비)을 그대로 씁니다."
                     + ("\n- 이 탭은 외부몰이라 GFA가 주는 **총 전환매출액은 쓰지 않습니다** — "
                        "장바구니 담기·회원가입까지 매출로 더해져 실제보다 몇 배로 커집니다. "
                        "**구매완료**만 씁니다." if _media_basis else "")
@@ -16156,7 +16576,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if not export_sheets:
         _render_tools()
         return
-    _sig = f"{level}|{start}|{end}|{'|'.join(export_sheets)}"
+    _sig = (f"{level}|{start}|{end}|{'|'.join(export_sheets)}|"
+            f"{'|'.join(f'{k}={v}' for k, v in export_views.items())}")
     if st.session_state.get("gc_xlsx_sig") != _sig:
         st.session_state.pop("gc_xlsx", None)      # 기간·단위가 바뀌면 옛 파일은 버린다
     with export_slot:
@@ -16168,7 +16589,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _bar = _c2.progress(0.0, text="소재 이미지를 받아 줄이는 중…")
             try:
                 st.session_state["gc_xlsx"] = gc_build_excel(
-                    export_sheets, level, start, end, with_images=True,
+                    export_sheets, level, start, end, with_images=True, views=export_views,
+                    notes=export_notes,
                     progress=lambda p: _bar.progress(
                         min(1.0, p), text=f"소재 이미지 {p * 100:.0f}%"))
                 st.session_state["gc_xlsx_sig"] = _sig
