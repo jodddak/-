@@ -821,11 +821,35 @@ def main():
               "       (대시보드에서 그 기간에 데이터가 있는지 확인해주세요)")
         return
 
+    # ── 데이터가 아직 안 들어왔는가 ──────────────────────────
+    # GA 행이 집계 기간에 하나도 없으면 '성과가 0'이 아니라 '아직 안 받아온 것'이다.
+    # (10/01 메일: 정액 계약 일할분만 있고 GFA·메타·크리테오·GA 매출이 통째로 빠져 ROAS 0%)
+    # 예약 실행이면 이번엔 보내지 않고 다음 시도(1시간 뒤)에 맡긴다. 마지막 시도(한국 12시 이후)거나
+    # 손으로 돌린 경우엔 보내되, 맨 위에 '데이터 미수집'을 크게 적는다.
+    def _has_ga(s, e):
+        if ga_daily is None or ga_daily.empty:
+            return False
+        d = pd.to_datetime(ga_daily["report_date"], errors="coerce").dt.date
+        return bool(((d >= s) & (d <= e)).any())
+
+    missing_note = ""
+    if not _has_ga(start, end):
+        kst_hour = (datetime.utcnow() + timedelta(hours=9)).hour
+        if args.dedupe and not args.dry_run and kst_hour < 12:
+            print(f"[대기] {start}~{end} GA 데이터가 아직 DB에 없습니다. 이번엔 보내지 않고 "
+                  "다음 예약 시도에서 다시 확인합니다.")
+            return
+        missing_note = ("⚠️ 이 기간 GA 데이터(구매·매출)가 아직 수집되지 않았습니다 — 아래 숫자는 "
+                        "미완성입니다. 대시보드를 한 번 열면 받아오고, 그 뒤 Actions에서 "
+                        "Run workflow로 다시 보내면 됩니다.")
+
     prev = totals(build_rows(ad_spend, ga_daily, master, p_start, p_end))
     series = daily_series(ad_spend, ga_daily, master, start, end) if weekly else None
 
     head, items, floor = build_actions(df, n_days)
     gap = spend_gap_note(ga_daily, ad_spend, start, end)
+    if missing_note:
+        gap = missing_note + (" " + gap if gap else "")
     html = render_html(weekly, start, end, df, prev, head, items, gap, floor, series)
     text = render_text(weekly, start, end, df, prev, head, items, series)
 
@@ -836,6 +860,8 @@ def main():
     else:
         subject = (f"[STCO 일별 성과] {end:%m/%d} · "
                    f"ROAS {t['roas']:,.0f}% · 매출 {t['rev']:,.0f}원")
+    if missing_note:
+        subject = "[데이터 미수집] " + subject
 
     if args.dry_run:
         print(subject)
