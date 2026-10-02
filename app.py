@@ -16893,6 +16893,46 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     st.warning(_txt)
                 else:
                     st.caption(_txt)
+            # ── 매체 관리자와 숫자가 다를 때 ── 이 소재로 저장된 원본을 날짜·캠페인별로 그대로 보여준다.
+            # '같은 기간인데 왜 다르지'의 답은 거의 항상 ①VAT(대시보드는 +10%) ②같은 이름이 다른
+            # 캠페인에도 있음 ③기간 끝의 날짜가 한쪽에만 들어감 — 셋 중 하나라 원본을 보면 바로 갈린다.
+            if level == "소재" and ad_creative is not None and not ad_creative.empty and recs:
+                with st.expander("🔍 매체 관리자와 숫자가 다를 때 — 소재 원본(날짜·캠페인별) 보기"):
+                    _names = sorted({str(x.get("이름") or "") for x in recs
+                                     if x.get("이름") and float(x.get("광고비(VAT+)") or 0) > 0})
+                    if not _names:
+                        st.caption("광고비가 붙은 소재가 없습니다.")
+                    else:
+                        _pick = st.selectbox("소재", _names, key=f"gc_raw_pick_{ti}")
+                        _ac = ad_creative.copy()
+                        _ac["_d"] = pd.to_datetime(_ac["report_date"], errors="coerce").dt.date
+                        _ac = _ac[(_ac["_d"] >= start) & (_ac["_d"] <= end)]
+                        _ac = _ac[_ac["channel"].map(_gc_channel) == label]
+                        _ac = _ac[_ac["creative"].map(_creative_image_key) == _creative_image_key(_pick)]
+                        if _ac.empty:
+                            st.caption("이 기간에 저장된 원본이 없습니다(대행사 리포트로 채워진 소재일 수 있습니다).")
+                        else:
+                            for _c in ("impressions", "clicks", "cost_incl_vat"):
+                                _ac[_c] = pd.to_numeric(_ac[_c], errors="coerce").fillna(0)
+                            if "campaign" not in _ac.columns:
+                                _ac["campaign"] = ""
+                            _ac["광고비(VAT 제외)"] = _ac["cost_incl_vat"] / 1.1
+                            _by_c = (_ac.groupby("campaign", as_index=False)
+                                     [["impressions", "clicks", "광고비(VAT 제외)", "cost_incl_vat"]].sum())
+                            _by_d = (_ac.groupby("_d", as_index=False)
+                                     [["impressions", "clicks", "광고비(VAT 제외)", "cost_incl_vat"]].sum())
+                            _ren = {"campaign": "캠페인", "_d": "날짜", "impressions": "노출",
+                                    "clicks": "클릭", "cost_incl_vat": "광고비(VAT 포함·대시보드)"}
+                            _fmt = {"노출": "{:,.0f}", "클릭": "{:,.0f}", "광고비(VAT 제외)": "{:,.0f}",
+                                    "광고비(VAT 포함·대시보드)": "{:,.0f}"}
+                            st.caption(
+                                f"{start} ~ {end} · 매체 관리자 화면의 '비용'은 **VAT 제외** 금액이라 "
+                                "가운데 열과 비교하세요. 캠페인이 둘 이상 나오면 같은 이름의 소재가 "
+                                "다른 캠페인에도 있어서 대시보드가 합친 겁니다.")
+                            st.dataframe(_by_c.rename(columns=_ren).style.format(_fmt),
+                                         hide_index=True, use_container_width=True)
+                            st.dataframe(_by_d.rename(columns=_ren).style.format(_fmt),
+                                         hide_index=True, use_container_width=True)
             with st.expander("📖 이 표 읽는 법 — 기준·판정 규칙"):
                 st.markdown(
                     "- 머리글을 누르면 **정렬**됩니다. 합계(TOTAL) 줄은 맨 위 고정입니다.\n"
