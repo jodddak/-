@@ -10123,7 +10123,7 @@ def render_gfa_token_helper():
 # GA의 utm_campaign(추석세일)은 추적용으로 줄여 적는 값이라 광고 관리자 화면과 다르다.
 # 소재별 표에서 "이 소재가 어느 캠페인 거냐"를 볼 때는 관리자 이름이어야 바로 통한다.
 AD_CREATIVE_COLS = ["report_date", "channel", "creative", "impressions", "clicks",
-                    "cost_incl_vat", "conversions", "revenue", "source", "campaign"]
+                    "cost_incl_vat", "conversions", "revenue", "source", "campaign", "adset"]
 
 
 def _empty_creative():
@@ -10131,6 +10131,28 @@ def _empty_creative():
 
 
 AD_CREATIVE_KEY = "report_date,channel,creative,source"
+# 광고세트(타겟팅)까지 나눠 저장하는 키. 같은 광고(소재)를 신규·리타겟팅 광고세트에 따로
+# 올리면 매체는 광고세트마다 실적을 따로 주는데, 소재 이름 하나로만 저장하면 합쳐져서
+# 대시보드가 GA 방문 비중으로 '추정 배분'할 수밖에 없었다 — 메타 관리자 화면과 숫자가
+# 안 맞던 이유(패션관심타겟 실제 11.3만원 vs 대시보드 20.8만원). 표에 adset 열과
+# 새 기본키가 있으면(ad_creative_adset.sql) 광고세트별로 저장하고, 없으면 예전처럼 합쳐 저장한다.
+AD_CREATIVE_KEY_ADSET = "report_date,channel,creative,source,adset"
+
+
+def _ad_creative_collapse(df: pd.DataFrame) -> pd.DataFrame:
+    """광고세트 구분 없이 예전 키로 합친다(표가 아직 새 구조가 아닐 때)."""
+    if df is None or df.empty:
+        return df
+    key = ["report_date", "channel", "creative", "source"]
+    num = [c for c in ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue")
+           if c in df.columns]
+    other = [c for c in df.columns if c not in key + num + ["adset"]]
+    g = df.groupby(key, as_index=False)[num].sum()
+    if other:
+        first = (df.sort_values("cost_incl_vat", ascending=False)
+                 .drop_duplicates(subset=key)[key + other])
+        g = g.merge(first, on=key, how="left")
+    return g
 
 
 def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
@@ -10141,6 +10163,38 @@ def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
     화면이 빈다. 이름은 못 보여도 숫자는 들어와야 하므로, 실패하면 campaign을 빼고
     다시 저장하고 무엇을 하면 되는지 한 번만 알려준다.
     """
+    if df is not None and not df.empty:
+        df = df.copy()
+        if "adset" not in df.columns:
+            df["adset"] = ""
+        df["adset"] = df["adset"].fillna("").astype(str).str.strip()
+        has_adset = bool((df["adset"] != "").any())
+        try:
+            _cols = set(load_table("ad_creative_daily").columns)
+        except Exception:
+            _cols = set()
+        _ready = ("adset" in _cols) and not st.session_state.get("ad_creative_no_adset")
+        if _ready:
+            n = save_table("ad_creative_daily", df, AD_CREATIVE_KEY_ADSET, source_file)
+            if n:
+                # 광고세트별로 새로 받은 매체·날짜는, 예전에 합쳐서 저장해둔 줄(adset='')을
+                # 지운다 — 안 지우면 같은 날 실적이 '합친 줄 + 나눈 줄'로 두 번 잡힌다.
+                # (저장이 성공한 **다음에** 지운다 — 순서가 바뀌면 실패 시 데이터가 날아간다)
+                if has_adset:
+                    try:
+                        _cl = get_supabase_client()
+                        if _cl is not None:
+                            for _ch, _sub in df[df["adset"] != ""].groupby("channel"):
+                                _d = pd.to_datetime(_sub["report_date"], errors="coerce").dt.date
+                                (_cl.table(TABLES["ad_creative_daily"]).delete()
+                                 .eq("channel", _ch).eq("adset", "")
+                                 .gte("report_date", str(_d.min()))
+                                 .lte("report_date", str(_d.max())).execute())
+                    except Exception:
+                        pass
+                return n
+            st.session_state["ad_creative_no_adset"] = True
+        df = _ad_creative_collapse(df.drop(columns=["adset"]))
     n = save_table("ad_creative_daily", df, AD_CREATIVE_KEY, source_file)
     if n or "campaign" not in getattr(df, "columns", []):
         return n
@@ -10158,7 +10212,7 @@ def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
     for ch, acct in _meta_accounts():
         try:
             for d in _meta_insights(acct, {
-                "fields": ("campaign_name,ad_name,spend,impressions,clicks,"
+                "fields": ("campaign_name,adset_name,ad_name,spend,impressions,clicks,"
                            "actions,action_values"),
                 "level": "ad",                     # ← 계정이 아니라 광고 단위
                 "time_increment": 1,
@@ -10172,6 +10226,9 @@ def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
                     "report_date": d.get("date_start"), "channel": ch,
                     "creative": str(d.get("ad_name") or "").strip(),
                     "campaign": str(d.get("campaign_name") or "").strip(),
+                    # 광고세트 = 타겟팅(패션관심타겟·방문자180일). 같은 광고를 여러 세트에
+                    # 올리므로 이걸로 갈라야 관리자 화면과 숫자가 맞는다.
+                    "adset": str(d.get("adset_name") or "").strip(),
                     "impressions": float(d.get("impressions") or 0),
                     "clicks": _meta_link_clicks(d),
                     # 메타 spend는 VAT 별도라 다른 매체와 단위를 맞추려면 1.1을 곱한다
@@ -10858,7 +10915,10 @@ def _creative_frame(rows: list) -> pd.DataFrame:
     # 같은 날 같은 소재가 여러 캠페인에 걸쳐 있으면 합산한다.
     # 캠페인 이름은 광고비가 가장 많이 나간 쪽을 대표로 쓴다 — 한 소재가 여러 캠페인에
     # 걸리는 일은 드물고, 걸렸을 때 '주로 어디서 돌았나'를 보여주는 게 맞다.
-    _key = ["report_date", "channel", "creative", "source"]
+    if "adset" not in out.columns:
+        out["adset"] = ""
+    out["adset"] = out["adset"].fillna("").astype(str).str.strip()
+    _key = ["report_date", "channel", "creative", "source", "adset"]
     _camp = (out.sort_values("cost_incl_vat", ascending=False)
              .drop_duplicates(subset=_key)[_key + ["campaign"]])
     out = out.groupby(_key, as_index=False)[["impressions", "clicks", "cost_incl_vat",
@@ -14142,7 +14202,7 @@ def cr_rule_for(r, media, avg_spend=None) -> tuple:
     conv = float((m.get("media_conv") if basis else r.get("conv")) or 0)
     rev = float((m.get("media_rev") if basis else r.get("rev")) or 0)
     age = _cr_age(r, m)
-    if m.get("_unmatched") and not basis:
+    if m.get("_unmatched") and not basis and not m.get("_adset_rest"):
         return "UTM 없음", "hold", "GA에서 못 찾음 — utm_content를 소재명과 맞춰주세요", age
     if cost <= 0:
         return "광고비 없음", "hold", "매체 광고비가 안 붙음(꺼짐·이름 불일치)", age
@@ -14628,6 +14688,18 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
         return out
     g = c.groupby(["channel", "creative"], as_index=False)[
         ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
+    # 광고세트(타겟팅)별 실적 — 있으면 표의 '타겟팅' 줄에 추정 배분 대신 실제 값을 붙인다
+    _by_t = {}
+    if "adset" in c.columns:
+        _ca = c[c["adset"].fillna("").astype(str).str.strip() != ""]
+        if not _ca.empty:
+            _ga = _ca.groupby(["channel", "creative", "adset"], as_index=False)[
+                ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
+            for _, r in _ga.iterrows():
+                _by_t.setdefault((r["channel"], r["creative"]), {})[str(r["adset"]).strip()] = {
+                    "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
+                    "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
+                    "media_rev": float(r["revenue"])}
     _src_of, _camp_of = {}, {}
     if "source" in c.columns:
         for _, r in c.drop_duplicates(subset=["channel", "creative"], keep="last").iterrows():
@@ -14658,7 +14730,22 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                   "src": _src_of.get((r["channel"], r["creative"]), "api"),
                   "campaigns": _camp_of.get((r["channel"], r["creative"]), [])}
         out[k]["campaign"] = (out[k]["campaigns"] or [""])[0]
+        if (r["channel"], r["creative"]) in _by_t:
+            out[k]["_by_target"] = _by_t[(r["channel"], r["creative"])]
     return out
+
+
+def _gc_tgt_norm(s) -> str:
+    return "".join(str(s or "").lower().split())
+
+
+def _gc_tgt_match(target, adset) -> bool:
+    """GA 타겟팅(utm_content 앞부분)과 매체 광고세트 이름이 같은 묶음인가.
+    '패션관심타겟' ↔ '패션관심타겟' / '방문자180일' ↔ '리타겟팅_방문자180일' 둘 다 잡는다."""
+    t, a = _gc_tgt_norm(target), _gc_tgt_norm(adset)
+    if not t or not a or t in ("(미설정)", "(규칙외)", "(타겟팅없음)"):
+        return False
+    return t == a or t in a or a in t
 
 
 def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
@@ -14926,10 +15013,60 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
     out = list(hits)
     matched_ids.update(id(m) for m in hits if m)
     ses = pd.to_numeric(rows["sessions"], errors="coerce").fillna(0).tolist()
+    tgts = (rows["target"].tolist() if "target" in rows.columns else [""] * len(rows))
+    _F = ("impressions", "clicks", "cost", "media_conv", "media_rev")
     for idxs in groups.values():
+        base = hits[idxs[0]]
+        bt = base.get("_by_target") or {}
+        if bt and any(k for k in bt):
+            # ── 광고세트별 실제 실적이 있으면 그걸 붙인다 (추정 배분 X) ──
+            used = set()
+            assigned = {}
+            for i in idxs:
+                hit = next((a for a in bt if a not in used and _gc_tgt_match(tgts[i], a)), None)
+                if hit:
+                    used.add(hit)
+                    assigned[i] = hit
+            if assigned:
+                rest = {f: sum(float(v.get(f, 0) or 0) for a, v in bt.items() if a not in used)
+                        for f in _F}
+                # 광고세트 이름이 비어 있는(예전에 합쳐 저장된) 몫도 나머지로 본다
+                for f in _F:
+                    rest[f] += max(0.0, float(base.get(f, 0) or 0)
+                                   - sum(float(v.get(f, 0) or 0) for v in bt.values()))
+                free = [i for i in idxs if i not in assigned]
+                for i in idxs:
+                    if i in assigned:
+                        src = bt[assigned[i]]
+                        d = {f: float(src.get(f, 0) or 0) for f in _F}
+                    else:
+                        tot = sum(ses[j] for j in free)
+                        w = (ses[i] / tot) if tot > 0 else (1.0 / len(free))
+                        d = {f: rest[f] * w for f in _F}
+                    out[i] = dict(d, channel=base.get("channel"), name=base.get("name"),
+                                  src=base.get("src"), _split=len(idxs), _first=base.get("_first"),
+                                  _adset=assigned.get(i, ""), _full_cost=d["cost"],
+                                  _media_basis=base.get("_media_basis"),
+                                  campaigns=base.get("campaigns"), campaign=base.get("campaign"))
+                # GA 줄이 없는 광고세트의 돈은 버리지 않고 'GA 매칭 안 됨' 줄로 따로 세운다
+                # (합계가 매체 관리자와 맞게). 남은 GA 줄이 있으면 거기로 이미 갔다.
+                if not free and any(rest[f] > 0 for f in ("impressions", "cost")):
+                    kk = None
+                    for k, v in media_map.items():
+                        if v is base:
+                            kk = k
+                            break
+                    if kk is not None:
+                        names = [a for a in bt if a not in used] or ["기타"]
+                        media_map[(kk[0], kk[1] + "__rest")] = dict(
+                            rest, channel=base.get("channel"), name=base.get("name"),
+                            src=base.get("src"), _first=base.get("_first"),
+                            campaign=f'{base.get("campaign") or ""} · {", ".join(names)}'.strip(" ·"),
+                            campaigns=base.get("campaigns"), _media_basis=base.get("_media_basis"),
+                            _adset_rest=True)
+                continue
         if len(idxs) < 2:
             continue
-        base = hits[idxs[0]]
         tot = sum(ses[i] for i in idxs)
         for i in idxs:
             w = (ses[i] / tot) if tot > 0 else (1.0 / len(idxs))
@@ -16903,6 +17040,27 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     if not _names:
                         st.caption("광고비가 붙은 소재가 없습니다.")
                     else:
+                        if label in (META_OWN_TAB, META_EXT_TAB):
+                            # 메타는 같은 광고를 여러 광고세트(타겟팅)에 올려서, 광고세트별로
+                            # 받아야 관리자 화면과 숫자가 맞는다. 예전에 합쳐 받은 기간은 여기서 다시 받는다.
+                            _has_adset = "adset" in ad_creative.columns
+                            if not _has_adset:
+                                st.warning(
+                                    "광고세트별 저장이 아직 꺼져 있습니다 — Supabase SQL Editor에서 "
+                                    "`ad_creative_adset.sql`을 한 번 실행한 뒤 아래 버튼을 눌러주세요.")
+                            if st.button(f"🔁 {start}~{end} 메타 소재를 광고세트별로 다시 받기",
+                                         key=f"gc_meta_adset_{ti}", disabled=not _has_adset):
+                                with st.status("메타 소재 다시 받는 중...", expanded=True) as _s6:
+                                    _n6, _sv6, _er6 = sync_ad_creative(
+                                        ad_creative, only=["메타"], unlimited=True,
+                                        progress=st.write, start=start,
+                                        end=min(end, date.today() - timedelta(days=1)))
+                                    _s6.update(label=f"완료 — {_n6:,}행", state="complete")
+                                for _k6, _v6 in (_er6 or {}).items():
+                                    st.error(f"**{_k6}** 실패 — {_v6}")
+                                if not _er6:
+                                    st.cache_data.clear()
+                                    st.rerun()
                         _pick = st.selectbox("소재", _names, key=f"gc_raw_pick_{ti}")
                         _ac = ad_creative.copy()
                         _ac["_d"] = pd.to_datetime(_ac["report_date"], errors="coerce").dt.date
@@ -16917,11 +17075,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             if "campaign" not in _ac.columns:
                                 _ac["campaign"] = ""
                             _ac["광고비(VAT 제외)"] = _ac["cost_incl_vat"] / 1.1
-                            _by_c = (_ac.groupby("campaign", as_index=False)
+                            if "adset" not in _ac.columns:
+                                _ac["adset"] = ""
+                            _ac["adset"] = _ac["adset"].fillna("").replace("", "(합쳐 저장됨)")
+                            _by_c = (_ac.groupby(["campaign", "adset"], as_index=False)
                                      [["impressions", "clicks", "광고비(VAT 제외)", "cost_incl_vat"]].sum())
                             _by_d = (_ac.groupby("_d", as_index=False)
                                      [["impressions", "clicks", "광고비(VAT 제외)", "cost_incl_vat"]].sum())
-                            _ren = {"campaign": "캠페인", "_d": "날짜", "impressions": "노출",
+                            _ren = {"campaign": "캠페인", "adset": "광고세트", "_d": "날짜", "impressions": "노출",
                                     "clicks": "클릭", "cost_incl_vat": "광고비(VAT 포함·대시보드)"}
                             _fmt = {"노출": "{:,.0f}", "클릭": "{:,.0f}", "광고비(VAT 제외)": "{:,.0f}",
                                     "광고비(VAT 포함·대시보드)": "{:,.0f}"}
