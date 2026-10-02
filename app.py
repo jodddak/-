@@ -14693,10 +14693,17 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     if "adset" in c.columns:
         _ca = c[c["adset"].fillna("").astype(str).str.strip() != ""]
         if not _ca.empty:
-            _ga = _ca.groupby(["channel", "creative", "adset"], as_index=False)[
+            if "campaign" not in _ca.columns:
+                _ca = _ca.assign(campaign="")
+            _ca = _ca.assign(campaign=_ca["campaign"].fillna("").astype(str).str.strip())
+            # 캠페인까지 같이 쥔다 — 같은 광고가 '수트_전환/패션관심타겟'과
+            # '추석세일_전환/패션관심타겟'처럼 이름이 같은 광고세트에 동시에 있을 수 있다.
+            _ga = _ca.groupby(["channel", "creative", "campaign", "adset"], as_index=False)[
                 ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
             for _, r in _ga.iterrows():
-                _by_t.setdefault((r["channel"], r["creative"]), {})[str(r["adset"]).strip()] = {
+                _ad, _cp = str(r["adset"]).strip(), str(r["campaign"]).strip()
+                _by_t.setdefault((r["channel"], r["creative"]), {})[f"{_cp}\x1f{_ad}"] = {
+                    "adset": _ad, "campaign": _cp,
                     "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
                     "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
                     "media_rev": float(r["revenue"])}
@@ -15021,33 +15028,52 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
         if bt and any(k for k in bt):
             # ── 광고세트별 실제 실적이 있으면 그걸 붙인다 (추정 배분 X) ──
             used = set()
-            assigned = {}
+            assigned = {}          # 줄 번호 → [광고세트 키, ...]
+            camps = (rows["campaign"].tolist() if "campaign" in rows.columns else [""] * len(rows))
             for i in idxs:
-                hit = next((a for a in bt if a not in used and _gc_tgt_match(tgts[i], a)), None)
-                if hit:
-                    used.add(hit)
-                    assigned[i] = hit
+                cand = [a for a in bt if a not in used
+                        and _gc_tgt_match(tgts[i], bt[a].get("adset", a))]
+                if not cand:
+                    continue
+                # 같은 타겟팅 이름이 여러 캠페인에 있으면 이 줄의 캠페인(utm_campaign)과 맞는 것만.
+                # 못 가리면 같은 타겟팅을 전부 합친다 — 아무거나 하나 고르면 엉뚱한 캠페인 숫자가 붙는다.
+                gc = _gc_tgt_norm(camps[i])
+                cm = [a for a in cand if gc and (
+                    gc == _gc_tgt_norm(bt[a].get("campaign"))
+                    or gc in _gc_tgt_norm(bt[a].get("campaign"))
+                    or camps[i] and str(camps[i]).strip().lower()
+                    in _gc_camp_parts(bt[a].get("campaign")))]
+                pick = cm or cand
+                used.update(pick)
+                assigned[i] = pick
             if assigned:
                 rest = {f: sum(float(v.get(f, 0) or 0) for a, v in bt.items() if a not in used)
                         for f in _F}
-                # 광고세트 이름이 비어 있는(예전에 합쳐 저장된) 몫도 나머지로 본다
-                for f in _F:
-                    rest[f] += max(0.0, float(base.get(f, 0) or 0)
-                                   - sum(float(v.get(f, 0) or 0) for v in bt.values()))
+                # 광고세트 이름 없이 '합쳐서' 저장된 날(광고세트별로 다시 받기 전 기간)의 몫은
+                # 어느 광고세트 것인지 모르니 예전처럼 GA 방문 비중으로 모든 줄에 나눈다.
+                collapsed = {f: max(0.0, float(base.get(f, 0) or 0)
+                                    - sum(float(v.get(f, 0) or 0) for v in bt.values()))
+                             for f in _F}
+                _all = sum(ses[j] for j in idxs)
                 free = [i for i in idxs if i not in assigned]
                 for i in idxs:
+                    w_all = (ses[i] / _all) if _all > 0 else (1.0 / len(idxs))
                     if i in assigned:
-                        src = bt[assigned[i]]
-                        d = {f: float(src.get(f, 0) or 0) for f in _F}
+                        d = {f: sum(float(bt[a].get(f, 0) or 0) for a in assigned[i])
+                             + collapsed[f] * w_all for f in _F}
                     else:
                         tot = sum(ses[j] for j in free)
                         w = (ses[i] / tot) if tot > 0 else (1.0 / len(free))
-                        d = {f: rest[f] * w for f in _F}
+                        d = {f: rest[f] * w + collapsed[f] * w_all for f in _F}
                     out[i] = dict(d, channel=base.get("channel"), name=base.get("name"),
                                   src=base.get("src"), _split=len(idxs), _first=base.get("_first"),
-                                  _adset=assigned.get(i, ""), _full_cost=d["cost"],
+                                  _adset=", ".join(bt[a].get("adset", "") for a in assigned.get(i, [])),
+                                  _full_cost=d["cost"],
                                   _media_basis=base.get("_media_basis"),
-                                  campaigns=base.get("campaigns"), campaign=base.get("campaign"))
+                                  # 실제로 붙인 광고세트의 캠페인만 적는다(다른 캠페인 이름이 섞여 보이지 않게)
+                                  campaigns=(sorted({bt[a].get("campaign", "") for a in assigned[i]} - {""})
+                                             if i in assigned else base.get("campaigns")),
+                                  campaign=base.get("campaign"))
                 # GA 줄이 없는 광고세트의 돈은 버리지 않고 'GA 매칭 안 됨' 줄로 따로 세운다
                 # (합계가 매체 관리자와 맞게). 남은 GA 줄이 있으면 거기로 이미 갔다.
                 if not free and any(rest[f] > 0 for f in ("impressions", "cost")):
@@ -15057,11 +15083,12 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                             kk = k
                             break
                     if kk is not None:
-                        names = [a for a in bt if a not in used] or ["기타"]
+                        names = sorted({f'{bt[a].get("campaign", "")}/{bt[a].get("adset", "")}'.strip("/")
+                                        for a in bt if a not in used}) or ["기타"]
                         media_map[(kk[0], kk[1] + "__rest")] = dict(
                             rest, channel=base.get("channel"), name=base.get("name"),
                             src=base.get("src"), _first=base.get("_first"),
-                            campaign=f'{base.get("campaign") or ""} · {", ".join(names)}'.strip(" ·"),
+                            campaign=", ".join(names),
                             campaigns=base.get("campaigns"), _media_basis=base.get("_media_basis"),
                             _adset_rest=True)
                 continue
