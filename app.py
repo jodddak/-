@@ -3812,32 +3812,44 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
         # 그리는데, 그때 date_input이 날짜 1개짜리를 돌려줘서 기간이 전체로 튀었다가 되돌아온다.
         # 무거운 표가 그 사이에 두 번 그려지고 숫자도 잠깐 엉뚱하게 보인다.
         # 그래서 고르는 값(초안)과 적용된 값을 나눠 두고, 확인을 눌렀을 때만 반영한다.
+        # 시작일·종료일을 **따로** 고르고, 둘 다 **폼** 안에 둔다.
+        #
+        # 예전엔 달력 하나로 범위를 골랐는데, 시작일을 찍는 순간 Streamlit이 화면 전체를
+        # 다시 그리면서 달력이 닫혔다. 소재 이미지가 많은 무거운 화면이라 다시 그리는 데
+        # 몇 초가 걸리고, 그 사이 누른 종료일 클릭은 씹혔다('자꾸 안 눌린다').
+        # 폼 안의 입력은 **확인을 누르기 전까지 화면을 다시 그리지 않으므로** 달력이 안 닫힌다.
+        #
+        # 고를 수 있는 날짜는 '오늘'까지 열어둔다. 데이터 마지막 날로 막아두면 오늘·어제가
+        # 회색으로 안 눌려서 고장처럼 보였다. 데이터 범위를 넘으면 적용할 때 맞춰 자른다.
         applied_key = f"{key}_applied"
         applied = st.session_state.get(applied_key) or (min_d, max_d)
         applied = (max(applied[0], min_d), min(applied[1], max_d))
-
-        narrow_col, btn_col, _spacer = st.columns([3, 1, 8])
-        with narrow_col:
-            draft = st.date_input(
-                "기간 직접 선택", value=applied, min_value=min_d, max_value=max_d,
-                key=f"{key}_manual",
-            )
-        with btn_col:
-            # 라벨 한 줄만큼 내려야 입력칸과 버튼 높이가 맞는다
-            st.markdown("<div style='height:30px'></div>", unsafe_allow_html=True)
-            confirmed = st.button("확인", key=f"{key}_apply", type="primary",
-                                  use_container_width=True)
-
-        picked = draft if (isinstance(draft, tuple) and len(draft) == 2) else None
-        if confirmed and picked:
-            st.session_state[applied_key] = picked
-            applied = picked
+        _today = date.today()
+        _lo = min(min_d, _today)
+        with st.form(f"{key}_form", border=False):
+            c1, c2, c3, _sp = st.columns([2, 2, 1, 5])
+            with c1:
+                d_from = st.date_input("시작일", value=applied[0], min_value=_lo,
+                                       max_value=_today, key=f"{key}_from", format="YYYY-MM-DD")
+            with c2:
+                d_to = st.date_input("종료일", value=applied[1], min_value=_lo,
+                                     max_value=_today, key=f"{key}_to", format="YYYY-MM-DD")
+            with c3:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                confirmed = st.form_submit_button("확인", type="primary",
+                                                  use_container_width=True)
+        if confirmed:
+            a_, b_ = sorted([d_from, d_to])
+            a2, b2 = max(a_, min_d), min(b_, max_d)
+            if a2 > b2:
+                st.warning(f"고른 기간({a_}~{b_})에는 데이터가 없습니다. "
+                           f"지금 데이터는 {min_d} ~ {max_d}까지입니다.")
+            else:
+                if (a2, b2) != (a_, b_):
+                    st.caption(f"데이터가 {min_d} ~ {max_d}까지라 {a2} ~ {b2}로 맞췄습니다.")
+                st.session_state[applied_key] = (a2, b2)
+                applied = (a2, b2)
         start, end = applied
-
-        if picked and picked != applied:
-            st.caption("고른 기간이 아직 반영되지 않았습니다 — **확인**을 눌러주세요.")
-        elif not picked:
-            st.caption("종료일까지 고른 뒤 **확인**을 눌러주세요.")
     else:
         start, end = _preset_to_range(preset, min_d, max_d)
         # 프리셋이 가리키는 기간에 데이터가 아예 없으면, 지금까지는 조용히 '데이터 마지막 날'
