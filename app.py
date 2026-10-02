@@ -3827,7 +3827,8 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
         _today = date.today()
         _lo = min(min_d, _today)
         with st.form(f"{key}_form", border=False):
-            c1, c2, c3, _sp = st.columns([2, 2, 1, 5])
+            # 날짜 칸은 YYYY-MM-DD 10글자만 들어가면 된다 — 폭을 좁게
+            c1, c2, c3, _sp = st.columns([1.15, 1.15, 0.6, 7.1])
             with c1:
                 d_from = st.date_input("시작일", value=applied[0], min_value=_lo,
                                        max_value=_today, key=f"{key}_from", format="YYYY-MM-DD")
