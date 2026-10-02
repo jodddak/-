@@ -1205,6 +1205,7 @@ TABLES = {
     "kakao_channel_message": "kakao_channel_message",
     "creative_alias": "creative_alias",
     "ad_creative_daily": "ad_creative_daily",
+    "creative_status_manual": "creative_status_manual",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -8340,6 +8341,11 @@ FUNNEL_V4_CSS = """
 .fv4-chip.off  { background:#C0273A; color:#FFFFFF; }
 .fv4-chip.up   { background:#2C7A3C; color:#FFFFFF; }
 .fv4-chip.keep { background:#EAF1FB; color:#2C5AA0; }
+/* 지금 켜져 있나 — 판정 칩 앞에 작게. 추정(?)은 집행일로 짐작한 것 */
+.gc-onoff { display:inline-block; font-size:11px; font-weight:800; margin-right:6px;
+            padding:2px 7px; border-radius:6px; vertical-align:middle; }
+.gc-onoff.on  { background:#E4F6DC; color:#2C7A3C; }
+.gc-onoff.off { background:#EFEEE8; color:#8a8a7c; }
 /* 판정 칩 밑 사유 한 줄 — 왜 그 판정인지 바로 읽히게 */
 .gc-why { font-size:11px; color:#8a8a7c; margin-top:4px; line-height:1.4;
           white-space:normal; max-width:210px; margin-left:auto; text-align:right; }
@@ -14037,7 +14043,7 @@ CR_EXCL = "판단 제외"
 # 칩 색 — 행동이 필요한 것만 진하게
 CR_CLS = {CR_OFF: "off", CR_CUT: "bad", CR_UP: "up", CR_HIDDEN: "good",
           CR_KEEP: "keep", CR_HOLD_UP: "warn", CR_LEARN: "hold", CR_THIN: "hold",
-          CR_EXCL: "hold", "광고비 없음": "hold", "UTM 없음": "hold"}
+          CR_EXCL: "hold", "광고비 없음": "hold", "UTM 없음": "hold", "꺼짐": "hold"}
 CR_ORDER = [CR_OFF, CR_CUT, CR_UP, CR_HIDDEN, CR_HOLD_UP, CR_KEEP, CR_LEARN, CR_THIN]
 
 
@@ -14132,6 +14138,21 @@ def cr_rule_for(r, media, avg_spend=None) -> tuple:
     return lab, CR_CLS.get(lab, "hold"), why, age
 
 
+CR_DONE = "꺼짐"
+
+
+def cr_apply_onoff(rule: tuple, onoff: tuple) -> tuple:
+    """이미 꺼진 소재에 'OFF 권장'을 또 띄우면 할 일과 끝난 일이 섞인다 — 그걸 가른다."""
+    lab, cls, why, age = rule
+    disp, on, _note = onoff
+    if on is False:
+        if lab in (CR_OFF, CR_CUT, CR_THIN):
+            return CR_DONE, "hold", f"이미 OFF · 기준상 {lab} — {why}", age
+        if lab in (CR_UP, CR_HIDDEN):
+            return lab, cls, f"{why} · 지금 OFF — 다시 켜볼 만함", age
+    return rule
+
+
 def cr_comment_lines(items: list, label: str, tot_cost: float, tot_rev: float) -> list:
     """주간보고 '특이사항 및 리뷰'처럼 번호 매길 문장들. items = [(이름, 판정, 사유, 광고비, ROAS, 구매)]."""
     if tot_cost <= 0:
@@ -14167,6 +14188,9 @@ def cr_comment_lines(items: list, label: str, tot_cost: float, tot_rev: float) -
     conc = [x for x in items if "⚡" in x[2]]
     for x in sorted(conc, key=lambda x: -x[3])[:2]:
         out.append(f"⚡ 예산 쏠림: {x[0]}에 {_cr_won(x[3])}이 몰렸는데 ROAS {x[4]:,.0f}% — 오늘 바로 점검이 필요합니다.")
+    done = by.get(CR_DONE, [])
+    if done:
+        out.append(f"이미 꺼진 소재 {len(done)}개(기준상 OFF였던 것)는 OFF 권장에서 뺐습니다 — 표에 '꺼짐'으로 표시.")
     thin = by.get(CR_THIN, [])
     if thin:
         out.append(f"노출 부족 {len(thin)}개(10일+·구매 0·3만원 미만) — 매체가 이미 안 태우는 소재라 정리하면 계정이 깔끔해집니다.")
@@ -14601,24 +14625,249 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     return out
 
 
-def _gc_first_spend(ad_creative: pd.DataFrame) -> dict:
-    """{(매체탭, 소재키): 처음 광고비가 잡힌 날}. 기간과 무관하게 전체에서 본다 —
-    '등록 몇 일차'는 조회 기간이 아니라 소재 자체의 나이라서."""
-    out = {}
+def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
+    """({(매체탭, 소재키): 첫 집행일}, {(매체탭, 소재키): 마지막 집행일}, {매체탭: 데이터 최신일}).
+
+    기간과 무관하게 전체에서 본다 — '등록 몇 일차'와 '지금 켜져 있나'는 조회 기간이
+    아니라 소재 자체의 상태라서. 매체탭별 최신일은 GFA처럼 리포트가 하루 이틀 늦게
+    올라오는 매체에서 '어제 0원 = 꺼짐'으로 잘못 읽지 않으려고 같이 들고 간다.
+    """
+    first, last, ch_max = {}, {}, {}
     if ad_creative is None or ad_creative.empty or "creative" not in ad_creative.columns:
-        return out
+        return first, last, ch_max
     c = ad_creative[["report_date", "channel", "creative", "cost_incl_vat"]].copy()
     c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
     c["cost_incl_vat"] = pd.to_numeric(c["cost_incl_vat"], errors="coerce").fillna(0)
     c = c.dropna(subset=["report_date"])
     c = c[c["cost_incl_vat"] > 0]
     if c.empty:
+        return first, last, ch_max
+    c["_tab"] = c["channel"].map(_gc_channel)
+    for t, d1 in c.groupby("_tab")["report_date"].max().items():
+        ch_max[t] = d1
+    g = c.groupby(["_tab", "creative"])["report_date"].agg(["min", "max"])
+    for (t, cr), r in g.iterrows():
+        k = (t, _creative_image_key(cr))
+        if k not in first or r["min"] < first[k]:
+            first[k] = r["min"]
+        if k not in last or r["max"] > last[k]:
+            last[k] = r["max"]
+    return first, last, ch_max
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_creative_status() -> tuple:
+    """매체 API에서 소재의 **지금 ON/OFF**를 받는다. ({(매체탭, 소재키): [(묶음이름, 켜짐?)]}, 오류목록)
+
+    · 메타 — 광고(ad)의 effective_status. 같은 소재가 신규/리타겟팅 광고세트에 따로
+      올라가 있어서 광고세트 이름까지 들고 간다(줄의 타겟팅과 맞춰 보려고).
+    · 구글 P-MAX — 애셋그룹 상태 × 캠페인 상태(둘 다 켜져야 ON).
+    · 크리테오·GFA — 상태 API가 없어(GFA) 또는 광고 단위 상태가 없어(크리테오) 여기선
+      못 받는다. 화면에서 '최근 집행일'로 추정한다.
+    30분 캐시 — 표를 열 때마다 매체를 두드리지 않게.
+    """
+    import json as _json
+    import requests
+    out, errs = {}, []
+
+    # ── 메타 ──
+    cfg = _secrets_section("meta_ads") or {}
+    ver = str(cfg.get("api_version", "v21.0")).strip()
+    for ch, acct in _meta_accounts():
+        tab = _gc_channel(ch)
+        url = f"https://graph.facebook.com/{ver}/{acct}/ads"
+        params = {
+            "fields": "name,effective_status,adset{name}",
+            "limit": 500,
+            "access_token": cfg.get("access_token"),
+            "effective_status": _json.dumps(
+                ["ACTIVE", "PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED", "PENDING_REVIEW",
+                 "IN_PROCESS", "WITH_ISSUES", "DISAPPROVED", "PREAPPROVED"]),
+        }
+        try:
+            n = 0
+            while url and n < 30:
+                n += 1
+                r = requests.get(url, params=params, timeout=60)
+                p = r.json()
+                if "error" in p:
+                    errs.append(f"메타({ch}): {str(p['error'].get('message'))[:120]}")
+                    break
+                for ad in p.get("data", []):
+                    nm = _creative_image_key(str(ad.get("name") or "").strip())
+                    if not nm:
+                        continue
+                    stt = str(ad.get("effective_status") or "")
+                    on = stt in ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "PREAPPROVED")
+                    grp = str((ad.get("adset") or {}).get("name") or "")
+                    out.setdefault((tab, nm), []).append((grp, on))
+                nxt = (p.get("paging") or {}).get("next")
+                url, params = (nxt, None) if nxt else (None, None)
+        except Exception as e:
+            errs.append(f"메타({ch}): {str(e)[:120]}")
+
+    # ── 구글 P-MAX ──
+    g = _secrets_section("google_ads")
+    need = ["developer_token", "client_id", "client_secret", "refresh_token", "customer_id"]
+    if g and all(g.get(k) for k in need):
+        try:
+            tok = requests.post(
+                "https://oauth2.googleapis.com/token",
+                data={"client_id": g["client_id"], "client_secret": g["client_secret"],
+                      "refresh_token": g["refresh_token"], "grant_type": "refresh_token"},
+                timeout=60).json()
+            cid = str(g["customer_id"]).replace("-", "").strip()
+            headers = {"Authorization": f"Bearer {tok.get('access_token', '')}",
+                       "developer-token": str(g["developer_token"]).strip(),
+                       "Content-Type": "application/json"}
+            if g.get("login_customer_id"):
+                headers["login-customer-id"] = str(g["login_customer_id"]).replace("-", "").strip()
+            query = ("SELECT asset_group.name, asset_group.status, campaign.name, campaign.status "
+                     "FROM asset_group WHERE asset_group.status != 'REMOVED' "
+                     "AND campaign.status != 'REMOVED'")
+            vers = ([str(g["api_version"]).strip()] if g.get("api_version") else []) + [
+                f"v{n}" for n in range(GOOGLE_ADS_VER_MAX, GOOGLE_ADS_VER_MIN - 1, -1)]
+            tab = _gc_channel("구글")
+            for v in vers:
+                r = requests.post(
+                    f"https://googleads.googleapis.com/{v}/customers/{cid}/googleAds:searchStream",
+                    headers=headers, json={"query": query}, timeout=90)
+                if r.status_code == 404:
+                    continue
+                if r.status_code >= 400:
+                    errs.append(f"구글: {r.text[:120]}")
+                    break
+                for batch in (r.json() or []):
+                    for res in batch.get("results", []):
+                        camp = res.get("campaign") or {}
+                        if _google_campaign_excluded(camp.get("name")):
+                            continue
+                        ag = res.get("assetGroup") or {}
+                        nm = _creative_image_key(str(ag.get("name") or "").strip())
+                        if not nm:
+                            continue
+                        on = (ag.get("status") == "ENABLED" and camp.get("status") == "ENABLED")
+                        out.setdefault((tab, nm), []).append((str(camp.get("name") or ""), on))
+                break
+        except Exception as e:
+            errs.append(f"구글: {str(e)[:120]}")
+
+    # ── 크리테오 ── 광고(Ad) 자체엔 ON/OFF가 없고 광고세트(Adset)에 있다.
+    # 그래서 ① 리포트로 '광고 → 광고세트' 짝을 받고 ② 광고세트 상태를 붙인다.
+    # 크리테오 API 버전마다 이름이 조금씩 달라 실패하면 조용히 '최근 집행일 추정'으로 물러난다.
+    c = _secrets_section("criteo")
+    if c and c.get("client_id") and c.get("client_secret"):
+        try:
+            token = _criteo_token(c)
+            tab = _gc_channel("크리테오")
+            end_d = date.today() - timedelta(days=1)
+            vers = ([str(c["api_version"]).strip()] if c.get("api_version") else []) + \
+                CRITEO_VERSION_CANDIDATES
+            ad2set, sets = {}, {}
+            for v in vers:
+                adv = str(c.get("advertiser_id", "") or "").strip() or _criteo_advertiser_ids(token, v)
+                if not adv:
+                    continue
+                r = _criteo_post(f"/{v}/statistics/report", token, {
+                    "advertiserIds": adv, "dimensions": ["Ad", "AdsetId", "Adset"],
+                    "metrics": ["Displays"], "currency": "KRW",
+                    "startDate": str(end_d - timedelta(days=45)), "endDate": str(end_d),
+                    "format": "json"})
+                if r is None or r.status_code == 404:
+                    continue
+                if r.status_code >= 400:
+                    errs.append(f"크리테오(광고-광고세트): {r.text[:100]}")
+                    break
+                p = r.json()
+                for row in (p.get("Rows") or p.get("rows") or []) if isinstance(p, dict) else []:
+                    nm = _creative_image_key(str(row.get("Ad") or "").strip())
+                    if nm:
+                        ad2set.setdefault(nm, set()).add(
+                            (str(row.get("AdsetId") or ""), str(row.get("Adset") or "")))
+                import requests as _rq
+                rs = _rq.post(f"{CRITEO_BASE}/{v}/marketing-solutions/ad-sets/search",
+                              headers={"Authorization": f"Bearer {token}",
+                                       "Content-Type": "application/json"},
+                              json={"filters": {"advertiserIds": [x.strip() for x in adv.split(",")]}},
+                              timeout=60)
+                if rs.status_code < 400:
+                    for it in (rs.json() or {}).get("data", []):
+                        at = it.get("attributes") or {}
+                        sch = at.get("schedule") or {}
+                        act = str(sch.get("activationStatus") or "").lower()
+                        dlv = str(sch.get("deliveryStatus") or "").lower()
+                        on = (act == "on") and dlv not in ("archived", "inactive", "draft", "ended")
+                        sets[str(it.get("id"))] = on
+                        sets["name:" + str(at.get("name") or "")] = on
+                else:
+                    errs.append(f"크리테오(광고세트 상태): {rs.status_code}")
+                break
+            for nm, pairs in ad2set.items():
+                for sid, sname in pairs:
+                    on = sets.get(sid, sets.get("name:" + sname))
+                    if on is not None:
+                        out.setdefault((tab, nm), []).append((sname, on))
+        except Exception as e:
+            errs.append(f"크리테오: {str(e)[:120]}")
+    return out, errs
+
+
+def load_manual_status() -> dict:
+    """대시보드에서 직접 체크한 ON/OFF {(매체탭, 소재키, 타겟팅): (상태, 체크한 날)}.
+    GFA처럼 상태 API가 없는 매체용. 표가 아직 없으면 빈 값."""
+    out = {}
+    try:
+        t = load_table("creative_status_manual")
+    except Exception:
         return out
-    for (ch, cr), d0 in c.groupby(["channel", "creative"])["report_date"].min().items():
-        k = (_gc_channel(ch), _creative_image_key(cr))
-        if k not in out or d0 < out[k]:
-            out[k] = d0
+    if t is None or t.empty or "creative" not in t.columns:
+        return out
+    for _, r in t.iterrows():
+        k = (str(r.get("channel") or ""), _creative_image_key(str(r.get("creative") or "")),
+             str(r.get("target") or ""))
+        stt = str(r.get("status") or "").upper()
+        if stt in ("ON", "OFF"):
+            out[k] = (stt, str(r.get("updated_at") or "")[:10])
     return out
+
+
+def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
+             manual: dict = None) -> tuple:
+    """(표시 'ON'/'OFF'/'일부 ON'/'ON?'/'OFF?', 켜짐 여부 True/False/None, 설명).
+
+    API 상태가 있으면 그걸 쓴다. 같은 소재가 여러 광고세트에 있으면 이 줄의 타겟팅
+    (방문자180일 등)이 이름에 들어간 광고세트만 본다. API가 없는 매체는 마지막 집행일로
+    추정한다 — 그 매체 데이터의 최신일에도 돈이 나갔으면 ON으로 본다.
+    """
+    m = media or {}
+    names = [m.get("name"), (r.get("cre_title") if hasattr(r, "get") else None),
+             (r.get("cre_name") if hasattr(r, "get") else None)]
+    keys = [(tab, _creative_image_key(str(n))) for n in names if n]
+    # ① 직접 체크한 값(GFA 등) — 이 줄의 타겟팅 → 소재 전체 순으로 본다
+    if manual:
+        tgt0 = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
+        for k in keys:
+            hit = manual.get(k + (tgt0,)) or manual.get(k + ("",))
+            if hit:
+                return hit[0], hit[0] == "ON", f"직접 체크 {hit[1]}"
+    ent = next((status_map[k] for k in keys if k in status_map), None)
+    if ent:
+        tgt = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
+        sel = [e for e in ent if tgt and tgt not in ("(미설정)", "(규칙 외)", "(타겟팅 없음)")
+               and tgt in e[0]] or ent
+        n_on = sum(1 for e in sel if e[1])
+        if n_on == len(sel):
+            return "ON", True, "매체 API 상태"
+        if n_on == 0:
+            return "OFF", False, "매체 API 상태"
+        return "일부 ON", True, f"광고 {len(sel)}개 중 {n_on}개 켜짐"
+    last = next((last_map[k] for k in keys if k in last_map), None)
+    newest = ch_max.get(tab)
+    if last and newest:
+        if (newest - last).days <= 1:
+            return "ON?", True, f"최근 집행 {last:%m/%d} (추정)"
+        return "OFF?", False, f"마지막 집행 {last:%m/%d} (추정)"
+    return "", None, ""
 
 
 def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> list:
@@ -14756,6 +15005,11 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         if _age is not None:
             _why = f"{_age}일차 · {_why}"
     chip = f'<span class="fv4-chip {cls}">{label}</span>'
+    _oo = (media or {}).get("_onoff")
+    if _oo and _oo[0]:
+        _oc = "on" if _oo[1] else "off"
+        chip = (f'<span class="gc-onoff {_oc}" title="{_oo[2]}">'
+                f'{"●" if _oo[1] else "○"} {_oo[0]}</span>') + chip
     if _why:
         chip += (f'<div class="gc-why">'
                  f'{str(_why).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")}</div>')
@@ -14875,6 +15129,7 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         "광고비(VAT+)": cost, "방문(세션)": ses,
         "구매": conv, "매출": rev, "객단가": aov,
         "ROAS(%)": roas, "판정": label, "사유": _why, "경과일": _age,
+        "ON/OFF": (((media or {}).get("_onoff") or ("",))[0] if not is_total else ""),
         # 구매·매출이 어디서 온 값인지. 외부몰만 매체 기준이라 섞어 더하면 안 된다.
         "기준": "매체(GFA)" if _basis else "GA4",
     }
@@ -14938,7 +15193,7 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     # (예전엔 'STCO_수트_전환 · 패션관심타겟'을 한 칸에 넣어서 타겟팅별로 못 갈랐다)
     cols = ["이름", "캠페인", "타겟팅", "구분", "품목"] + (["이미지"] if with_images else []) + [
         "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "방문(세션)",
-        "구매", "매출", "객단가", "ROAS(%)", "판정", "사유", "경과일", "기준"]
+        "구매", "매출", "객단가", "ROAS(%)", "ON/OFF", "판정", "사유", "경과일", "기준"]
     # CTR·ROAS는 값이 이미 퍼센트 단위(110 = 110%)라 엑셀 기본 '백분율' 서식을 쓰면
     # 11000%가 된다. 그래서 숫자는 그대로 두고 표시만 %를 붙인다 —
     # 값이 숫자로 남아 있어야 정렬·필터·평균이 정상으로 돈다.
@@ -14949,7 +15204,7 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     width = {"이름": 30, "캠페인": 22, "타겟팅": 16, "구분": 12, "품목": 12,
              "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
              "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "방문(세션)": 11, "구매": 9,
-             "매출": 15, "객단가": 12, "ROAS(%)": 11, "판정": 14, "사유": 46, "경과일": 8,
+             "매출": 15, "객단가": 12, "ROAS(%)": 11, "ON/OFF": 9, "판정": 14, "사유": 46, "경과일": 8,
              "기준": 11}
 
     head_fill = PatternFill("solid", fgColor="14181F")
@@ -15432,12 +15687,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     media_map.update(_api_map)
     # 등록 몇 일차인지 — 소재 운영 기준의 '10일' 판정에 쓴다
     try:
-        _first_map = _gc_first_spend(ad_creative)
+        _first_map, _last_map, _ch_max = _gc_spend_dates(ad_creative)
     except Exception:
-        _first_map = {}
+        _first_map, _last_map, _ch_max = {}, {}, {}
     for _k, _v in media_map.items():
         if _k in _first_map:
             _v["_first"] = _first_map[_k]
+    # 지금 켜져 있는지 — 매체 API(메타·구글), 없으면 최근 집행일로 추정
+    try:
+        _status_map, _status_errs = fetch_creative_status()
+    except Exception as _e:
+        _status_map, _status_errs = {}, [str(_e)[:120]]
+    _manual_status = load_manual_status()
+    if _status_errs:
+        st.caption("ON/OFF 상태를 일부 못 받았습니다(그 매체는 최근 집행일로 추정) — "
+                   + " / ".join(_status_errs[:2]))
 
     # ── 채널 성과와의 차이를 미리 계산해둔다 ─────────────────────
     # 두 화면은 GA4에 **서로 다른 질문**을 한다.
@@ -16323,7 +16587,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _new_media = []
                 for _, r in rows.iterrows():
                     _m = dict(r["_media"] or {})
-                    _m["_rule"] = cr_rule_for(r, _m, _avg_sp)
+                    _m["_onoff"] = cr_onoff(label, r, _m, _status_map, _last_map, _ch_max,
+                                            _manual_status)
+                    _m["_rule"] = cr_apply_onoff(cr_rule_for(r, _m, _avg_sp), _m["_onoff"])
                     _new_media.append(_m)
                     _cr_items.append((str(r["_name"]), _m["_rule"][0], _m["_rule"][2],
                                       float(r["_cost"]), float(r["_roas"]), float(r["conv"] or 0)))
@@ -16424,7 +16690,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _url = _gc_pick_image(_row, img_map, store_idx)
                     _m_un = dict(m, _unmatched=True)
                     if level == "소재":
-                        _m_un["_rule"] = cr_rule_for(_row, _m_un, _avg_sp)
+                        _m_un["_onoff"] = cr_onoff(label, _row, _m_un, _status_map,
+                                                   _last_map, _ch_max, _manual_status)
+                        _m_un["_rule"] = cr_apply_onoff(cr_rule_for(_row, _m_un, _avg_sp),
+                                                        _m_un["_onoff"])
                     body.append(_gc_row_html(_row, _m_un, "gc-unmatched",
                                              img_url=_url, show_img=show_img))
                     recs.append(_gc_row_record(_row, _m_un, img_url=_url))
@@ -16535,6 +16804,59 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     st.warning(_txt)
                 else:
                     st.caption(_txt)
+            # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
+            # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
+            if level == "소재" and label in GFA_TABS and recs:
+                with st.expander("🔘 GFA 소재 ON/OFF 직접 체크 — 관리자에서 끄거나 켤 때 여기도 한 번"):
+                    st.caption(
+                        "GFA는 상태를 API로 못 받아서, 여기서 체크한 값을 씁니다. "
+                        "**바꾼 것만** 고르고 저장하세요 — 비워두면 '미확인'으로 둡니다. "
+                        "타겟팅까지 같이 저장돼서, 같은 소재라도 방문자180일만 끈 경우를 구분합니다.")
+                    _seen, _er = set(), []
+                    for _rc in recs:
+                        _nm, _tg = str(_rc.get("이름") or ""), str(_rc.get("타겟팅") or "")
+                        if not _nm or _nm == "TOTAL" or (_nm, _tg) in _seen:
+                            continue
+                        _seen.add((_nm, _tg))
+                        _cur = _manual_status.get((label, _creative_image_key(_nm), _tg)) \
+                            or _manual_status.get((label, _creative_image_key(_nm), ""))
+                        _er.append({"소재": _nm, "타겟팅": _tg,
+                                    "광고비": float(_rc.get("광고비(VAT+)") or 0),
+                                    "판정": _rc.get("판정") or "",
+                                    "ON/OFF": (_cur[0] if _cur else ""),
+                                    "_orig": (_cur[0] if _cur else "")})
+                    _edf = pd.DataFrame(_er).sort_values("광고비", ascending=False)
+                    _ed = st.data_editor(
+                        _edf.drop(columns=["_orig"]), hide_index=True, use_container_width=True,
+                        key=f"gc_manual_{ti}", disabled=["소재", "타겟팅", "광고비", "판정"],
+                        column_config={
+                            "광고비": st.column_config.NumberColumn("광고비", format=ST_NUM_COMMA),
+                            "ON/OFF": st.column_config.SelectboxColumn(
+                                "ON/OFF", options=["", "ON", "OFF"],
+                                help="관리자 화면 상태와 같게 골라주세요. 비우면 미확인"),
+                        })
+                    if st.button("저장", key=f"gc_manual_save_{ti}", type="primary"):
+                        _chg = _ed.assign(_orig=_edf["_orig"].values)
+                        _chg = _chg[_chg["ON/OFF"].fillna("") != _chg["_orig"].fillna("")]
+                        if _chg.empty:
+                            st.info("바뀐 게 없습니다.")
+                        else:
+                            _now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            _save = pd.DataFrame({
+                                "channel": label, "creative": _chg["소재"].values,
+                                "target": _chg["타겟팅"].fillna("").values,
+                                "status": _chg["ON/OFF"].fillna("").values,
+                                "updated_at": _now})
+                            n = save_table("creative_status_manual", _save,
+                                           "channel,creative,target", "직접 체크")
+                            if n:
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(
+                                    "저장하지 못했습니다 — Supabase에 표가 아직 없으면 "
+                                    "같이 드린 `creative_status_manual.sql`을 SQL Editor에서 "
+                                    "한 번 실행해주세요.")
             with st.expander("📖 이 표 읽는 법 — 기준·판정 규칙"):
                 st.markdown(
                     "- 머리글을 누르면 **정렬**됩니다. 합계(TOTAL) 줄은 맨 위 고정입니다.\n"
