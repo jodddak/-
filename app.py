@@ -15048,20 +15048,32 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
             used = set()
             assigned = {}          # 줄 번호 → [광고세트 키, ...]
             camps = (rows["campaign"].tolist() if "campaign" in rows.columns else [""] * len(rows))
+
+            def _camp_ok(i, a):
+                gc = _gc_tgt_norm(camps[i])
+                mc = bt[a].get("campaign")
+                return bool(gc) and (gc == _gc_tgt_norm(mc) or gc in _gc_tgt_norm(mc)
+                                     or str(camps[i]).strip().lower() in _gc_camp_parts(mc))
+
+            # 타겟팅 이름이 같은 GA 줄이 몇 개인지 먼저 센다.
+            #  · 1개면 → 그 타겟팅의 광고세트를 **캠페인 상관없이 전부** 붙인다.
+            #    GA의 utm_campaign은 링크에 적힌 값이라 실제 캠페인과 다른 경우가 많다
+            #    (셔츠 캠페인 광고인데 링크엔 '수트_전환'). 캠페인으로 엄격히 가르면
+            #    진짜 실적이 'GA 매칭 안 됨'으로 빠졌다(해리스트위드니트).
+            #  · 2개 이상(같은 타겟팅이 캠페인별로 따로 잡힘)이면 → 그때만 캠페인으로 나눈다.
             for i in idxs:
                 cand = [a for a in bt if a not in used
                         and _gc_tgt_match(tgts[i], bt[a].get("adset", a))]
                 if not cand:
                     continue
-                # 같은 타겟팅 이름이 여러 캠페인에 있으면 이 줄의 캠페인(utm_campaign)과 맞는 것만.
-                # 못 가리면 같은 타겟팅을 전부 합친다 — 아무거나 하나 고르면 엉뚱한 캠페인 숫자가 붙는다.
-                gc = _gc_tgt_norm(camps[i])
-                cm = [a for a in cand if gc and (
-                    gc == _gc_tgt_norm(bt[a].get("campaign"))
-                    or gc in _gc_tgt_norm(bt[a].get("campaign"))
-                    or camps[i] and str(camps[i]).strip().lower()
-                    in _gc_camp_parts(bt[a].get("campaign")))]
-                pick = cm or cand
+                same = [j for j in idxs if _gc_tgt_norm(tgts[j]) == _gc_tgt_norm(tgts[i])]
+                if len(same) > 1:
+                    cm = [a for a in cand if _camp_ok(i, a)]
+                    if not cm:
+                        continue          # 아래에서 남은 몫을 방문 비중으로 받는다
+                    pick = cm
+                else:
+                    pick = cand
                 used.update(pick)
                 assigned[i] = pick
             if assigned:
@@ -15092,23 +15104,22 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                   campaigns=(sorted({bt[a].get("campaign", "") for a in assigned[i]} - {""})
                                              if i in assigned else base.get("campaigns")),
                                   campaign=base.get("campaign"))
-                # GA 줄이 없는 광고세트의 돈은 버리지 않고 'GA 매칭 안 됨' 줄로 따로 세운다
-                # (합계가 매체 관리자와 맞게). 남은 GA 줄이 있으면 거기로 이미 갔다.
-                if not free and any(rest[f] > 0 for f in ("impressions", "cost")):
-                    kk = None
-                    for k, v in media_map.items():
-                        if v is base:
-                            kk = k
-                            break
+                # GA 줄이 없는 광고세트의 돈은 버리지 않고, 메타 관리자 화면처럼
+                # **광고세트 하나에 한 줄씩** 'GA 방문 없음' 줄로 세운다(합계가 관리자와 맞게).
+                if not free:
+                    kk = next((k for k, v in media_map.items() if v is base), None)
                     if kk is not None:
-                        names = sorted({f'{bt[a].get("campaign", "")}/{bt[a].get("adset", "")}'.strip("/")
-                                        for a in bt if a not in used}) or ["기타"]
-                        media_map[(kk[0], kk[1] + "__rest")] = dict(
-                            rest, channel=base.get("channel"), name=base.get("name"),
-                            src=base.get("src"), _first=base.get("_first"),
-                            campaign=", ".join(names),
-                            campaigns=base.get("campaigns"), _media_basis=base.get("_media_basis"),
-                            _adset_rest=True)
+                        for a in [a for a in bt if a not in used]:
+                            v = bt[a]
+                            if float(v.get("impressions", 0) or 0) <= 0 and float(v.get("cost", 0) or 0) <= 0:
+                                continue
+                            media_map[(kk[0], f"{kk[1]}__{a}")] = dict(
+                                {f: float(v.get(f, 0) or 0) for f in _F},
+                                channel=base.get("channel"), name=base.get("name"),
+                                src=base.get("src"), _first=base.get("_first"),
+                                campaign=f'{v.get("campaign", "")} · {v.get("adset", "")}'.strip(" ·"),
+                                campaigns=[v.get("campaign", "")], _adset=v.get("adset", ""),
+                                _media_basis=base.get("_media_basis"), _adset_rest=True)
                 continue
         if len(idxs) < 2:
             continue
@@ -16741,7 +16752,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 if leftovers:
                     _extra = {}
                     for (ch_k, _), m in leftovers:
-                        gk = ch_k if level == "매체" else f"{ch_k} · (GA 매칭 안 됨)"
+                        if level == "매체":
+                            gk = ch_k
+                        elif level == "타겟팅" and m.get("_adset_rest") and m.get("_adset"):
+                            # GA 방문이 없는 광고세트는 그 광고세트 이름(=타겟팅) 줄로 세운다
+                            gk = f"{ch_k} · {m.get('_adset')}"
+                        else:
+                            gk = f"{ch_k} · (GA 매칭 안 됨)"
                         e = _extra.setdefault((gk, ch_k), {"impressions": 0.0, "clicks": 0.0, "cost": 0.0})
                         for f in ("impressions", "clicks", "cost"):
                             e[f] += float(m.get(f, 0) or 0)
@@ -16896,7 +16913,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _row = pd.Series({
                         "key": (f'{_nm}<span class="gc-sub">'
                                 f'{str(m.get("campaign") or "").strip() or ch_k} · '
-                                f'GA 매칭 안 됨</span>'),
+                                + ('이 광고세트로 들어온 GA 방문 없음' if m.get("_adset_rest")
+                                   else 'GA 매칭 안 됨') + '</span>'),
+                        "target": str(m.get("_adset") or ""),
                         "sessions": 0.0, "conv": 0.0, "rev": 0.0,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
                     })
