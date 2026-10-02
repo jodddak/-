@@ -26,6 +26,12 @@
 #    이미 보낸 리포트는 Supabase의 mail_log 표를 보고 건너뛰므로 메일은 한 통만 옵니다.
 #    → mail_log 표를 먼저 만들어야 합니다. 같이 드린 mail_log.sql 참고.
 #      (표가 없어도 메일은 가지만, 그날 세 통이 옵니다.)
+#
+# ⚠️ 보내기 직전에 sync_job.py 로 어제 데이터를 받아옵니다(2026-10 추가).
+#    필요한 Secret: STREAMLIT_SECRETS = Streamlit Cloud 앱 Settings → Secrets 칸 내용 통째로.
+#    없으면 동기화만 건너뛰고 메일은 예전처럼 나갑니다.
+#    GA 데이터가 끝내 없으면 12시 전 시도는 건너뛰고(다음 시도에 맡김), 마지막 시도는
+#    제목에 [데이터 미수집]을 붙여 보냅니다.
 
 name: 성과 메일 (일별·주간)
 
@@ -66,7 +72,8 @@ on:
 jobs:
   send:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 동기화(GA4·매체 API)까지 하므로 넉넉히 둔다
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +83,26 @@ jobs:
           python-version: "3.11"
 
       - name: 필요한 것 설치
-        run: pip install --quiet pandas supabase
+        # 동기화가 app.py를 그대로 불러 쓰므로 대시보드와 같은 패키지를 깐다
+        run: pip install --quiet -r requirements.txt
+
+      # ── 메일 보내기 전에 어제 데이터를 받아둔다 ──────────────────────
+      # 대시보드는 누가 화면을 열어야 GA4·매체 API를 받아온다. 아침에 아무도 안 열면
+      # DB에 어제 데이터가 없어서 빈 메일이 나갔다(10/01). 여기서 대시보드와 같은 함수로
+      # 한 번 받아둔다. 실패해도 메일 단계는 그대로 진행한다.
+      - name: 데이터 동기화 (GA4 · 매체 광고비)
+        continue-on-error: true
+        env:
+          STREAMLIT_SECRETS: ${{ secrets.STREAMLIT_SECRETS }}
+        run: |
+          if [ -z "$STREAMLIT_SECRETS" ]; then
+            echo "STREAMLIT_SECRETS 가 없어 동기화를 건너뜁니다 (Settings → Secrets 에 추가하세요)"
+            exit 0
+          fi
+          mkdir -p .streamlit
+          printf '%s' "$STREAMLIT_SECRETS" > .streamlit/secrets.toml
+          python sync_job.py
+          rm -f .streamlit/secrets.toml
 
       - name: 메일 보내기
         env:
