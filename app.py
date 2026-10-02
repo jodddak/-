@@ -14112,9 +14112,13 @@ def _cr_age(r, media) -> int | None:
                 d0 = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             except Exception:
                 d0 = None
-    if not d0:
+    try:
+        if d0 is None or pd.isna(d0):
+            return None
+        d0 = pd.Timestamp(d0).date()
+        return max(0, (date.today() - d0).days)
+    except Exception:
         return None
-    return max(0, (date.today() - d0).days)
 
 
 def cr_rule_for(r, media, avg_spend=None) -> tuple:
@@ -14130,7 +14134,7 @@ def cr_rule_for(r, media, avg_spend=None) -> tuple:
     if cost <= 0:
         return "광고비 없음", "hold", "매체 광고비가 안 붙음(꺼짐·이름 불일치)", age
     if basis and rev <= 0 and conv <= 0:
-        return CR_EXCL, "외부몰 — 매체가 구매를 못 봄(픽셀 미설치)", age
+        return CR_EXCL, "hold", "외부몰 — 매체가 구매를 못 봄(픽셀 미설치)", age
     roas = rev / cost * 100
     lab, why, _c = cr_judge(_cr_seg_of(r), cost, conv, roas, age, avg_spend)
     if basis:
@@ -14141,10 +14145,29 @@ def cr_rule_for(r, media, avg_spend=None) -> tuple:
 CR_DONE = "꺼짐"
 
 
+def cr_safe_rule(r, media, avg_spend=None) -> tuple:
+    """판정 계산이 한 줄 때문에 화면 전체를 멈추지 않게 — 실패하면 그 줄만 '—'로 둔다."""
+    try:
+        out = tuple(cr_rule_for(r, media, avg_spend))
+        return out if len(out) == 4 else ("—", "hold", "", None)
+    except Exception:
+        return "—", "hold", "판정 계산 실패", None
+
+
+def cr_safe_onoff(*a, **k) -> tuple:
+    try:
+        out = tuple(cr_onoff(*a, **k))
+        return out if len(out) == 3 else ("", None, "")
+    except Exception:
+        return "", None, ""
+
+
 def cr_apply_onoff(rule: tuple, onoff: tuple) -> tuple:
     """이미 꺼진 소재에 'OFF 권장'을 또 띄우면 할 일과 끝난 일이 섞인다 — 그걸 가른다."""
+    if not rule or len(rule) != 4:
+        return ("—", "hold", "", None)
     lab, cls, why, age = rule
-    disp, on, _note = onoff
+    disp, on, _note = (onoff if onoff and len(onoff) == 3 else ("", None, ""))
     if on is False:
         if lab in (CR_OFF, CR_CUT, CR_THIN):
             return CR_DONE, "hold", f"이미 OFF · 기준상 {lab} — {why}", age
@@ -16587,9 +16610,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _new_media = []
                 for _, r in rows.iterrows():
                     _m = dict(r["_media"] or {})
-                    _m["_onoff"] = cr_onoff(label, r, _m, _status_map, _last_map, _ch_max,
-                                            _manual_status)
-                    _m["_rule"] = cr_apply_onoff(cr_rule_for(r, _m, _avg_sp), _m["_onoff"])
+                    _m["_onoff"] = cr_safe_onoff(label, r, _m, _status_map, _last_map, _ch_max,
+                                                 _manual_status)
+                    _m["_rule"] = cr_apply_onoff(cr_safe_rule(r, _m, _avg_sp), _m["_onoff"])
                     _new_media.append(_m)
                     _cr_items.append((str(r["_name"]), _m["_rule"][0], _m["_rule"][2],
                                       float(r["_cost"]), float(r["_roas"]), float(r["conv"] or 0)))
@@ -16690,9 +16713,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _url = _gc_pick_image(_row, img_map, store_idx)
                     _m_un = dict(m, _unmatched=True)
                     if level == "소재":
-                        _m_un["_onoff"] = cr_onoff(label, _row, _m_un, _status_map,
-                                                   _last_map, _ch_max, _manual_status)
-                        _m_un["_rule"] = cr_apply_onoff(cr_rule_for(_row, _m_un, _avg_sp),
+                        _m_un["_onoff"] = cr_safe_onoff(label, _row, _m_un, _status_map,
+                                                        _last_map, _ch_max, _manual_status)
+                        _m_un["_rule"] = cr_apply_onoff(cr_safe_rule(_row, _m_un, _avg_sp),
                                                         _m_un["_onoff"])
                     body.append(_gc_row_html(_row, _m_un, "gc-unmatched",
                                              img_url=_url, show_img=show_img))
