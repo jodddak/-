@@ -16811,26 +16811,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             row_h = 157 if show_img else 59
             # 판정 코멘트(우수·부진 개수 + 다음 액션)는 '읽을 거리'가 아니라 결론이라
             # 표 위에 둔다. 기준 설명·차이 안내만 표 아래로 내렸다.
-            if cmt:
-                st.markdown(cmt, unsafe_allow_html=True)
-            # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
-            if not _media_basis:
-                _gap_panel(label, tot_rev, tot_conv)
-            st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
-                                  scrolling=False)
-
-            # ── 표 아래 ── 경고·안내 → 읽는 법
-            for _kind, _txt in notes:
-                if _kind == "info":
-                    st.info(_txt)
-                elif _kind == "warning":
-                    st.warning(_txt)
-                else:
-                    st.caption(_txt)
             # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
             # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
             if level == "소재" and label in GFA_TABS and recs:
-                with st.expander("🔘 GFA 소재 ON/OFF 직접 체크 — 관리자에서 끄거나 켤 때 여기도 한 번"):
+                with st.expander("🔘 GFA 소재 ON/OFF 직접 체크 — 표의 OFF?/ON? 를 확정하려면 여기서"):
                     st.caption(
                         "GFA는 상태를 API로 못 받아서, 여기서 체크한 값을 씁니다. "
                         "**바꾼 것만** 고르고 저장하세요 — 비워두면 '미확인'으로 둡니다. "
@@ -16880,6 +16864,22 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                     "저장하지 못했습니다 — Supabase에 표가 아직 없으면 "
                                     "같이 드린 `creative_status_manual.sql`을 SQL Editor에서 "
                                     "한 번 실행해주세요.")
+            if cmt:
+                st.markdown(cmt, unsafe_allow_html=True)
+            # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
+            if not _media_basis:
+                _gap_panel(label, tot_rev, tot_conv)
+            st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
+                                  scrolling=False)
+
+            # ── 표 아래 ── 경고·안내 → 읽는 법
+            for _kind, _txt in notes:
+                if _kind == "info":
+                    st.info(_txt)
+                elif _kind == "warning":
+                    st.warning(_txt)
+                else:
+                    st.caption(_txt)
             with st.expander("📖 이 표 읽는 법 — 기준·판정 규칙"):
                 st.markdown(
                     "- 머리글을 누르면 **정렬**됩니다. 합계(TOTAL) 줄은 맨 위 고정입니다.\n"
