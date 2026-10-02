@@ -14424,6 +14424,24 @@ _GC_ITEM_WORDS = [
 ]
 
 
+def _gc_choice(label: str, options: list, key: str, counts: dict = None) -> str:
+    """버튼처럼 생긴 한 줄 선택. Streamlit 기본 segmented_control(1.40+)을 쓰고, 없으면 라디오.
+
+    라디오를 CSS로 버튼처럼 꾸며 썼는데, Streamlit 버전이 바뀌면서 꾸밈이 일부만 먹어
+    동그라미와 글자가 겹쳐 보였다(신규타겟팅 (3 … 처럼 잘림). 기본 부품을 쓰면 그럴 일이 없다.
+    다시 눌러 선택을 풀면 None이 오는데, 그땐 첫 번째(전체)로 본다.
+    """
+    # 개수는 '보여주기'로만 붙인다(format_func). 값에 넣으면 타겟팅을 바꿔 개수가 달라질 때
+    # 고른 품목이 '없는 값'이 되어 전체로 풀려버린다.
+    fmt = (lambda o: f"{o} ({counts[o]})" if counts and o in counts else o)
+    if hasattr(st, "segmented_control"):
+        v = st.segmented_control(label, options, default=options[0], key=key, format_func=fmt,
+                                 selection_mode="single", label_visibility="collapsed")
+        return v if v in options else options[0]
+    return st.radio(label, options, horizontal=True, key=key, format_func=fmt,
+                    label_visibility="collapsed")
+
+
 def _gc_item_of_text(text) -> str | None:
     low = str(text or "").lower()
     for item, words in _GC_ITEM_WORDS:
@@ -16483,12 +16501,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if _seg_n and _seg_r:      # 한쪽만 있으면 굳이 고르게 하지 않는다
                 _fc1.markdown('<div class="gc-flt-lbl">타겟팅</div>', unsafe_allow_html=True)
                 with _fc2:
-                    seg = st.radio(
-                        "타겟팅", [GC_SEG_ALL, f"{GC_SEG_NEW} ({_seg_n})",
-                                 f"{GC_SEG_RT} ({_seg_r})"],
-                        horizontal=True, key=f"gc_seg_{ti}", label_visibility="collapsed")
-                seg = (GC_SEG_NEW if seg.startswith(GC_SEG_NEW)
-                       else GC_SEG_RT if seg.startswith(GC_SEG_RT) else GC_SEG_ALL)
+                    seg = _gc_choice("타겟팅", [GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT],
+                                     key=f"gc_seg_{ti}",
+                                     counts={GC_SEG_NEW: _seg_n, GC_SEG_RT: _seg_r})
             if seg != GC_SEG_ALL and not rows.empty:
                 rows = rows[rows["_seg"] == seg].copy()
 
@@ -16505,10 +16520,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _ic1, _ic2 = st.columns([0.09, 0.91])
                 _ic1.markdown('<div class="gc-flt-lbl">품목</div>', unsafe_allow_html=True)
                 with _ic2:
-                    _opts = [GC_ITEM_ALL] + [f"{k} ({n})" for k, n in _item_cnt.items()]
-                    item = st.radio("품목", _opts, horizontal=True, key=f"gc_item_{ti}",
-                                    label_visibility="collapsed")
-                item = next((k for k in GC_ITEMS if item.startswith(k)), GC_ITEM_ALL)
+                    item = _gc_choice("품목", [GC_ITEM_ALL] + list(_item_cnt),
+                                      key=f"gc_item_{ti}", counts=_item_cnt)
             if item != GC_ITEM_ALL and not rows.empty:
                 rows = rows[rows["_item"] == item].copy()
 
