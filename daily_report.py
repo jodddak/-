@@ -263,11 +263,44 @@ def ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
     return out
 
 
+# 대시보드(app.py)의 규칙을 그대로 빌려 쓴다 — 다른 팀 유입 제외, 마케팅팀 캠페인 매출 제외,
+# 애드부스트 재분류. 예전엔 메일이 이걸 안 해서 메일 ROAS가 대시보드보다 높게 나왔다
+# (다른 팀 'meta / cpc' 매출이 메타로, 마케팅팀 PMax 매출이 구글로 들어감).
+# app.py를 못 불러오면(패키지 없음 등) 예전 방식으로 계산하고 로그에 남긴다.
+_APP = None
+
+
+def use_dashboard_rules(ga_creative: pd.DataFrame) -> bool:
+    global _APP
+    try:
+        import app as _a
+    except Exception as e:
+        print(f"[경고] app.py를 못 불러와 대시보드 제외 규칙 없이 계산합니다: {e}", file=sys.stderr)
+        return False
+    _gc = ga_creative if ga_creative is not None else pd.DataFrame()
+    if not _gc.empty and "source_medium" in _gc.columns:
+        _gc = _gc[~_gc["source_medium"].map(_a._ga_sm_excluded)]
+    # 대시보드 함수들이 표를 읽을 때 이 메일이 이미 읽어둔 걸 쓰게 한다
+    _a.load_table = lambda name: (_gc.copy() if name == "ga_creative_daily" else pd.DataFrame())
+    _APP = _a
+    return True
+
+
+def apply_ga_exclusions(ga_daily: pd.DataFrame) -> pd.DataFrame:
+    """다른 팀 소스(기본 'meta / …')를 대시보드와 똑같이 걷어낸다."""
+    if _APP is None or ga_daily is None or ga_daily.empty or "source_medium" not in ga_daily.columns:
+        return ga_daily
+    return ga_daily[~ga_daily["source_medium"].map(_APP._ga_sm_excluded)].copy()
+
+
 def build_rows(ad_spend, ga_daily, master, start: date, end: date) -> pd.DataFrame:
     """매체 한 줄씩 — 노출·클릭·광고비·GA구매·GA매출·ROAS."""
     sp = spend_by_channel(ad_spend, start, end)
     sp_map = {r["channel"]: r for _, r in sp.iterrows()} if not sp.empty else {}
-    ga_map = ga_by_media(ga_daily, master, start, end)
+    if _APP is not None:
+        ga_map = _APP.cp_ga_map_adjusted(ga_daily, master, start, end)[0]
+    else:
+        ga_map = ga_by_media(ga_daily, master, start, end)
 
     recs = []
     for _, r in master.iterrows():
@@ -811,6 +844,17 @@ def main():
     for c in ("sort_order", "utm_match", "spend_channel", "scope"):
         if c not in master.columns:
             master[c] = "" if c != "sort_order" else 100
+
+    ga_creative = load_table(client, "ga_creative_daily", since,
+                             ["report_date", "source_medium", "campaign", "creative", "user_type"])
+    if use_dashboard_rules(ga_creative):
+        ga_daily = apply_ga_exclusions(ga_daily)
+        try:
+            # 대시보드처럼 저장본에 없는 기본 매체(메타_외부몰 등)도 채운다
+            master = _APP.media_master_frame(master)
+        except Exception as e:
+            print(f"[경고] 매체 정의 보강 실패: {e}", file=sys.stderr)
+        print("대시보드 제외·재분류 규칙 적용", flush=True)
 
     print(f"읽은 행: 광고비 {len(ad_spend):,} · GA {len(ga_daily):,} · 매체정의 {len(master):,}",
           flush=True)
