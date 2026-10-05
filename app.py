@@ -1456,7 +1456,7 @@ def load_table(name: str) -> pd.DataFrame:
     df = _load_table_raw(name)
     if (name in ("ga_channel_daily", "ga_creative_daily")
             and df is not None and not df.empty and "source_medium" in df.columns):
-        keep = ~df["source_medium"].map(_ga_sm_excluded)
+        keep = ~df["source_medium"].map(_ga_sm_excluded).astype(bool)
         if not keep.all():
             df = df[keep].copy()
     return df
@@ -2669,7 +2669,9 @@ def parse_channel_budget_sheet(xls: pd.ExcelFile) -> pd.DataFrame:
 # 예전에 쓰던 링크라 유입만 0~1건씩 들어오고 구매는 거의 없다 — 채널 퍼널의 유입 단계에서만
 # 의미가 있어서, 소재별 성과(소재명이 없어 빈 줄만 생긴다)에는 붙이지 않는다.
 # 기준 매체는 'Facebook / Facebook_Feed'가 UTM 리스트에서 받은 이름을 그대로 따른다.
-GA_META_EXTRA_SOURCES = ("ig / paid", "ig / social", "instagram.com / referral")
+GA_META_EXTRA_SOURCES = ("ig / paid", "ig / social", "instagram.com / referral",
+                         "instagram / referral", "l.instagram.com / referral",
+                         "m.instagram.com / referral", "instagram / social")
 GA_META_ANCHOR_SOURCE = "facebook / facebook_feed"
 GA_META_FALLBACK_CHANNEL = "(DA) 페이스북"
 
@@ -3782,7 +3784,12 @@ def _preset_to_range(name: str, min_d: date, max_d: date):
     elif name == "최근 7일(오늘 제외)":
         s, e = today - timedelta(days=7), today - timedelta(days=1)
     elif name == "이번달":
-        s, e = today.replace(day=1), today
+        if today.day == 1:
+            # 1일엔 이번 달 데이터가 아직 없다 — 지난달 전체를 보여준다(채널 성과와 같게)
+            last_prev = today - timedelta(days=1)
+            s, e = last_prev.replace(day=1), last_prev
+        else:
+            s, e = today.replace(day=1), today
     elif name == "지난달":
         last_prev = today.replace(day=1) - timedelta(days=1)
         s, e = last_prev.replace(day=1), last_prev
@@ -3808,7 +3815,9 @@ def _preset_raw_range(name: str):
         "이번주": (today - timedelta(days=today.weekday()), today),
         "최근 7일(오늘 포함)": (today - timedelta(days=6), today),
         "최근 7일(오늘 제외)": (today - timedelta(days=7), today - timedelta(days=1)),
-        "이번달": (today.replace(day=1), today),
+        # 1일엔 '이번달'이 지난달 전체를 보여주므로(_preset_to_range) 경고 기준도 같게
+        "이번달": ((today - timedelta(days=1)).replace(day=1), today - timedelta(days=1))
+                 if today.day == 1 else (today.replace(day=1), today),
         "최근 30일(오늘 포함)": (today - timedelta(days=29), today),
         "최근 30일(오늘 제외)": (today - timedelta(days=30), today - timedelta(days=1)),
     }
@@ -8179,6 +8188,20 @@ def ga_inflow_source(ga_daily: pd.DataFrame, excel_inflow, lookup: dict = None) 
                     lambda sm: lookup.get(str(sm).strip().lower()))
             shaped = ga4_daily_to_inflow_shape(ga_daily)
             if shaped is not None and not shaped.empty:
+                # GA4 API 기록이 시작되기 **전** 기간은 예전 엑셀 업로드분으로 채운다
+                # (종합·매체별 화면의 지난 주·달이 GA 매출 0으로 보이지 않게).
+                try:
+                    _x = excel_inflow() if callable(excel_inflow) else excel_inflow
+                    if _x is not None and not _x.empty and "report_date" in _x.columns:
+                        _first = pd.to_datetime(shaped["report_date"]).min().date()
+                        _x = _x.copy()
+                        _xd = pd.to_datetime(_x["report_date"], errors="coerce").dt.date
+                        _old = _x[_xd < _first]
+                        if not _old.empty:
+                            _old = _old.assign(report_date=_xd[_xd < _first])
+                            shaped = pd.concat([_old, shaped], ignore_index=True)
+                except Exception:
+                    pass
                 return shaped
         except Exception:
             pass
@@ -8187,6 +8210,83 @@ def ga_inflow_source(ga_daily: pd.DataFrame, excel_inflow, lookup: dict = None) 
     if callable(excel_inflow):
         excel_inflow = excel_inflow()
     return excel_inflow if excel_inflow is not None else pd.DataFrame()
+
+
+def _ga_daily_team_adjusted(ga_daily: pd.DataFrame, lookup: dict = None) -> pd.DataFrame:
+    """ga_channel_daily(소스/매체 단위)에서 **다른 팀 캠페인 매출을 빼고, 애드부스트로
+    잘못 들어온 매출을 옮긴** 사본. 채널 성과(cp_ga_map_adjusted)와 같은 기준을 퍼널에도 쓰려고.
+
+    ga_channel_daily에는 캠페인이 없어서, 캠페인이 있는 ga_creative_daily로 '얼마를'
+    빼고 옮길지 계산해 (날짜, 소스/매체, 신규/재방문) 칸에서 덜어낸다(0 아래로는 안 내려감).
+    """
+    if ga_daily is None or ga_daily.empty or "source_medium" not in ga_daily.columns:
+        return ga_daily
+    try:
+        cre = load_table("ga_creative_daily")
+    except Exception:
+        return ga_daily
+    if cre is None or cre.empty or not {"source_medium", "report_date"} <= set(cre.columns):
+        return ga_daily
+    c = cre.copy()
+    for col in ("campaign", "creative", "user_type"):
+        if col not in c.columns:
+            c[col] = ""
+    for col in ("conversions", "revenue"):
+        c[col] = pd.to_numeric(c[col] if col in c.columns else 0, errors="coerce").fillna(0)
+    c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+    c = c.dropna(subset=["report_date"])
+    c["_k"] = c["source_medium"].astype(str).str.strip().str.lower()
+    excl = (c["campaign"].map(_google_campaign_excluded).astype(bool)
+            | c["creative"].map(_google_campaign_excluded).astype(bool))
+    to_ab = (~excl) & pd.Series([_ga_media_fix(sm, cp) == ADBOOST_MEDIA
+                                 for sm, cp in zip(c["source_medium"], c["campaign"])],
+                                index=c.index, dtype=bool)
+    if not excl.any() and not to_ab.any():
+        return ga_daily
+
+    g = ga_daily.copy()
+    g["_d"] = pd.to_datetime(g["report_date"], errors="coerce").dt.date
+    g["_k"] = g["source_medium"].astype(str).str.strip().str.lower()
+    if "user_type" not in g.columns:
+        g["user_type"] = ""
+    for col in ("conversions", "revenue"):
+        g[col] = pd.to_numeric(g[col] if col in g.columns else 0, errors="coerce").fillna(0)
+
+    # 애드부스트로 옮길 곳 — UTM 목록에 애드부스트 소스/매체가 있을 때만 옮긴다
+    ab_key = next((k for k in (lookup or {}) if "gfa_애드부스트" in k.replace(" ", "")), None)
+    moved = []
+
+    def _take(mask_rows, keep_moved):
+        if not mask_rows.any():
+            return
+        agg = (c[mask_rows].groupby(["report_date", "_k", "user_type"], as_index=False)
+               [["conversions", "revenue"]].sum())
+        for _, r in agg.iterrows():
+            hit = g.index[(g["_d"] == r["report_date"]) & (g["_k"] == r["_k"])
+                          & (g["user_type"].astype(str) == str(r["user_type"]))]
+            if not len(hit):
+                continue
+            i = hit[0]
+            mv = {}
+            for col in ("conversions", "revenue"):
+                take = min(float(r[col]), float(g.at[i, col]))
+                g.at[i, col] = float(g.at[i, col]) - take
+                mv[col] = take
+            if keep_moved and (mv["conversions"] or mv["revenue"]):
+                moved.append({"report_date": g.at[i, "report_date"], "source_medium": ab_key,
+                              "user_type": r["user_type"], "users": 0, "sessions": 0,
+                              "signups": 0, **mv})
+
+    _take(excl, False)
+    if ab_key:
+        _take(to_ab, True)
+    g = g.drop(columns=["_d", "_k"])
+    if moved:
+        m = pd.DataFrame(moved)
+        if "channel" in g.columns:
+            m["channel"] = (lookup or {}).get(ab_key)
+        g = pd.concat([g, m], ignore_index=True)
+    return g
 
 
 def ga4_daily_to_inflow_shape(ga_daily: pd.DataFrame) -> pd.DataFrame:
@@ -9082,7 +9182,10 @@ def _loop_review_decisions(decisions: pd.DataFrame, daily: pd.DataFrame, end: da
         return []
     out = []
     for _, row in decisions.sort_values("decided_on", ascending=False).head(5).iterrows():
-        ch, when = row.get("channel"), pd.to_datetime(row.get("decided_on")).date()
+        _w = pd.to_datetime(row.get("decided_on"), errors="coerce")
+        if pd.isna(_w):
+            continue                      # 날짜가 비었거나 이상한 기록은 건너뛴다(화면 멈춤 방지)
+        ch, when = row.get("channel"), _w.date()
         d = daily[daily["channel"] == ch]
         if d.empty:
             continue
@@ -9250,9 +9353,16 @@ def _meta_accounts() -> list:
 # 캠페인·광고 단위로 받으면 메타는 **삭제·보관된 캠페인/광고의 실적을 빼고** 준다
 # (계정 단위 합계에는 들어 있다). 관리자 화면에서 캠페인을 지우면 지난 날짜 광고비가
 # 대시보드에서 줄어드는 일이 생기므로, 상태와 관계없이 다 달라고 명시한다.
-_META_ALL_STATUS = ["ACTIVE", "PAUSED", "DELETED", "ARCHIVED", "IN_PROCESS", "WITH_ISSUES",
-                    "CAMPAIGN_PAUSED", "ADSET_PAUSED", "PENDING_REVIEW", "DISAPPROVED",
-                    "PREAPPROVED", "PENDING_BILLING_INFO"]
+# 단위마다 허용되는 상태 값이 다르다(캠페인에는 CAMPAIGN_PAUSED 같은 값이 없다 —
+# 하나라도 틀리면 요청 전체가 거절돼 매번 필터 없이 받게 된다).
+_META_ALL_STATUS = {
+    "campaign": ["ACTIVE", "PAUSED", "DELETED", "ARCHIVED", "IN_PROCESS", "WITH_ISSUES"],
+    "ad": ["ACTIVE", "PAUSED", "DELETED", "ARCHIVED", "IN_PROCESS", "WITH_ISSUES",
+           "CAMPAIGN_PAUSED", "ADSET_PAUSED", "PENDING_REVIEW", "DISAPPROVED",
+           "PREAPPROVED", "PENDING_BILLING_INFO"],
+}
+# 필터 없이 받은 적이 있으면 표시해 둔다(옛 행 정리를 건너뛰는 데 쓴다)
+_META_FILTER_FALLBACK = {"used": False}
 
 
 def _meta_insights(acct: str, params: dict, timeout: int = 60):
@@ -9261,12 +9371,13 @@ def _meta_insights(acct: str, params: dict, timeout: int = 60):
     lvl = str(params.get("level") or "")
     if lvl in ("campaign", "ad") and "filtering" not in params:
         f = json.dumps([{"field": f"{lvl}.effective_status", "operator": "IN",
-                         "value": _META_ALL_STATUS}])
+                         "value": _META_ALL_STATUS[lvl]}])
         try:
             return _meta_insights_raw(acct, dict(params, filtering=f), timeout)
         except RuntimeError as e:
             if "filter" not in str(e).lower() and "status" not in str(e).lower():
                 raise
+            _META_FILTER_FALLBACK["used"] = True
     return _meta_insights_raw(acct, params, timeout)
 
 
@@ -9385,10 +9496,15 @@ def fetch_meta_spend(start: date, end: date) -> pd.DataFrame:
     if not rows and errs:
         raise RuntimeError(" / ".join(f"{c}: {m[:160]}" for c, _a, m in errs))
     if not rows:
-        return pd.DataFrame()
+        out = pd.DataFrame()
+        out.attrs["failed_channels"] = [c for c, _a, _m in errs]
+        return out
     out = pd.DataFrame(rows)
     out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce").dt.date
-    return out.dropna(subset=["report_date"]).reset_index(drop=True)
+    out = out.dropna(subset=["report_date"]).reset_index(drop=True)
+    # 받지 못한 계정(토큰 만료 등) — 그 매체의 빈 날을 '0원'으로 채우면 안 되므로 알려준다
+    out.attrs["failed_channels"] = [c for c, _a, _m in errs]
+    return out
 
 
 def _meta_account_spend_rows(ch: str, acct: str, start: date, end: date) -> list:
@@ -10230,6 +10346,14 @@ def _purge_stale_creative(df: pd.DataFrame, stamp: str):
         if _cl is None or df is None or df.empty or "source" not in df.columns:
             return
         for (_ch, _src), _sub in df.groupby(["channel", "source"]):
+            # API로 받은 것만 정리한다. 파일 업로드(media_report)는 같은 매체라도 파일마다
+            # 다른 소재·기간을 담고 있어(맨즈탭 회차별 파일 등) 지우면 앞 파일 행이 날아간다.
+            if "api" not in str(_src).lower():
+                continue
+            # 메타가 '삭제·보관 포함' 조회를 거절해 필터 없이 받은 경우엔 지우지 않는다
+            # (지운 광고가 빠진 결과라, 지우면 그 광고의 옛 실적까지 사라진다).
+            if str(_src) == "meta_api" and _META_FILTER_FALLBACK.get("used"):
+                continue
             _d = pd.to_datetime(_sub["report_date"], errors="coerce").dt.date.dropna()
             if _d.empty:
                 continue
@@ -10307,6 +10431,7 @@ def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
 def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
     """메타 광고(ad) 단위 일별 실적. 광고 이름이 곧 소재명이다.
     자사몰·외부몰 계정을 둘 다 받아 매체명을 나눠 붙인다."""
+    _META_FILTER_FALLBACK["used"] = False
     rows, errs = [], []
     for ch, acct in _meta_accounts():
         try:
@@ -10772,7 +10897,8 @@ def _criteo_post(path: str, token: str, body: dict, tries: int = 3):
     if "statistics/report" in path and "timezone" not in body:
         body = dict(body, timezone=CRITEO_TIMEZONE)
     last = None
-    for i in range(tries):
+    tz_retry = 1 if "timezone" in body else 0
+    for i in range(tries + tz_retry):
         r = requests.post(f"{CRITEO_BASE}{path}",
                           headers={"Authorization": f"Bearer {token}",
                                    "Content-Type": "application/json"},
@@ -11241,6 +11367,17 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
             k = (_v4_canon_channel(c), str(sr))
             last_by_ch_src[k] = max(last_by_ch_src.get(k, v.date()), v.date())
 
+    # 이미 저장된 (매체, 날짜, 출처) — 0원 채우기가 이 키를 덮어쓰지 않게
+    _existing_keys = set()
+    if existing is not None and not existing.empty and {"channel", "source", "report_date"} \
+            <= set(existing.columns):
+        _ek = existing[["channel", "source", "report_date"]].copy()
+        _ek["report_date"] = pd.to_datetime(_ek["report_date"], errors="coerce").dt.date
+        _ek = _ek.dropna(subset=["report_date"])
+        _ek = _ek[_ek["report_date"] >= end - timedelta(days=AD_SPEND_LOOKBACK_DAYS + 7)]
+        _existing_keys = set(zip(_ek["channel"].astype(str), _ek["report_date"],
+                                 _ek["source"].astype(str)))
+
     saved, errors = {}, {}
     total = 0
     _t0 = time.monotonic()
@@ -11264,6 +11401,7 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
             if progress:
                 progress(f"⚠️ {label} 실패 — {str(e)[:80]}")
             continue
+        df = _spend_zero_fill(df, label, start, end, _existing_keys)
         if df is None or df.empty:
             continue
         n = save_table("ad_spend_daily", df, "report_date,channel,source", f"{label} API")
@@ -11272,6 +11410,40 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
         if progress:
             progress(f"✅ {label} {n:,}행")
     return total, saved, errors
+
+
+def _spend_zero_fill(df, label: str, start: date, end: date, existing_keys: set = None):
+    """API가 성공했는데 행이 없는 날(그날 꺼져 있었음)을 **광고비 0원 행**으로 채운다.
+
+    매체 API는 집행이 없는 날은 행 자체를 안 준다. 그러면 나중에 '꺼둬서 0원'인지
+    '동기화가 안 돼서 모르는 것'인지 구분이 안 돼, 퍼널이 꺼둔 날에도 예산을 채워 넣었다.
+
+    안전장치(실제 광고비를 0으로 덮어쓰지 않게):
+      · **이번 응답에 실제로 행이 온 매체만** 채운다. 응답이 통째로 비면(설정 빠짐·토큰이
+        계정을 못 봄·일시 오류) 아무것도 안 채운다 — 빈 응답은 '꺼짐'인지 '실패'인지 모른다.
+      · 이미 DB에 같은 (날짜, 매체, 출처) 행이 있으면 건드리지 않는다.
+      · 매체 이름은 응답에 온 원래 이름 그대로 쓴다.
+    """
+    src = AD_SPEND_FETCHER_SOURCE.get(label)
+    if not src or df is None or df.empty or "channel" not in df.columns:
+        return df
+    failed = set(getattr(df, "attrs", {}).get("failed_channels", []))
+    chans = {c for c in df["channel"].astype(str).unique() if c and c not in failed}
+    have = {(c, d) for c, d in zip(df["channel"].astype(str),
+                                   pd.to_datetime(df["report_date"]).dt.date)}
+    ex = existing_keys or set()
+    add, d = [], start
+    while d <= end:
+        for c in chans:
+            if (c, d) not in have and (c, d, src) not in ex:
+                add.append({"report_date": d, "channel": c, "source": src,
+                            "cost_incl_vat": 0.0, "impressions": 0.0, "clicks": 0.0})
+        d += timedelta(days=1)
+    if not add:
+        return df
+    out = pd.concat([df, pd.DataFrame(add)], ignore_index=True)
+    out.attrs = dict(getattr(df, "attrs", {}))
+    return out
 
 
 KAKAO_AUTH_URL = "https://kauth.kakao.com/oauth/business/authorize"
@@ -11774,6 +11946,12 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
     return out
 
 
+def _safe_order(v, default: int = 100) -> int:
+    """매체 정의의 '순서' 칸 — 비어 있으면(NaN) 기본값. int(NaN)은 화면 전체를 멈춘다."""
+    x = pd.to_numeric(v, errors="coerce")
+    return int(x) if pd.notna(x) else default
+
+
 def cp_ga_map_adjusted(ga_daily: pd.DataFrame, mst: pd.DataFrame, start: date, end: date):
     """채널 성과·예산 재배분·아침 메일이 **똑같이** 쓰는 매체별 GA 구매·매출.
     (ga_map, 제외분, 재분류분)을 돌려준다.
@@ -11793,12 +11971,14 @@ def cp_ga_map_adjusted(ga_daily: pd.DataFrame, mst: pd.DataFrame, start: date, e
             ga_map[_m]["rev"] = max(0.0, ga_map[_m]["rev"] - _v["rev"])
     _rc_ga = _cp_ga_reclass(mst, start, end)
     for (_src, _dst), _v in _rc_ga.items():
-        if _src in ga_map:
-            ga_map[_src]["conv"] = max(0.0, ga_map[_src]["conv"] - _v["conv"])
-            ga_map[_src]["rev"] = max(0.0, ga_map[_src]["rev"] - _v["rev"])
-        if _dst in ga_map:
-            ga_map[_dst]["conv"] += _v["conv"]
-            ga_map[_dst]["rev"] += _v["rev"]
+        # 옮기는 양은 **보낸 쪽에서 실제로 뺀 만큼**만 — 두 GA 표의 수집 날짜가 어긋나면
+        # 받는 쪽만 늘어 전체 매출이 생겨나는 일이 없게.
+        if _src not in ga_map or _dst not in ga_map:
+            continue
+        for _f in ("conv", "rev"):
+            _mv = min(float(_v[_f]), float(ga_map[_src][_f]))
+            ga_map[_src][_f] -= _mv
+            ga_map[_dst][_f] += _mv
     return ga_map, _ex_ga, _rc_ga
 
 
@@ -11907,8 +12087,8 @@ def _cp_excluded_ga(master: pd.DataFrame, start: date, end: date) -> dict:
         c["campaign"] = ""
     if "creative" not in c.columns:
         c["creative"] = ""
-    c = c[c["campaign"].map(_google_campaign_excluded)
-          | c["creative"].map(_google_campaign_excluded)]
+    c = c[c["campaign"].map(_google_campaign_excluded).astype(bool)
+          | c["creative"].map(_google_campaign_excluded).astype(bool)]
     if c.empty:
         return out
     for col in ("conversions", "revenue"):
@@ -12044,7 +12224,7 @@ def _spend_daily_resolved(ad_spend: pd.DataFrame, start: date, end: date) -> pd.
     if a.empty:
         return pd.DataFrame(columns=cols)
     for c in ("impressions", "clicks", "cost_incl_vat"):
-        a[c] = pd.to_numeric(a.get(c), errors="coerce").fillna(0.0)
+        a[c] = (pd.to_numeric(a[c], errors="coerce").fillna(0.0) if c in a.columns else 0.0)
     a["source"] = a["source"].astype(str) if "source" in a.columns else ""
     a["_p"] = a["source"].map(SPEND_SOURCE_PRIO).fillna(9)
     # 같은 날·같은 매체·같은 출처가 여러 줄이면(정액 계약이 겹치는 등) 먼저 더한다
@@ -12497,8 +12677,10 @@ def contracts_to_daily(contracts: pd.DataFrame) -> pd.DataFrame:
         try:
             s = pd.to_datetime(c["start_date"]).date()
             e = pd.to_datetime(c["end_date"]).date()
-            amt = float(c["amount_incl_vat"] or 0)
+            amt = float(pd.to_numeric(c["amount_incl_vat"], errors="coerce"))
         except Exception:
+            continue
+        if amt != amt:        # 금액 칸이 비었으면(NaN) 건너뛴다 — 일별 광고비가 빈 값이 되지 않게
             continue
         ch = str(c.get("channel") or "").strip()
         if not ch or e < s or amt <= 0:
@@ -12667,7 +12849,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             e = today - timedelta(days=1); return e - timedelta(days=29), e
         if name == "지난 달":
             f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
-        return today.replace(day=1), today - timedelta(days=1)
+        return _range_for("이번 달")      # 직접 지정의 기본값도 1일 처리를 같이 받는다
 
     try:
         bar = st.container(key="cpbar")
@@ -12712,6 +12894,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 "월이 걸쳐 있어도(예: 8/7~9/5) 날짜 단위로 나누므로 월별 집계가 알아서 맞습니다."
             )
             saved_ct = load_table("ad_contract")
+            # 저장 시 '사라진·바뀐 계약'을 가려내려고, 읽어온 그대로를 따로 둔다
+            _orig_ct = pd.DataFrame(columns=CONTRACT_COLS)
+            if saved_ct is not None and not saved_ct.empty and set(CONTRACT_COLS) <= set(saved_ct.columns):
+                _orig_ct = saved_ct[CONTRACT_COLS].copy()
+                for _c in ("start_date", "end_date"):
+                    _orig_ct[_c] = pd.to_datetime(_orig_ct[_c], errors="coerce").dt.date
             seed = contract_seed()
             for c in ("start_date", "end_date"):
                 seed[c] = pd.to_datetime(seed[c], errors="coerce").dt.date
@@ -12733,7 +12921,14 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                                 and r["start_date"] <= q["end_date"]):
                             return True
                     return False
-                add = seed[[not _overlaps(r) for _, r in seed.iterrows()]]
+                # 또, 저장본의 마지막 계약보다 **뒤에 시작하는** 기본 계약만 넣는다 — 일부러 지운
+                # 옛 기본 계약이 다음에 열 때 다시 끼어들지 않게.
+                def _newer(r):
+                    ch_ = str(r["channel"]).strip()
+                    ends = [q["end_date"] for _, q in ct.iterrows()
+                            if str(q["channel"]).strip() == ch_ and pd.notna(q["end_date"])]
+                    return (not ends) or r["start_date"] > max(ends)
+                add = seed[[(not _overlaps(r)) and _newer(r) for _, r in seed.iterrows()]]
                 if not add.empty:
                     ct = pd.concat([ct, add], ignore_index=True)
                     st.info(
@@ -12779,14 +12974,36 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                     daily = contracts_to_daily(e)
                     n = save_table("ad_spend_daily", daily,
                                    "report_date,channel,source", "정액 계약 일할")
-                    if n_ct and (n or daily.empty):
+                    # 지우는 건 **이 표를 열 때 읽어온 계약 중 사라졌거나 바뀐 것**뿐이다.
+                    # (읽기가 실패해 표가 기본값만 보였을 때 저장을 눌러도, 화면에 없던 계약을
+                    #  통째로 지우지 않게 — 읽어온 게 없으면 지울 것도 없다.)
+                    if n_ct and (n or daily.empty) and not _orig_ct.empty:
+                        _new = {(str(r["channel"]).strip(), pd.to_datetime(r["start_date"]).date()):
+                                (pd.to_datetime(r["end_date"]).date(),
+                                 float(pd.to_numeric(r["amount_incl_vat"], errors="coerce") or 0))
+                                for _, r in e.iterrows()}
                         try:
                             _cl = get_supabase_client()
-                            if _cl is not None:
-                                (_cl.table(TABLES["ad_contract"]).delete()
-                                 .lt("uploaded_at", _stamp).execute())
+                            for _, o in _orig_ct.iterrows():
+                                if pd.isna(o["start_date"]) or pd.isna(o["end_date"]):
+                                    continue
+                                _ch = str(o["channel"]).strip()
+                                _k = (_ch, o["start_date"])
+                                _amt = float(pd.to_numeric(o["amount_incl_vat"], errors="coerce") or 0)
+                                if _k in _new and _new[_k] == (o["end_date"], _amt):
+                                    continue          # 그대로인 계약
+                                if _cl is None:
+                                    continue
+                                if _k not in _new:    # 지운(또는 시작일을 바꾼) 계약
+                                    (_cl.table(TABLES["ad_contract"]).delete()
+                                     .eq("channel", _ch).eq("start_date", str(o["start_date"]))
+                                     .execute())
+                                # 옛 계약 기간의 일할 행 중 이번에 다시 안 쓴 것만 지운다
                                 (_cl.table(TABLES["ad_spend_daily"]).delete()
-                                 .eq("source", "contract").lt("uploaded_at", _stamp).execute())
+                                 .eq("source", "contract").eq("channel", _ch)
+                                 .gte("report_date", str(o["start_date"]))
+                                 .lte("report_date", str(o["end_date"]))
+                                 .lt("uploaded_at", _stamp).execute())
                         except Exception as _e:
                             st.warning(f"옛 계약 행 정리 실패 — 광고비가 겹칠 수 있습니다: {_e}")
                     st.success(f"계약 {len(e)}건 → 일별 {n}행 저장했습니다.")
@@ -12859,6 +13076,17 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         _a = _a[(_a["_d"] >= start) & (_a["_d"] <= end)]
         for c in ("conversions", "revenue"):
             _a[c] = pd.to_numeric(_a.get(c), errors="coerce").fillna(0)
+        # 소재별 성과와 같은 정리를 한다 — 제외 캠페인(마케팅팀 등)을 빼고, 같은 날·같은 광고에
+        # 광고세트별 행이 있으면 예전에 합쳐 저장한 행(adset='')은 안 센다(두 번 세지 않게).
+        if not _a.empty:
+            _a = _a[~_a["creative"].map(_google_campaign_excluded).astype(bool)]
+            if "campaign" in _a.columns:
+                _a = _a[~_a["campaign"].map(_google_campaign_excluded).astype(bool)]
+            if "adset" in _a.columns and not _a.empty:
+                _ad = _a["adset"].fillna("").astype(str).str.strip()
+                _has = (_a.assign(_x=_ad.ne(""))
+                        .groupby(["_d", "channel", "creative"])["_x"].transform("any"))
+                _a = _a[~(_has & _ad.eq(""))]
         if not _a.empty:
             _a["_canon"] = _a["channel"].map(_v4_canon_channel)
             for _c, _sub in _a.groupby("_canon"):
@@ -12898,7 +13126,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "월예산": budget,
             "예산 소진율": (cost / budget * 100) if budget > 0 else None,
             "_src": sp.get("source", ""), "_basis": _basis,
-            "_order": int(r.get("sort_order") or 100),
+            "_order": _safe_order(r.get("sort_order")),
         })
     df = pd.DataFrame(recs)
     # ── 알림·보정 내역 ────────────────────────────────────
@@ -12971,8 +13199,14 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # ── 상단 KPI (선택한 구분 기준) ────────────────────────
     tot_cost = view["비용"].sum()
     tot_budget = view["월예산"].sum()
-    tot_rev = view["GA매출"].sum()
-    tot_conv = view["GA구매"].sum()
+    # 합계·KPI의 매출은 **GA 기준끼리만** 더한다. 외부몰의 '매체 신고 매출'은 기준이 달라
+    # (보통 더 후하다) 섞으면 전체 ROAS가 부풀고 아침 메일(GA만 셈)과도 달라진다.
+    # '외부몰'만 골랐을 땐 전부 같은 기준이라 그대로 더한다.
+    _tv = view if (scope_f == "외부몰" or "_basis" not in view.columns) \
+        else view[view["_basis"] != "매체"]
+    _mixed_out = (len(_tv) != len(view))
+    tot_rev = _tv["GA매출"].sum()
+    tot_conv = _tv["GA구매"].sum()
     ref_m = start.replace(day=1)
     # 기간 경과 = (조회 구간의 일수) ÷ (걸친 달들의 전체 일수). 한 달 안이면 예전과 같은 값이다.
     _last_m = end.replace(day=1)
@@ -13103,7 +13337,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         if r["매체"] in _gfa_subs:
             body.append(_sub_rows_html(r["매체"], _gfa_subs[r["매체"]]))
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
-    s_roas = f'{view["GA매출"].sum() / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
+    s_roas = f'{tot_rev / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
     _s_imp, _s_clk = float(view["노출"].sum()), float(view["클릭"].sum())
     s_ctr = f'{_s_clk / _s_imp * 100:.2f}%' if _s_imp > 0 else '<span class="cp-mute">—</span>'
@@ -13112,8 +13346,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
         f'<td>{_cp_int(view["노출"].sum())}</td><td>{_cp_int(view["클릭"].sum())}</td>'
         f'<td>{s_ctr}</td><td>{s_cpc}</td>'
-        f'<td>{_cp_won(s_cost)}</td><td>{_cp_int(view["GA구매"].sum())}</td>'
-        f'<td>{_cp_won(view["GA매출"].sum())}</td><td>{s_roas}</td>'
+        f'<td>{_cp_won(s_cost)}</td><td>{_cp_int(tot_conv)}</td>'
+        f'<td>{_cp_won(tot_rev)}</td><td>{s_roas}</td>'
         f'<td>{_cp_won(s_bud)}</td><td>{s_pace}</td></tr>')
 
     note = (
@@ -13124,6 +13358,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         '· 네이버 브랜드검색은 정액(보장형) 상품이라 API가 집행액을 안 줍니다 — 노출·클릭만 API에서 오고 '
         '광고비는 위 칸에서 직접 넣습니다.<br>'
         '· 외부몰(쇼핑검색·맨즈탭 외부몰) 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 0으로 표시됩니다.'
+        + ('<br>· <b>합계·위 KPI의 구매·매출은 GA 기준만</b> 더했습니다 — 외부몰 줄의 매체 신고 매출은 '
+           '기준이 달라 빼고, 광고비는 포함합니다(아침 메일과 같은 계산). 외부몰만 보려면 위 구분에서 '
+           '\'외부몰\'을 고르세요.' if _mixed_out else '')
         + ('<br>· <b>└ PC / └ MO</b>는 GFA_자사몰의 기기별 내역입니다(합계에 이미 포함, 예산은 합계 줄에만). '
            '광고비는 대행사 리포트의 기기 비중으로 나누고, GA 매출은 utm_campaign의 _PC/_MO로 가릅니다 — '
            '기기 표시가 없는 캠페인은 MO로 봅니다.'
@@ -13699,96 +13936,93 @@ th.br-now{background:#DCE8FA !important;color:#2C4E86}
 
 def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
                           channel_mix: pd.DataFrame, start: date, end: date):
-    """채널별 광고비를 3단 폴백으로 확정한다. (DataFrame[channel, cost_incl_vat, source], 요약문자열)
-    같은 채널에 여러 소스가 있으면 API > 대행사 주간 > 예산 일할 순으로 하나만 채택한다."""
-    # ① 실제값(API·계약·직접입력)을 **날짜별로** 확정한다. 같은 매체의 여러 원본명
-    #    (맨즈탭_자사몰/외부몰 등)은 대표명으로 모은다.
-    # ② 실제값이 없는 날만 대행사 주간/예산 일할로 채운다 — 예전엔 기간 전체를 출처 하나로
-    #    골라서 API가 한 달치만 있어도 나머지 일곱 달 예산값을 통째로 버렸다.
+    """채널별 광고비를 확정한다. (DataFrame[channel, cost_incl_vat, source], 요약문자열)
+
+    ① 실제값(API·계약·직접입력)을 **날짜별로** 확정한다(같은 날 여러 출처면 우선순위 하나).
+    ② 실제값으로 '확정된 날'이 아닌 날만 대행사 주간 → 예산 일할로 채운다.
+
+    '확정된 날'의 기준 (2026-10 재정리):
+      · 그날 광고비가 0보다 큰 실제값이 있으면 확정.
+      · API로 광고비가 들어오는 매체는 **API 행이 있는 날**(0원 행 포함)을 확정한다.
+        동기화가 성공하면 꺼둔 날도 0원 행을 남기므로(_spend_zero_fill) 꺼둔 날은 0원으로
+        확정되고, 예전처럼 꺼둔 날마다 예산을 채우지 않는다. 토큰이 끊겨 행이 안 들어온
+        날은 확정하지 않는다(예산 일할로 채운다).
+      · 직접 입력·계약·카카오 메시지처럼 API가 아닌 출처는 광고비 > 0인 날만 확정
+        (직접 입력에서 0으로 저장하면 그날은 예산 일할로 돌아간다는 안내와 같게).
+      · 브랜드검색처럼 API가 노출·클릭만 주고 광고비는 늘 0인 매체는 API 범위를 쓰지 않는다
+        (계약을 늦게 넣었을 때 0원으로 굳지 않게).
+    폴백은 **달마다** 계산한다 — 달마다 예산이 달라서 기간 전체를 한 비율로 깎으면 틀린다.
+    """
     cols3 = ["channel", "cost_incl_vat", "source"]
-    n_days = max((end - start).days + 1, 1)
     daily = _spend_daily_resolved(ad_actual, start, end)
-    api_df = pd.DataFrame(columns=cols3)
-    covered_days = {}
+    act_sum, act_src, covered = {}, {}, {}
     if not daily.empty:
         daily = daily.copy()
         daily["channel"] = daily["channel"].map(_v4_canon_channel)
         has_cost = daily[daily["cost_incl_vat"] > 0]
-        if not has_cost.empty:
-            api_df = has_cost.groupby("channel", as_index=False).agg(
-                cost_incl_vat=("cost_incl_vat", "sum"),
-                source=("cost_source", lambda s: s.mode().iloc[0] if not s.empty else ""))
-            covered_days = has_cost.groupby("channel")["report_date"].nunique().to_dict()
-    # 실제값이 '0원인 날'도 실제값이다(그날 꺼져 있었던 것). 광고비 > 0인 날만 세면
-    # 매체를 쉬게 한 날마다 예산 일할로 채워 넣어서, 9월에 열흘만 돌린 크리테오가
-    # 10만원이 아니라 210만원으로 잡혔다.
-    # → 그 매체의 실제 데이터가 **들어오기 시작한 날 ~ 마지막으로 들어온 날** 사이는
-    #   (돈이 0이어도) 확정된 날로 보고, 그 밖(연동 전·동기화 안 된 최근)만 폴백한다.
-    #   마지막 날은 '그 매체 마지막 행'이 아니라 **API 동기화가 돈 마지막 날**이다 —
-    #   월말에 꺼둔 매체는 API가 행 자체를 안 줘서, 매체별 마지막 행으로 자르면 꺼진 뒤를
-    #   다시 예산으로 채우게 된다.
+        for ch, g_ in has_cost.groupby("channel"):
+            act_sum[ch] = float(g_["cost_incl_vat"].sum())
+            act_src[ch] = g_["cost_source"].mode().iloc[0] if not g_.empty else ""
+            covered.setdefault(ch, set()).update(g_["report_date"])
+
+    # API 범위로 '꺼둔 날 = 0원'을 확정한다
     if (ad_actual is not None and not ad_actual.empty
-            and {"report_date", "channel"} <= set(ad_actual.columns)):
-        _aa = ad_actual[["channel", "report_date"]].copy()
-        _aa["source"] = (ad_actual["source"].astype(str) if "source" in ad_actual.columns
-                         else "")
+            and {"report_date", "channel", "source"} <= set(ad_actual.columns)):
+        _aa = ad_actual[["channel", "report_date", "source"]].copy()
+        _aa["cost"] = pd.to_numeric(ad_actual.get("cost_incl_vat"), errors="coerce").fillna(0)
+        _aa["source"] = _aa["source"].astype(str)
         _aa["channel"] = _aa["channel"].map(_v4_canon_channel)
         _aa["report_date"] = pd.to_datetime(_aa["report_date"], errors="coerce").dt.date
         _aa = _aa.dropna(subset=["report_date"])
         _api = _aa[_aa["source"].str.contains("api", case=False, na=False)]
-        _sync_last = _api["report_date"].max() if not _api.empty else None
-        for ch, g_ in _aa.groupby("channel"):
-            _ga = g_[g_["source"].str.contains("api", case=False, na=False)]
-            if _ga.empty or _sync_last is None:
-                hi_all = g_["report_date"].max()       # API 없는 매체(계약·수기)는 자기 범위만
-                lo_all = g_["report_date"].min()
-            else:
-                lo_all, hi_all = _ga["report_date"].min(), _sync_last
-            lo, hi = max(lo_all, start), min(hi_all, end)
-            span = (hi - lo).days + 1 if hi >= lo else 0
-            covered_days[ch] = max(covered_days.get(ch, 0), span)
+        if not _api.empty:
+            for ch, g_ in _api.groupby("channel"):
+                _paid = g_[g_["cost"] > 0]
+                if _paid.empty:
+                    continue                  # 광고비를 안 주는 API(브랜드검색 등)
+                # 그 매체·그 출처로 **행이 있는 날**만 확정한다(0원 행 포함 — 동기화가
+                # 성공하면 꺼둔 날도 0원 행을 남긴다). 행이 없는 날(토큰 끊김·연동 전)은
+                # 확정하지 않고 예산으로 채운다 — 중간에 빈 기간이 있어도 마찬가지.
+                _srcs = set(_paid["source"].unique())
+                _ds = g_.loc[g_["source"].isin(_srcs), "report_date"]
+                covered.setdefault(ch, set()).update(d_ for d_ in _ds if start <= d_ <= end)
 
-    weekly_df = _channel_spend_total(channels_weekly, start, end)
-    if weekly_df is not None and not weekly_df.empty:
-        weekly_df = weekly_df.copy()
-        weekly_df["channel"] = weekly_df["channel"].map(_v4_canon_channel)
-        weekly_df = weekly_df.groupby("channel", as_index=False).agg(cost_incl_vat=("cost_incl_vat", "sum"))
-        weekly_df["source"] = "agency_weekly"
-    else:
-        weekly_df = pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
-
-    budget_df = _budget_daily_spend(channel_mix, start, end)
-    if budget_df is not None and not budget_df.empty:
-        budget_df = budget_df.copy()
-        budget_df["source"] = "budget_prorate"
-    else:
-        budget_df = pd.DataFrame(columns=["channel", "cost_incl_vat", "source"])
-
-    # 폴백은 '실제값이 없는 날'만큼만 넣는다. 기간 전체 폴백값 × (빈 날 ÷ 전체 일수).
-    # 대행사 주간이 있으면 그걸, 없으면 예산 일할을 쓴다.
-    fallback = {}
-    for df_, src in ((weekly_df, "agency_weekly"), (budget_df, "budget_prorate")):
-        if df_ is None or df_.empty:
-            continue
-        for _, r in df_.iterrows():
-            ch = str(r["channel"])
-            if ch not in fallback:      # 주간이 먼저라 있으면 예산은 안 본다
-                fallback[ch] = (float(r["cost_incl_vat"] or 0), src)
+    # 폴백 — 달 단위 구간마다 (주간 → 예산) 값 × (그 구간의 안 덮인 날 ÷ 구간 일수)
+    fb_sum, fb_src = {}, {}
+    m0 = start.replace(day=1)
+    while m0 <= end:
+        m_last = (m0.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        s_, e_ = max(start, m0), min(end, m_last)
+        n_seg = (e_ - s_).days + 1
+        seg_vals = {}
+        wk = _channel_spend_total(channels_weekly, s_, e_)
+        if wk is not None and not wk.empty:
+            wk = wk.copy()
+            wk["channel"] = wk["channel"].map(_v4_canon_channel)
+            for ch, v in wk.groupby("channel")["cost_incl_vat"].sum().items():
+                if float(v or 0) > 0:
+                    seg_vals[ch] = (float(v), "agency_weekly")
+        bd = _budget_daily_spend(channel_mix, s_, e_)
+        if bd is not None and not bd.empty:
+            for ch, v in bd.groupby("channel")["cost_incl_vat"].sum().items():
+                if ch not in seg_vals and float(v or 0) > 0:
+                    seg_vals[ch] = (float(v), "budget_prorate")
+        for ch, (amt, src) in seg_vals.items():
+            cv = covered.get(ch, set())
+            n_cov = sum(1 for d_ in cv if s_ <= d_ <= e_)
+            gap = max(0, n_seg - n_cov) / n_seg if n_seg > 0 else 0.0
+            if gap > 0:
+                fb_sum[ch] = fb_sum.get(ch, 0.0) + amt * gap
+                fb_src.setdefault(ch, src)
+        m0 = m_last + timedelta(days=1)
 
     rows = {}
-    for _, r in api_df.iterrows():
-        rows[r["channel"]] = {"channel": r["channel"], "cost_incl_vat": float(r["cost_incl_vat"]),
-                              "source": str(r["source"])}
-    for ch, (amt, src) in fallback.items():
-        if amt <= 0:
+    for ch in set(act_sum) | set(fb_sum):
+        a_, f_ = act_sum.get(ch, 0.0), fb_sum.get(ch, 0.0)
+        if a_ <= 0 and f_ <= 0:
             continue
-        gap = 1.0 - min(covered_days.get(ch, 0), n_days) / n_days
-        if ch in rows:
-            if gap > 0:
-                rows[ch]["cost_incl_vat"] += amt * gap
-                rows[ch]["source"] = "mixed"
-        else:
-            rows[ch] = {"channel": ch, "cost_incl_vat": amt, "source": src}
+        src = act_src.get(ch, "") if f_ <= 0 else (fb_src[ch] if a_ <= 0 else "mixed")
+        rows[ch] = {"channel": ch, "cost_incl_vat": a_ + f_, "source": src}
 
     if not rows:
         return pd.DataFrame(columns=cols3), "광고비 데이터 없음"
@@ -14758,9 +14992,10 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
     # 그 광고비는 이미 마케팅팀으로 빠졌으니 매출도 같이 빼야 ROAS가 안 부풀어 오른다.
     _cols = [c for c in ("campaign", "creative") if c in g.columns]
     if _cols:
-        _drop = g[_cols[0]].map(_google_campaign_excluded)
+        # 빈 표에서 map 결과가 문자열 타입이 되면 | 연산이 깨진다(pandas 3) → bool로 고정
+        _drop = g[_cols[0]].map(_google_campaign_excluded).astype(bool)
         for _c in _cols[1:]:
-            _drop = _drop | g[_c].map(_google_campaign_excluded)
+            _drop = _drop | g[_c].map(_google_campaign_excluded).astype(bool)
         if bool(_drop.any()):
             # 무엇이 왜 빠졌는지 남긴다. 조용히 빼면 '매출이 왜 줄었지?'에서 막힌다.
             _d = g[_drop].copy()
@@ -14907,9 +15142,9 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     # 제외 대상(마케팅팀 등)은 저장돼 있던 옛 행도 걸러낸다.
     # 필터는 '받아올 때'만 걸어놔서, 그 전에 들어온 행은 계속 남아 화면에 나온다
     # (0911_마케팅팀_A_2가 구글 소재 코멘트에 계속 뜨던 이유). 볼 때도 한 번 더 건다.
-    c = c[~c["creative"].map(_google_campaign_excluded)]
+    c = c[~c["creative"].map(_google_campaign_excluded).astype(bool)]
     if "campaign" in c.columns:
-        c = c[~c["campaign"].map(_google_campaign_excluded)]
+        c = c[~c["campaign"].map(_google_campaign_excluded).astype(bool)]
     if c.empty:
         return out
     # 같은 날·같은 광고에 '광고세트별 행'이 있으면, 예전에 합쳐서 저장한 행(adset='')은
@@ -15239,8 +15474,15 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
     ent = next((status_map[k] for k in keys if k in status_map), None)
     if ent:
         tgt = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
-        sel = [e for e in ent if tgt and tgt not in ("(미설정)", "(규칙 외)", "(타겟팅 없음)")
-               and tgt in e[0]] or ent
+        # ① 이 줄에 실제로 붙인 광고세트 이름(정확히 같은 것) → ② 타겟팅과 이름이 같은 것
+        #    → ③ 이름에 타겟팅이 들어간 것 순으로 본다. 바로 ③으로 가면 '방문자180일' 줄이
+        #    '방문자180일_구매제외' 광고 상태까지 섞어 '일부 ON'이 됐다.
+        _ads = {_gc_tgt_norm(a) for a in str(m.get("_adset") or "").split(",") if a.strip()}
+        sel = [e for e in ent if _ads and _gc_tgt_norm(e[0]) in _ads]
+        if not sel and tgt and tgt not in ("(미설정)", "(규칙 외)", "(타겟팅 없음)"):
+            sel = ([e for e in ent if _gc_tgt_norm(e[0]) == _gc_tgt_norm(tgt)]
+                   or [e for e in ent if tgt in e[0]])
+        sel = sel or ent
         n_on = sum(1 for e in sel if e[1])
         if n_on == len(sel):
             return "ON", True, "매체 API 상태"
@@ -15318,22 +15560,33 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 best = min(abs(len(_nt[i]) - len(an)) for i in cm)
                 return [i for i in cm if abs(len(_nt[i]) - len(an)) == best]
 
+            # 줄 번호 → {광고세트 키: 비중}. 보통 비중 1(통째로), 캠페인으로도 못 가르면
+            # 후보 줄들에 GA 방문 비중으로 나눈다(한 줄에 몰거나 '방문 없음' 줄로 빼지 않게).
+            wts = {}
             for a in sorted(bt, key=lambda x: -float(bt[x].get("cost", 0) or 0)):
                 cands = _rows_for(a)
                 if not cands:
                     continue
-                # 같은 타겟팅이 GA에서 캠페인별로 여러 줄이면 그때만 캠페인으로 가른다.
+                # 같은 타겟팅이 GA에서 캠페인별로 여러 줄이면 캠페인으로 가른다.
                 # (한 줄뿐이면 캠페인이 달라도 붙인다 — GA utm_campaign은 링크에 적힌 값이라
                 #  실제 캠페인과 다른 경우가 많다: 셔츠 캠페인 광고인데 링크엔 '수트_전환')
                 if len(cands) > 1:
                     cm = [i for i in cands if _camp_ok(i, a)]
-                    if len(cm) != 1:
-                        continue          # 못 고르면 아래에서 남은 몫으로 처리
-                    cands = cm
-                i = cands[0]
+                    if len(cm) == 1:
+                        cands = cm
+                    elif cm:
+                        cands = cm
+                if len(cands) == 1:
+                    wts.setdefault(cands[0], {})[a] = 1.0
+                else:
+                    _s = sum(ses[i] for i in cands)
+                    for i in cands:
+                        wts.setdefault(i, {})[a] = (ses[i] / _s) if _s > 0 else 1.0 / len(cands)
                 used.add(a)
-                assigned.setdefault(i, []).append(a)
-            if assigned:
+            assigned = {i: list(w) for i, w in wts.items()}
+            # 어느 줄과도 짝이 안 맞아도 같은 규칙을 쓴다(타겟팅 모르는 줄 → 거기에,
+            # 없으면 광고세트별 줄). 예전엔 이때 소재 전체 실적을 한 줄에 통째로 붙였다.
+            if True:
                 rest = {f: sum(float(v.get(f, 0) or 0) for a, v in bt.items() if a not in used)
                         for f in _F}
                 # 광고세트 이름 없이 '합쳐서' 저장된 날(광고세트별로 다시 받기 전 기간)의 몫은
@@ -15342,25 +15595,33 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                     - sum(float(v.get(f, 0) or 0) for v in bt.values()))
                              for f in _F}
                 _all = sum(ses[j] for j in idxs)
-                free = [i for i in idxs if i not in assigned]
+                # 짝 없는 광고세트의 돈은 **타겟팅을 모르는 줄**((미설정)·규칙 외)에만 나눈다.
+                # 예전엔 아무 남는 줄에나 넣어서, 유사타겟(신규) 광고비가 방문자180일(리타) 줄에
+                # 붙는 일이 있었다. 그런 줄이 없으면 광고세트별 'GA 방문 없음' 줄로 세운다.
+                free = [i for i in idxs if i not in assigned
+                        and _nt[i] in ("", "(미설정)", "(규칙외)", "(타겟팅없음)")]
                 for i in idxs:
                     w_all = (ses[i] / _all) if _all > 0 else (1.0 / len(idxs))
                     if i in assigned:
-                        d = {f: sum(float(bt[a].get(f, 0) or 0) for a in assigned[i])
+                        d = {f: sum(float(bt[a].get(f, 0) or 0) * wts[i][a] for a in assigned[i])
                              + collapsed[f] * w_all for f in _F}
-                    else:
+                    elif i in free:
                         tot = sum(ses[j] for j in free)
                         w = (ses[i] / tot) if tot > 0 else (1.0 / len(free))
                         d = {f: rest[f] * w + collapsed[f] * w_all for f in _F}
+                    else:
+                        d = {f: collapsed[f] * w_all for f in _F}
+                    _cps = (sorted({bt[a].get("campaign", "") for a in assigned[i]} - {""})
+                            if i in assigned else base.get("campaigns"))
                     out[i] = dict(d, channel=base.get("channel"), name=base.get("name"),
                                   src=base.get("src"), _split=len(idxs), _first=base.get("_first"),
                                   _adset=", ".join(bt[a].get("adset", "") for a in assigned.get(i, [])),
                                   _full_cost=d["cost"],
                                   _media_basis=base.get("_media_basis"),
                                   # 실제로 붙인 광고세트의 캠페인만 적는다(다른 캠페인 이름이 섞여 보이지 않게)
-                                  campaigns=(sorted({bt[a].get("campaign", "") for a in assigned[i]} - {""})
-                                             if i in assigned else base.get("campaigns")),
-                                  campaign=base.get("campaign"))
+                                  campaigns=_cps,
+                                  campaign=((_cps or [None])[0] if i in assigned else None)
+                                  or base.get("campaign"))
                 # GA 줄이 없는 광고세트의 돈은 버리지 않고, 메타 관리자 화면처럼
                 # **광고세트 하나에 한 줄씩** 'GA 방문 없음' 줄로 세운다(합계가 관리자와 맞게).
                 if not free:
@@ -15368,7 +15629,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                     if kk is not None:
                         for a in [a for a in bt if a not in used]:
                             v = bt[a]
-                            if float(v.get("impressions", 0) or 0) <= 0 and float(v.get("cost", 0) or 0) <= 0:
+                            if not any(float(v.get(f, 0) or 0) for f in _F):
                                 continue
                             media_map[(kk[0], f"{kk[1]}__{a}")] = dict(
                                 {f: float(v.get(f, 0) or 0) for f in _F},
@@ -15429,7 +15690,7 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
     c = c[(c["as_of_date"] >= start) & (c["as_of_date"] <= end)]
     if c.empty:
         return out
-    c = c[~c["creative"].map(_google_campaign_excluded)]      # 마케팅팀 등 제외 대상
+    c = c[~c["creative"].map(_google_campaign_excluded).astype(bool)]      # 마케팅팀 등 제외 대상
     if c.empty:
         return out
     c = c.sort_values("as_of_date").drop_duplicates(subset=["channel", "creative"], keep="last")
@@ -16762,6 +17023,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 신규 소재가 전부 '부진'으로 찍힌다. 판단 기준이 달라서 갈라 봐야 한다.
             # 매체에는 있는데 GA에서 못 찾은 소재도 같은 기준으로 세야 버튼 숫자가 맞는다.
             # (버튼 숫자용 — 표에 실제로 붙이는 매칭은 아래에서 따로 한다)
+            # GA에 아예 안 잡힌 소재라도 광고세트별 실적이 있으면 **광고세트마다 한 줄**로 편다.
+            # 한 덩어리로 두면 캠페인 이름만으로 신규/리타를 못 가려 두 보기 어디에도 안 들어갔다.
+            for _k, _v in list(media_map.items()):
+                if _k[0] not in ch_keep or id(_v) in _matched or "__" in str(_k[1]):
+                    continue
+                _bt = _v.get("_by_target") or {}
+                if not _bt:
+                    continue
+                _MF2 = ("impressions", "clicks", "cost", "media_conv", "media_rev")
+                _coll = {f: max(0.0, float(_v.get(f, 0) or 0)
+                                - sum(float(x.get(f, 0) or 0) for x in _bt.values())) for f in _MF2}
+                del media_map[_k]
+                for _a, _x in _bt.items():
+                    if not any(float(_x.get(f, 0) or 0) for f in _MF2):
+                        continue
+                    media_map[(_k[0], f"{_k[1]}__{_a}")] = dict(
+                        {f: float(_x.get(f, 0) or 0) for f in _MF2},
+                        channel=_v.get("channel"), name=_v.get("name"), src=_v.get("src"),
+                        _first=_v.get("_first"), _media_basis=_v.get("_media_basis"),
+                        campaign=f'{_x.get("campaign", "")} · {_x.get("adset", "")}'.strip(" ·"),
+                        campaigns=[_x.get("campaign", "")], _adset=_x.get("adset", ""))
+                if any(_coll.values()):
+                    media_map[_k] = dict(_v, **_coll, _by_target=None)
             _left_all = [(k, v) for k, v in media_map.items()
                          if k[0] in ch_keep and id(v) not in _matched]
 
@@ -17019,7 +17303,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     for (ch_k, _), m in leftovers:
                         if level == "매체":
                             gk = ch_k
-                        elif level == "타겟팅" and m.get("_adset_rest") and m.get("_adset"):
+                        elif level == "타겟팅" and m.get("_adset"):
                             # GA 방문이 없는 광고세트는 그 광고세트 이름(=타겟팅) 줄로 세운다
                             gk = f"{ch_k} · {m.get('_adset')}"
                         else:
@@ -17377,7 +17661,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 st.warning(
                                     "광고세트별 저장이 아직 꺼져 있습니다 — Supabase SQL Editor에서 "
                                     "`ad_creative_adset.sql`을 한 번 실행한 뒤 아래 버튼을 눌러주세요.")
-                            if st.button(f"🔁 {start}~{end} 메타 소재를 광고세트별로 다시 받기",
+                            if st.button(f"🔁 {start}~{end} 메타 소재 다시 받기 (광고세트별·새 기준)",
                                          key=f"gc_meta_adset_{ti}", disabled=not _has_adset):
                                 with st.status("메타 소재 다시 받는 중...", expanded=True) as _s6:
                                     _n6, _sv6, _er6 = sync_ad_creative(
@@ -17388,6 +17672,23 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 for _k6, _v6 in (_er6 or {}).items():
                                     st.error(f"**{_k6}** 실패 — {_v6}")
                                 if not _er6:
+                                    st.cache_data.clear()
+                                    st.rerun()
+                        elif label in {_gc_channel("구글"): 1, _gc_channel("크리테오"): 1}:
+                            _fl = "구글" if label == _gc_channel("구글") else "크리테오"
+                            # 계산 기준이 바뀐 뒤(크리테오 VAT·한국 시간 등) 예전 기간을 새 기준으로
+                            # 다시 받는다. 자동 동기화는 최근 8일만 다시 받기 때문.
+                            if st.button(f"🔁 {start}~{end} {_fl} 소재 다시 받기 (새 기준)",
+                                         key=f"gc_refetch_{ti}"):
+                                with st.status(f"{_fl} 소재 다시 받는 중...", expanded=True) as _s7:
+                                    _n7, _sv7, _er7 = sync_ad_creative(
+                                        ad_creative, only=[_fl], unlimited=True,
+                                        progress=st.write, start=start,
+                                        end=min(end, kst_today() - timedelta(days=1)))
+                                    _s7.update(label=f"완료 — {_n7:,}행", state="complete")
+                                for _k7, _v7 in (_er7 or {}).items():
+                                    st.error(f"**{_k7}** 실패 — {_v7}")
+                                if not _er7:
                                     st.cache_data.clear()
                                     st.rerun()
                         _pick = st.selectbox("소재", _names, key=f"gc_raw_pick_{ti}")
@@ -17566,7 +17867,10 @@ def render_ga_channel_funnel_page(
     # GA4 API로 받은 데이터가 있으면 그걸 우선 쓰고, 없으면 기존 엑셀 업로드분으로 폴백한다.
     ga_source_label = "GA4 API(자동)"
     if ga_daily is not None and not ga_daily.empty:
-        ga_channel_inflow = ga_inflow_source(ga_daily, ga_channel_inflow, lookup)
+        # 채널 성과·메일과 같은 기준: 마케팅팀 등 제외 캠페인 매출을 빼고,
+        # 애드부스트 링크가 GFA로 들어온 매출은 애드부스트로 옮긴 뒤 퍼널을 만든다.
+        ga_channel_inflow = ga_inflow_source(_ga_daily_team_adjusted(ga_daily, lookup),
+                                             ga_channel_inflow, lookup)
     else:
         ga_source_label = "GA 엑셀 업로드(수동)"
         if callable(ga_channel_inflow):
@@ -17805,6 +18109,15 @@ def render_ga_channel_funnel_page(
         _t = fg.copy()
         _t["_b"] = _t.apply(classify_ga_bucket, axis=1)
         ad_revenue_period = float(_t.loc[_t["_b"] == "광고", "revenue"].sum())
+    # 신규/재구매 ROAS도 **광고로 들어온 매출만** 쓴다(자연유입·직접유입 매출을 광고비로
+    # 나누면 ROAS가 부풀거나, 광고비에 예산 대체분이 섞이면 엉뚱하게 낮아진다).
+    ad_nrev = ad_rrev = 0.0
+    if not fg.empty:
+        _ta = _t[_t["_b"] == "광고"]
+        ad_nrev = float(pd.to_numeric(_ta.get("new_rev"), errors="coerce").fillna(0).sum()) \
+            if "new_rev" in _ta.columns else 0.0
+        ad_rrev = float(pd.to_numeric(_ta.get("ret_rev"), errors="coerce").fillna(0).sum()) \
+            if "ret_rev" in _ta.columns else 0.0
     site_roas = 0.0  # 실제 계산은 아래에서 spend_sum(주간 리포트 합계)을 구한 뒤에 한다
 
     # 채널 단위 — 대표 채널명으로 정규화해서 합산
@@ -17849,6 +18162,22 @@ def render_ga_channel_funnel_page(
     if spend_sum > 0:
         ad_spend_period = spend_sum
         spend_src = spend_src_summary
+    # ROAS 분모에서 **외부몰 광고비는 뺀다** — 외부몰 매출은 자사몰 GA에 절대 안 잡혀서,
+    # 분모에만 들어가면 ROAS가 늘 낮게 나온다(채널 성과의 외부몰 구분과 같은 이유).
+    _ext_ch = set()
+    try:
+        for _, _r in media_master_frame(master).iterrows():
+            if str(_r.get("scope") or "") == "외부몰" and str(_r.get("spend_channel") or "").strip():
+                _ext_ch.add(_v4_canon_channel(str(_r.get("spend_channel")).strip()))
+    except Exception:
+        pass
+    _est_amt = 0.0
+    if spend_all is not None and not spend_all.empty:
+        _own = spend_all[~spend_all["channel"].isin(_ext_ch)]
+        if float(_own["cost_incl_vat"].sum()) > 0:
+            ad_spend_period = float(_own["cost_incl_vat"].sum())
+        _est_amt = float(_own.loc[_own["source"].isin(
+            ["budget_prorate", "agency_weekly", "mixed"]), "cost_incl_vat"].sum())
     site_roas = (ad_revenue_period / ad_spend_period * 100) if ad_spend_period > 0 else 0.0
 
     def _build(base, visit_col):
@@ -17997,8 +18326,9 @@ def render_ga_channel_funnel_page(
     axis_ratio = (axis_users / users_now * 100) if users_now else 0
     axis_conv, axis_conv_prev = (nconv_now, nconv_prev) if is_new else (rconv_now, rconv_prev)
     axis_rev, axis_rev_prev = (nrev_now, nrev_prev) if is_new else (rrev_now, rrev_prev)
-    axis_roas = (axis_rev / ad_spend_period * 100) if ad_spend_period > 0 else None
-    roas_label = "신규 ROAS" if is_new else "재구매 ROAS"
+    _axis_ad_rev = ad_nrev if is_new else ad_rrev
+    axis_roas = (_axis_ad_rev / ad_spend_period * 100) if ad_spend_period > 0 else None
+    roas_label = "광고 신규 ROAS" if is_new else "광고 재구매 ROAS"
     # 광고비를 못 구하면 ROAS를 억지로 계산하지 않고 '-'로 둔다(틀린 숫자로 판단하는 게 제일 위험).
     roas_sub = (
         f"광고 ROAS {site_roas:.0f}% · 광고비 {spend_src}"
@@ -18007,7 +18337,10 @@ def render_ga_channel_funnel_page(
     # 광고비는 신규·재방문으로 나눌 수 없어 전액 기준이다. 그래서 신규 ROAS + 재구매 ROAS가
     # 전체 ROAS가 된다 — 각각만 보면 낮아 보이는 게 정상이라 그 점을 같이 적어준다.
     axis_roas_sub = (
-        f"{roas_label} {axis_roas:.0f}% · 전체 매출 {rev_now:,.0f}원"
+        f"{roas_label} {axis_roas:.0f}% (광고 유입 매출 {_axis_ad_rev:,.0f}원 ÷ 자사몰 광고비 "
+        f"{ad_spend_period:,.0f}원"
+        + (f", 그중 예산 추정이 섞인 매체 {_est_amt:,.0f}원" if _est_amt > 0 else "")
+        + f") · 광고 전체 ROAS {site_roas:.0f}%"
         if axis_roas is not None else f"{roas_label} - (광고비 데이터 없음)"
     )
     ad_p = bucket_share["광고"] / bucket_total * 100
@@ -18171,7 +18504,9 @@ def render_ga_channel_funnel_page(
             # 크다. 캡션에 써놨지만 표를 먼저 보게 되니 안 읽힌다 — 숫자 바로 옆에 붙인다.
             # (신규는 한 사람당 한 번뿐이라 거의 안 불어나고, 재방문자가 올 때마다 세어져서
             #  총 방문자만 크게 부푼다. 그 차이를 같이 보여주면 오해가 없다.)
-            brows_sum = rowfn("TOTAL", tot, ad_cost, "fv4-sum-row nosort") + "<td></td></tr>"
+            # 대분류 TOTAL은 자연유입·기타까지 더한 줄이라 광고비로 나누면 CAC·ROAS가 틀린다
+            # (자연 매출까지 광고 성과로 잡힘) → 이 줄은 CAC·ROAS를 비워 둔다(광고 줄에 있음).
+            brows_sum = rowfn("TOTAL", tot, 0.0, "fv4-sum-row nosort") + "<td></td></tr>"
             _dup = float(tot.get("users", 0) or 0) - float(users_now or 0)
             if _site_now.get("ok") and _dup > 0:
                 _dup_line = (
@@ -18214,7 +18549,8 @@ def render_ga_channel_funnel_page(
             + _dup_line
             + '<div class="fv4-bk-cap">머리글을 누르면 그 표만 정렬됩니다. TOTAL 줄은 항상 맨 위 고정입니다. '
               '광고비는 신규·재방문으로 나눌 수 없어 <b>전액 기준</b>이라, '
-              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다.</div>'
+              '신규 ROAS와 재구매 ROAS를 더하면 전체 ROAS가 됩니다. 대분류 TOTAL 줄은 자연유입까지 '
+              '더한 값이라 CAC·ROAS를 비워 둡니다.</div>'
             + build_table("fvtblA", head, brows_sum, brows)
             + '<div class="fv4-sec">광고 매체별 상세</div>'
             + '<div class="fv4-bk-cap">위 표의 <b>광고</b> 줄을 매체로 쪼갠 것입니다 — '
