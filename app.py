@@ -7944,6 +7944,116 @@ def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_ful
     return n, start, end, None
 
 
+def _ga_visit_sums(df: pd.DataFrame) -> dict:
+    """GA 채널 표(날짜×소스/매체×신규·재방문)의 방문수 합계 — 다른 팀 소스는 뺀다."""
+    if df is None or df.empty or "sessions" not in df.columns:
+        return {"sessions": 0.0, "new": 0.0, "ret": 0.0, "other": 0.0, "rows": 0, "dup": 0,
+                "types": {}}
+    g = df.copy()
+    if "source_medium" in g.columns:
+        g = g[~g["source_medium"].map(_ga_sm_excluded).astype(bool)]
+    g["sessions"] = pd.to_numeric(g["sessions"], errors="coerce").fillna(0)
+    ut = g["user_type"].astype(str) if "user_type" in g.columns else pd.Series("", index=g.index)
+    _k = pd.DataFrame({"d": pd.to_datetime(g["report_date"], errors="coerce").dt.date,
+                       "sm": g["source_medium"].astype(str).str.strip().str.lower(), "ut": ut})
+    return {"sessions": float(g["sessions"].sum()),
+            "new": float(g.loc[ut == "신규", "sessions"].sum()),
+            "ret": float(g.loc[ut == "재방문", "sessions"].sum()),
+            "other": float(g.loc[~ut.isin(["신규", "재방문"]), "sessions"].sum()),
+            "rows": int(len(g)), "dup": int(_k.duplicated().sum()),
+            "types": ut.value_counts().to_dict()}
+
+
+def _render_ga_visit_check(ga_daily: pd.DataFrame, lookup: dict, start: date, end: date):
+    """저장된 GA 방문수와 GA4를 같은 기간으로 직접 대조한다.
+
+    퍼널 표의 '총 방문자·신규 방문자'는 **방문수(세션)** 를 날짜·소스/매체별로 더한 값이다.
+    GA4 화면의 '총 사용자'(사람 수)가 아니라 '방문수'와 비교해야 한다. 그래도 다르면
+    ① 저장된 데이터에 옛 행·중복이 남았거나 ② GA4가 날짜로 쪼갤 때 세는 방식 차이다.
+    여기서 셋을 나란히 보여주고, ①이면 이 기간을 지우고 다시 받을 수 있게 한다.
+    """
+    st.caption(
+        f"기간 **{start} ~ {end}** · 퍼널 표의 '총 방문자'는 **방문수(세션)**를 날짜·소스별로 "
+        "더한 값입니다. GA4에서는 '총 사용자'가 아니라 **'방문수'** 와 비교하세요. "
+        "'신규 방문자'는 신규 사용자의 방문수입니다(GA4 '첫 방문'과 비슷하지만 같지는 않음).")
+    b1, b2 = st.columns(2)
+    do_chk = b1.button("GA4와 대조하기", key="fv4_visit_chk", use_container_width=True)
+    if b2.button("이 기간 GA 데이터 지우고 다시 받기", key="fv4_visit_fix",
+                 use_container_width=True,
+                 help="대조 결과 ①과 ②가 다를 때 누르세요. GA4에서 먼저 받은 뒤, 받은 게 있을 때만 "
+                      "이 기간 저장분을 지우고 새로 저장합니다."):
+        n, e = refetch_ga4_channel_range(lookup, start, end)
+        if e:
+            st.error(e)
+        else:
+            st.success(f"{start} ~ {end} GA 데이터를 새로 받아 {n:,}행 저장했습니다. "
+                       "화면을 새로고침하면 반영됩니다.")
+            st.cache_data.clear()
+    if not do_chk:
+        return
+    stored = ga_daily
+    if stored is not None and not stored.empty:
+        _d = pd.to_datetime(stored["report_date"], errors="coerce").dt.date
+        stored = stored[(_d >= start) & (_d <= end)]
+    a = _ga_visit_sums(stored)
+    try:
+        fresh = fetch_ga4_channel_daily(start, end, lookup)
+    except Exception as e:
+        st.error(f"GA4 조회 실패: {e}")
+        return
+    b = _ga_visit_sums(fresh)
+    site = ga4_site_totals(start, end)
+    rows = [
+        {"구분": "① 대시보드에 저장된 값", "방문수": a["sessions"], "신규 방문수": a["new"],
+         "재방문 방문수": a["ret"], "미상": a["other"], "행 수": a["rows"], "중복 키": a["dup"]},
+        {"구분": "② 지금 GA4에서 같은 방식으로 받은 값", "방문수": b["sessions"], "신규 방문수": b["new"],
+         "재방문 방문수": b["ret"], "미상": b["other"], "행 수": b["rows"], "중복 키": b["dup"]},
+        {"구분": "③ GA4 기간 전체(쪼개지 않음·다른 팀 포함)",
+         "방문수": float(site.get("sessions", 0)), "신규 방문수": None, "재방문 방문수": None,
+         "미상": None, "행 수": None, "중복 키": None},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if site.get("ok"):
+        st.caption(f"참고 — GA4 총 사용자 {site['users']:,.0f}명 · 신규 사용자(첫 방문) "
+                   f"{site['new_users']:,.0f}명")
+    _bad_types = {k: v for k, v in a["types"].items() if k not in ("신규", "재방문", "미상")}
+    if abs(a["sessions"] - b["sessions"]) > max(50, 0.005 * b["sessions"]) or a["dup"] or _bad_types:
+        st.warning(
+            f"**저장된 값(①)이 지금 GA4(②)와 다릅니다** — 차이 {a['sessions'] - b['sessions']:+,.0f}회"
+            + (f" · 같은 날·같은 소스가 두 번 저장된 행 {a['dup']}개" if a["dup"] else "")
+            + (f" · 예전 방식으로 저장된 구분값 {_bad_types}" if _bad_types else "")
+            + ". 옛 행이 남은 것이라, 위의 '이 기간 GA 데이터 지우고 다시 받기'를 누르면 맞춰집니다.")
+    else:
+        st.success("저장된 값(①)은 지금 GA4(②)와 같습니다.")
+    if site.get("ok") and b["sessions"] > float(site.get("sessions", 0)) * 1.005:
+        st.info(
+            "②가 ③보다 큰 건 GA4가 **날짜로 쪼개면** 자정을 넘긴 방문을 이틀에 각각 세는 등 "
+            "기간 전체로 셀 때와 방식이 달라서입니다(다른 팀 소스 제외분은 오히려 ②를 줄입니다). "
+            "매체끼리 비교에는 문제없지만, GA4 화면의 기간 합계와 맞추려면 ③을 보세요.")
+    st.session_state["fv4_visit_chk_ok"] = True
+
+
+def refetch_ga4_channel_range(lookup: dict, start: date, end: date):
+    """기간의 GA 채널 데이터를 **지우고** 새로 받는다(옛 행·중복 정리용).
+    받기에 실패하면 지우지 않는다 — 먼저 받아두고, 받은 게 있을 때만 지우고 저장한다."""
+    try:
+        fresh = fetch_ga4_channel_daily(start, end, lookup)
+    except Exception as e:
+        return 0, f"GA4 조회 실패: {e}"
+    if fresh is None or fresh.empty:
+        return 0, "GA4에서 받은 데이터가 없어 지우지 않았습니다."
+    cl = get_supabase_client()
+    if cl is not None:
+        try:
+            (cl.table(TABLES["ga_channel_daily"]).delete()
+             .gte("report_date", str(start)).lte("report_date", str(end)).execute())
+        except Exception as e:
+            return 0, f"기존 행 삭제 실패: {e}"
+    n = save_table("ga_channel_daily", fresh, "report_date,source_medium,user_type",
+                   "GA4 기간 재수집")
+    return n, None
+
+
 def backfill_ga4_range(kind: str, channel_map: dict, start: date, end: date):
     """지정한 기간을 통째로 다시 받아 채운다(과거 보정용).
 
@@ -8962,11 +9072,12 @@ def _v4_row_ret(name, r, cost, extra_cls=""):
 # 방문자 열에 '중복'을 박아둔다. 이 표의 방문자는 날짜×매체 단위로 센 것을 더한 값이라
 # 위 KPI(기간 전체를 한 번에 물어본 실제 사람 수)보다 늘 크다. 열 이름에 안 적어두면
 # 표를 먼저 보고 'KPI랑 왜 다르지'에서 매번 막힌다.
-HEAD_NEW = ["채널", "총 방문자<sup>중복</sup>", "신규 방문자<sup>중복</sup>", "신규 비율",
+# '방문자'라고 쓰면 GA4 '총 사용자'(사람 수)와 비교하게 된다 — 이 표는 방문수(세션)다.
+HEAD_NEW = ["채널", "방문수", "신규 방문수", "신규 비율",
             "회원가입", "가입률", "첫구매", "첫구매율", "신규 매출", "광고비",
             "가입 CAC", "첫구매 CAC", "신규 ROAS", "판정"]
-HEAD_RET = ["채널", "총 방문자<sup>중복</sup>", "재방문자<sup>중복</sup>",
-            "신규 방문자<sup>중복</sup>", "재방문 비율", "재구매", "재구매율",
+HEAD_RET = ["채널", "방문수", "재방문 방문수",
+            "신규 방문수", "재방문 비율", "재구매", "재구매율",
             "재구매 매출", "객단가", "광고비", "재구매 CAC", "재구매 ROAS", "판정"]
 
 
@@ -17917,6 +18028,8 @@ def render_ga_channel_funnel_page(
         # 최초 연동 때 30일치만 받아와서 그 이전이 비어 있는 경우가 있다. 날짜 선택기는 비어 있는
         # 기간도 그냥 고를 수 있게 해줘서, 숫자가 작게 나오는 걸 '성과가 나빴다'로 오해하기 쉽다.
         # 그래서 '지금 저장된 첫 날짜'를 항상 보여주고, 그 이전을 채울 수단을 같이 둔다.
+        with st.expander("🔎 GA4 화면과 방문수가 다를 때 — 이 기간 맞춰보기", expanded=False):
+            _render_ga_visit_check(ga_daily, lookup, start, end)
         with st.expander("📥 과거 GA 데이터 채우기 — 예전 기간이 비어 보일 때", expanded=False):
             _first = None
             if ga_channel_inflow is not None and not ga_channel_inflow.empty:
@@ -18511,11 +18624,12 @@ def render_ga_channel_funnel_page(
             if _site_now.get("ok") and _dup > 0:
                 _dup_line = (
                     '<div class="fv4-dup">'
-                    f'이 표의 <b>총 방문자 {float(tot.get("users", 0) or 0):,.0f}명</b>은 '
-                    '날짜·매체로 쪼개 센 것을 더한 값이라 <b>중복이 들어 있습니다.</b> '
-                    f'실제 사람은 <b>{users_now:,.0f}명</b>(신규 {new_now:,.0f}명) — '
-                    f'중복 {_dup:,.0f}명. 같은 사람이 여러 날·여러 경로로 오면 그만큼 '
-                    '더 세어집니다. <b>매체끼리 비교할 때만</b> 쓰세요.'
+                    f'이 표의 <b>방문수 {float(tot.get("users", 0) or 0):,.0f}회</b>는 '
+                    '사람 수가 아니라 <b>방문(세션) 횟수</b>를 날짜·매체별로 더한 값입니다. '
+                    f'실제 사람은 <b>{users_now:,.0f}명</b>(신규 {new_now:,.0f}명)입니다 — 같은 사람이 '
+                    '여러 번 오면 방문수는 그만큼 늘어납니다. GA4 화면과 맞춰볼 때는 '
+                    '<b>\'총 사용자\'가 아니라 \'방문수\'</b>와 비교하세요(아래 '
+                    '⚙️ 설정·진단 도구 → 🔎 GA4 화면과 방문수가 다를 때).'
                     '</div>')
 
         # ── ② 광고 매체별 상세 ──
