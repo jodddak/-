@@ -7653,14 +7653,100 @@ def ga4_site_totals(start: date, end: date) -> dict:
             return empty
         v = [float(x.value or 0) for x in resp.rows[0].metric_values]
         users, new_u, sess = v[0], v[1], v[2]
-        return {"users": users, "new_users": new_u,
-                # GA4 보고서의 '재방문자 수'와 몇십 명 차이가 날 수 있다. 기간 안에서
-                # 첫 방문도 하고 재방문도 한 사람을 GA는 양쪽에 다 세기 때문이다.
-                # 여기서는 총합이 맞는 쪽(총 − 신규)을 쓴다.
-                "returning_users": max(0.0, users - new_u),
+        # 재방문자는 GA4 탐색 '방문자 보고서'의 '재방문자 수'와 같은 방식으로 센다
+        # (기간 안에 '재방문'으로 들어온 적이 있는 사람). 이 달에 처음 와서 이 달에 또 온 사람은
+        # 첫 방문·재방문 양쪽에 다 들어가므로 신규 + 재방문이 총 사용자보다 크다 — GA4와 같다.
+        ret_u = max(0.0, users - new_u)
+        try:
+            from google.analytics.data_v1beta.types import Dimension
+            r2 = client.run_report(RunReportRequest(
+                property=f"properties/{prop}",
+                date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+                dimensions=[Dimension(name="newVsReturning")],
+                metrics=[Metric(name="totalUsers")],
+            ))
+            for row in r2.rows:
+                if str(row.dimension_values[0].value).lower().startswith("return"):
+                    ret_u = float(row.metric_values[0].value or 0)
+        except Exception:
+            pass
+        return {"users": users, "new_users": new_u, "returning_users": ret_u,
+                "both": max(0.0, new_u + ret_u - users),
                 "sessions": sess, "ok": True}
     except Exception:
         return empty
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ga4_people_by_source(start: date, end: date) -> pd.DataFrame:
+    """기간 전체를 통째로 물어본 **소스/매체별 사람 수**(날짜로 안 쪼갬).
+
+    컬럼: source_medium, users(총 사용자), new_users(첫 방문=새 사용자),
+          returning_users(재방문자 — GA4 탐색 '재방문자 수'와 같은 방식).
+    날짜별로 저장한 걸 더하면 같은 사람이 날마다 다시 세어져 쓸 수 없어서, 화면을 그릴 때
+    직접 조회한다(15분 캐시). 실패하면 빈 표 — 화면은 방문수(세션) 표시로 돌아간다.
+    """
+    client, _err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return pd.DataFrame()
+    try:
+        from google.analytics.data_v1beta.types import (DateRange, Dimension, Metric,
+                                                        RunReportRequest)
+        rows = {}
+        for dims, mets in ((["sessionSourceMedium"], ["totalUsers", "newUsers"]),
+                           (["sessionSourceMedium", "newVsReturning"], ["totalUsers"])):
+            offset = 0
+            while True:
+                resp = client.run_report(RunReportRequest(
+                    property=f"properties/{prop}",
+                    date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+                    dimensions=[Dimension(name=d) for d in dims],
+                    metrics=[Metric(name=m) for m in mets], limit=100_000, offset=offset))
+                for r in resp.rows:
+                    sm = r.dimension_values[0].value
+                    e = rows.setdefault(sm, {"source_medium": sm, "users": 0.0,
+                                             "new_users": 0.0, "returning_users": 0.0})
+                    if len(dims) == 1:
+                        e["users"] = float(r.metric_values[0].value or 0)
+                        e["new_users"] = float(r.metric_values[1].value or 0)
+                    elif str(r.dimension_values[1].value).lower().startswith("return"):
+                        e["returning_users"] = float(r.metric_values[0].value or 0)
+                offset += 100_000
+                if offset >= getattr(resp, "row_count", 0) or not resp.rows:
+                    break
+        out = pd.DataFrame(list(rows.values()))
+        if out.empty:
+            return out
+        return out[~out["source_medium"].map(_ga_sm_excluded).astype(bool)].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _v4_people_override(buckets, media, people: pd.DataFrame, lookup: dict, start: date):
+    """퍼널 표의 방문자·신규·재방문 칸을 **사람 수**로 바꾼다(구매·매출 등은 그대로).
+    소스별 사람 수를 대분류·매체로 묶어 더한다 — 한 사람이 여러 경로로 오면 각 줄에 한 번씩
+    들어가므로 줄을 더하면 사이트 전체 사람 수보다 크다(GA4 화면도 같다)."""
+    if people is None or people.empty:
+        return buckets, media
+    ps = people.copy()
+    ps["report_date"] = start
+    ps["channel"] = ps["source_medium"].map(
+        lambda sm: (lookup or {}).get(str(sm).strip().lower()))
+    for c in ("signups", "conversions", "revenue", "new_signups", "new_conv", "new_rev",
+              "ret_conv", "ret_rev"):
+        ps[c] = 0.0
+    pb, pm = _v4_ga_rows(ps, start, start)
+
+    def _apply(df, pdf):
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        m = {r["key"]: r for _, r in pdf.iterrows()} if pdf is not None and not pdf.empty else {}
+        for col in ("users", "new", "ret"):
+            df[col] = [float(m[k][col]) if k in m else 0.0 for k in df["key"]]
+        return df
+    return _apply(buckets, pb), _apply(media, pm)
 
 
 def fetch_ga4_creative_daily(start: date, end: date, channel_map: dict = None) -> pd.DataFrame:
@@ -18463,10 +18549,13 @@ def render_ga_channel_funnel_page(
         '<div class="fv4-wrap"><div class="fv4-kpis">'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">총 방문자</div>'
         f'<div class="fv4-kpi-value">{users_now:,.0f}{_v4_delta_html(users_now, users_prev)}</div>'
-        f'<div class="fv4-kpi-sub">신규 {new_now:,.0f} + 재방문 {ret_now:,.0f}</div></div>'
+        f'<div class="fv4-kpi-sub">첫 방문 {new_now:,.0f} · 재방문 {ret_now:,.0f}'
+        + (f'<br>(이 기간에 처음 와서 또 온 {float(_site_now.get("both", 0)):,.0f}명은 양쪽에 다 셈)'
+           if float(_site_now.get("both", 0) or 0) > 0 else '')
+        + '</div></div>'
         f'<div class="fv4-kpi"><div class="fv4-kpi-label">{"신규 방문자" if is_new else "재방문자"}</div>'
         f'<div class="fv4-kpi-value">{axis_users:,.0f}{_v4_delta_html(axis_users, axis_users_prev)}</div>'
-        f'<div class="fv4-kpi-sub">전체 방문의 {axis_ratio:.1f}%</div></div>'
+        f'<div class="fv4-kpi-sub">전체 방문자의 {axis_ratio:.1f}%</div></div>'
         + (
             f'<div class="fv4-kpi"><div class="fv4-kpi-label">회원가입</div>'
             f'<div class="fv4-kpi-value">{sign_now:,.0f}{_v4_delta_html(sign_now, sign_prev)}</div>'
@@ -18492,14 +18581,11 @@ def render_ga_channel_funnel_page(
     if _site_now.get("ok"):
         _gap = _users_summed - users_now
         _note = ("총 방문자·신규·재방문은 GA4에 이 기간을 통째로 물어본 **실제 사람 수**입니다 "
-                 "(GA4 탐색 '방문자 보고서'의 총 사용자·첫 방문과 같은 값).")
-        if _gap > 0:
-            _note += (f" 아래 매체별 표의 방문자를 다 더하면 {_users_summed:,.0f}명으로 "
-                      f"{_gap:,.0f}명 더 많은데, 한 사람이 여러 경로로 들어오면 경로마다 "
-                      "한 번씩 세어지기 때문입니다 — 매체끼리 비교할 때만 쓰세요.")
+                 "(GA4 탐색 '방문자 보고서'의 총 사용자·첫 방문·재방문자 수와 같은 값). "
+                 "아래 표도 같은 기준(사람 수)입니다.")
         st.caption(_note)
     else:
-        st.caption("총 방문자는 매체별 합계입니다 — 한 사람이 여러 경로로 들어오면 중복해서 "
+        st.caption("총 방문자는 매체별 방문수 합계입니다 — 한 사람이 여러 번 오면 그만큼 "
                    "세어지므로 GA4 보고서의 '총 사용자'보다 큽니다. (GA4 연동이 되면 실제 "
                    "사람 수로 자동 교체됩니다)")
 
@@ -18507,6 +18593,14 @@ def render_ga_channel_funnel_page(
     # 이 화면은 대행사 리포트를 쓰지 않는다 — 매체 API(노출·클릭·광고비)와 GA4(사용자·가입·구매·매출)만
     # 본다. 둘 다 매일 자동으로 들어오므로 사람이 파일을 올리지 않아도 최신 상태가 유지된다.
     buckets, media = _v4_ga_rows(ga_channel_inflow, start, end)
+    # 방문자·신규·재방문 칸은 GA4에 기간을 통째로 물어본 **사람 수**로 맞춘다
+    # (GA4 탐색 '방문자 보고서'의 총 사용자·첫 방문·재방문자 수와 같은 기준).
+    _people = ga4_people_by_source(start, end)
+    _people_ok = _people is not None and not _people.empty
+    if _people_ok:
+        buckets, media = _v4_people_override(buckets, media, _people, lookup, start)
+        if not media.empty:
+            media = media.sort_values("users", ascending=False).reset_index(drop=True)
     spend_now = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None \
         else pd.DataFrame(columns=["channel", "impressions", "clicks", "cost_incl_vat", "source"])
     # 표의 매체명은 대표명(_v4_canon_channel)이고 광고비 행의 channel은 원본 이름이라,
@@ -18581,6 +18675,11 @@ def render_ga_channel_funnel_page(
                    "노출·클릭이 광고에만 있는 숫자라 <b>이 퍼널은 광고 유입만</b> 봅니다 — "
                    "위 KPI·아래 TOTAL(자연유입·기타 포함)보다 작은 게 정상입니다.")
             head, rowfn = HEAD_RET, _v4_row_ret
+        if _people_ok:
+            # 사람 수 기준일 땐 머리글도 GA4 탐색 '방문자 보고서'와 같은 말로
+            _hm = {"방문수": "방문자", "신규 방문수": "신규 방문자(첫 방문)",
+                   "재방문 방문수": "재방문자"}
+            head = [_hm.get(h, h) for h in head]
 
         # 뺐으면 뺐다고 그 자리에 적는다 — 숫자가 조용히 작아지면 '왜 다르지'가 된다.
         if _fx_ch and _fx["imp"] > 0:
@@ -18619,9 +18718,29 @@ def render_ga_channel_funnel_page(
             #  총 방문자만 크게 부푼다. 그 차이를 같이 보여주면 오해가 없다.)
             # 대분류 TOTAL은 자연유입·기타까지 더한 줄이라 광고비로 나누면 CAC·ROAS가 틀린다
             # (자연 매출까지 광고 성과로 잡힘) → 이 줄은 CAC·ROAS를 비워 둔다(광고 줄에 있음).
+            _row_sum_users = float(tot.get("users", 0) or 0)
+            if _people_ok and _site_now.get("ok"):
+                # TOTAL은 줄을 더한 값이 아니라 **사이트 전체 사람 수**(GA4 총 사용자·첫 방문·
+                # 재방문자 수)로 둔다 — 한 사람이 여러 경로로 오면 각 줄에 들어가서 줄의 합은 더 크다.
+                tot = tot.copy()
+                tot["users"] = float(_site_now["users"])
+                tot["new"] = float(_site_now["new_users"])
+                tot["ret"] = float(_site_now["returning_users"])
             brows_sum = rowfn("TOTAL", tot, 0.0, "fv4-sum-row nosort") + "<td></td></tr>"
-            _dup = float(tot.get("users", 0) or 0) - float(users_now or 0)
-            if _site_now.get("ok") and _dup > 0:
+            _dup = _row_sum_users - float(users_now or 0)
+            if _people_ok and _site_now.get("ok"):
+                _dup_line = (
+                    '<div class="fv4-dup">'
+                    f'방문자·신규·재방문자는 <b>사람 수</b>입니다(GA4 총 사용자·첫 방문·재방문자 수와 같은 기준). '
+                    f'TOTAL은 사이트 전체 <b>{users_now:,.0f}명</b>(첫 방문 {new_now:,.0f}명 · '
+                    f'재방문 {ret_now:,.0f}명)입니다. 아래 줄들을 더한 값({_row_sum_users:,.0f}명)과 '
+                    '딱 맞지는 않습니다 — 한 사람이 광고로도 오고 검색으로도 오면 각 줄에 한 번씩 '
+                    '들어가기 때문입니다(GA4 화면도 같습니다).'
+                    + (f' 첫 방문과 재방문에 둘 다 들어간 사람(이 기간에 처음 와서 또 온 사람) '
+                       f'{_site_now.get("both", 0):,.0f}명이 있어 첫 방문 + 재방문이 전체보다 큽니다.'
+                       if float(_site_now.get("both", 0) or 0) > 0 else '')
+                    + '</div>')
+            elif _site_now.get("ok") and _dup > 0:
                 _dup_line = (
                     '<div class="fv4-dup">'
                     f'이 표의 <b>방문수 {float(tot.get("users", 0) or 0):,.0f}회</b>는 '
