@@ -7653,25 +7653,11 @@ def ga4_site_totals(start: date, end: date) -> dict:
             return empty
         v = [float(x.value or 0) for x in resp.rows[0].metric_values]
         users, new_u, sess = v[0], v[1], v[2]
-        # 재방문자는 GA4 탐색 '방문자 보고서'의 '재방문자 수'와 같은 방식으로 센다
-        # (기간 안에 '재방문'으로 들어온 적이 있는 사람). 이 달에 처음 와서 이 달에 또 온 사람은
-        # 첫 방문·재방문 양쪽에 다 들어가므로 신규 + 재방문이 총 사용자보다 크다 — GA4와 같다.
+        # 재방문자 = 총 사용자 − 새 사용자 (대행사 데이터 스튜디오 '재사용자'와 같은 방식).
+        # GA4 탐색 '재방문자 수'는 이 기간에 처음 와서 또 온 사람을 첫 방문·재방문 양쪽에 다 세서
+        # 더 크다(8월: 26,206 vs 20,220). 새 + 재 = 총이 맞는 쪽을 쓴다.
         ret_u = max(0.0, users - new_u)
-        try:
-            from google.analytics.data_v1beta.types import Dimension
-            r2 = client.run_report(RunReportRequest(
-                property=f"properties/{prop}",
-                date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
-                dimensions=[Dimension(name="newVsReturning")],
-                metrics=[Metric(name="totalUsers")],
-            ))
-            for row in r2.rows:
-                if str(row.dimension_values[0].value).lower().startswith("return"):
-                    ret_u = float(row.metric_values[0].value or 0)
-        except Exception:
-            pass
-        return {"users": users, "new_users": new_u, "returning_users": ret_u,
-                "both": max(0.0, new_u + ret_u - users),
+        return {"users": users, "new_users": new_u, "returning_users": ret_u, "both": 0.0,
                 "sessions": sess, "ok": True}
     except Exception:
         return empty
@@ -7682,7 +7668,7 @@ def ga4_people_by_source(start: date, end: date) -> pd.DataFrame:
     """기간 전체를 통째로 물어본 **소스/매체별 사람 수**(날짜로 안 쪼갬).
 
     컬럼: source_medium, users(총 사용자), new_users(첫 방문=새 사용자),
-          returning_users(재방문자 — GA4 탐색 '재방문자 수'와 같은 방식).
+          returning_users(재방문자 = 총 − 새, 데이터 스튜디오 '재사용자'와 같은 방식).
     날짜별로 저장한 걸 더하면 같은 사람이 날마다 다시 세어져 쓸 수 없어서, 화면을 그릴 때
     직접 조회한다(15분 캐시). 실패하면 빈 표 — 화면은 방문수(세션) 표시로 돌아간다.
     """
@@ -7694,8 +7680,7 @@ def ga4_people_by_source(start: date, end: date) -> pd.DataFrame:
         from google.analytics.data_v1beta.types import (DateRange, Dimension, Metric,
                                                         RunReportRequest)
         rows = {}
-        for dims, mets in ((["sessionSourceMedium"], ["totalUsers", "newUsers"]),
-                           (["sessionSourceMedium", "newVsReturning"], ["totalUsers"])):
+        for dims, mets in ((["sessionSourceMedium"], ["totalUsers", "newUsers"]),):
             offset = 0
             while True:
                 resp = client.run_report(RunReportRequest(
@@ -7718,6 +7703,8 @@ def ga4_people_by_source(start: date, end: date) -> pd.DataFrame:
         out = pd.DataFrame(list(rows.values()))
         if out.empty:
             return out
+        # 재방문자 = 총 사용자 − 새 사용자 (데이터 스튜디오 '재사용자'와 같게)
+        out["returning_users"] = (out["users"] - out["new_users"]).clip(lower=0)
         return out[~out["source_medium"].map(_ga_sm_excluded).astype(bool)].reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
@@ -18581,7 +18568,7 @@ def render_ga_channel_funnel_page(
     if _site_now.get("ok"):
         _gap = _users_summed - users_now
         _note = ("총 방문자·신규·재방문은 GA4에 이 기간을 통째로 물어본 **실제 사람 수**입니다 "
-                 "(GA4 탐색 '방문자 보고서'의 총 사용자·첫 방문·재방문자 수와 같은 값). "
+                 "(데이터 스튜디오의 총 사용자·새 사용자·재사용자와 같은 값 — 새 + 재 = 총). "
                  "아래 표도 같은 기준(사람 수)입니다.")
         st.caption(_note)
     else:
@@ -18731,7 +18718,7 @@ def render_ga_channel_funnel_page(
             if _people_ok and _site_now.get("ok"):
                 _dup_line = (
                     '<div class="fv4-dup">'
-                    f'방문자·신규·재방문자는 <b>사람 수</b>입니다(GA4 총 사용자·첫 방문·재방문자 수와 같은 기준). '
+                    f'방문자·신규·재방문자는 <b>사람 수</b>입니다(대행사 데이터 스튜디오의 총 사용자·새 사용자·재사용자와 같은 기준). '
                     f'TOTAL은 사이트 전체 <b>{users_now:,.0f}명</b>(첫 방문 {new_now:,.0f}명 · '
                     f'재방문 {ret_now:,.0f}명)입니다. 아래 줄들을 더한 값({_row_sum_users:,.0f}명)과 '
                     '딱 맞지는 않습니다 — 한 사람이 광고로도 오고 검색으로도 오면 각 줄에 한 번씩 '
