@@ -12714,7 +12714,14 @@ def _cp_month_budget(channel_mix: pd.DataFrame, ref: date,
         b = b[(~_ch.str.startswith("__")) & (_ch != "TOTAL")
               & (~_ch.str.contains(BUDGET_HARD_EXCLUDE_RE))]
         if not b.empty:
-            return {str(r["channel"]): float(r["budget_cost"] or 0) for _, r in b.iterrows()}
+            out = {str(r["channel"]): float(r["budget_cost"] or 0) for _, r in b.iterrows()}
+            # '법인카드정산'과 '법인카드정산 (기타)'가 둘 다 있으면 예산 파일 매체 세부내역에 있는
+            # (기타) 값을 쓴다 — 월별 예산 표와 같은 숫자가 나오게(10월: 120,000 → 100,000).
+            for k in [k for k in out if "(" not in k]:
+                twins = [o for o in out if o != k and _budget_key(o) == _budget_key(k)]
+                if twins:
+                    out[k] = out[twins[0]]
+            return out
 
     out = {}
     if channel_mix is None or channel_mix.empty:
@@ -12758,8 +12765,9 @@ CP_CSS = """
    숫자 칸 좌우 여백을 조금씩 깎아 가로 스크롤 없이 한 화면에 들어오게 한다. */
 .cp-tbl{table-layout:auto}
 .cp-tbl th:nth-child(1),.cp-tbl td:nth-child(1){width:62px;padding-left:10px;padding-right:4px}
-.cp-tbl th:nth-child(2),.cp-tbl td:nth-child(2){width:auto;max-width:210px;
-  white-space:normal;word-break:keep-all;padding-left:6px}
+.cp-tbl th:nth-child(2),.cp-tbl td:nth-child(2){width:auto;
+  white-space:nowrap;padding-left:6px}
+.cp-src{font-size:12.5px;color:#8A9098;font-weight:500;margin-left:8px}
 .cp-tbl th:nth-child(n+3),.cp-tbl td:nth-child(n+3){padding-left:8px;padding-right:8px}
 .cp-tbl td{padding:12px;text-align:right;border-bottom:1px solid #F3F1EC;white-space:nowrap;
   font-variant-numeric:tabular-nums}
@@ -13706,8 +13714,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         _has_sub = r["매체"] in _gfa_subs
         # PC/MO 하위 줄이 있는 매체는 줄을 누르면 펼쳐진다(기본은 접힘)
         _tog = ('<span class="cp-tog">▸ PC/MO 보기</span>' if _has_sub else "")
-        sub = (f'<div class="sub">{src}{" · " if src and _tog else ""}{_tog}</div>'
-               if (src or _tog) else "")
+        # 출처(네이버 API 등)는 매체명 옆에 한 줄로 붙인다 — 두 줄로 쌓으면 표가 쓸데없이 길어진다
+        sub = (f'<span class="cp-src">{src}</span>' if src else "") + \
+              (f'<span class="cp-src">{_tog}</span>' if _tog else "")
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
         _tr_cls = ' class="cp-has-sub"' if _has_sub else ""
         body.append(
@@ -13821,7 +13830,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 본문 20 + 보조 19를 더해 약 63px. 머리글 41, 아래 설명글 약 100.
     # 조금 넉넉하게 잡고 scrolling=False로 둬서, 어긋나도 스크롤바 대신 여백만 생기게 한다.
     # (아래 스크립트가 실제 높이를 재서 다시 맞춰준다 — 되면 여백도 사라진다.)
-    _h = 41 + 63 * (len(view) + 1) + 110 + (40 if _gfa_subs else 0)
+    _h = 41 + 48 * (len(view) + 1) + 110 + (40 if _gfa_subs else 0)
     html += """
 <style>
 tr.cp-has-sub{cursor:pointer}
