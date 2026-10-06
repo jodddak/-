@@ -13667,7 +13667,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             _roas = s["GA ROAS"]
             _roas_v = mute if _roas is None else f"{_roas:,.1f}%"
             rows.append(
-                f'<tr class="cp-subrow" data-parent="{parent_name}">'
+                f'<tr class="cp-subrow" data-parent="{parent_name}" style="display:none">'
                 f'<td class="l"></td>'
                 f'<td class="l m cp-subname">└ {s["매체"]}</td>'
                 f'<td data-v="{dv(_imp)}">{fmt_i(_imp)}</td>'
@@ -13703,10 +13703,16 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 cls = "cp-pill zero"
             pace_v = f'<span class="{cls}">{r["예산 소진율"]:.1f}%</span>'
         src = AD_SPEND_SOURCE_LABEL.get(r["_src"], "")
-        sub = f'<div class="sub">{src}</div>' if src else ""
+        _has_sub = r["매체"] in _gfa_subs
+        # PC/MO 하위 줄이 있는 매체는 줄을 누르면 펼쳐진다(기본은 접힘)
+        _tog = ('<span class="cp-tog">▸ PC/MO 보기</span>' if _has_sub else "")
+        sub = (f'<div class="sub">{src}{" · " if src and _tog else ""}{_tog}</div>'
+               if (src or _tog) else "")
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
+        _tr_cls = ' class="cp-has-sub"' if _has_sub else ""
         body.append(
-            f'<tr data-name="{r["매체"]}"><td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
+            f'<tr data-name="{r["매체"]}"{_tr_cls}>'
+            f'<td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
             f'<td class="l m">{r["매체"]}{sub}</td>'
             f'<td data-v="{r["노출"]:.0f}">{_cp_int(r["노출"])}</td>'
             f'<td data-v="{r["클릭"]:.0f}">{_cp_int(r["클릭"])}</td>'
@@ -13745,7 +13751,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         + ('<br>· <b>합계·위 KPI의 구매·매출은 GA 기준만</b> 더했습니다 — 외부몰 줄의 매체 신고 매출은 '
            '기준이 달라 빼고, 광고비는 포함합니다(아침 메일과 같은 계산). 외부몰만 보려면 위 구분에서 '
            '\'외부몰\'을 고르세요.' if _mixed_out else '')
-        + ('<br>· <b>└ PC / └ MO</b>는 GFA_자사몰의 기기별 내역입니다(합계에 이미 포함, 예산은 합계 줄에만). '
+        + ('<br>· <b>└ PC / └ MO</b>는 GFA_자사몰의 기기별 내역입니다 — <b>GFA_자사몰 줄을 누르면 펼쳐집니다</b>(합계에 이미 포함, 예산은 합계 줄에만). '
            '광고비는 대행사 리포트의 기기 비중으로 나누고, GA 매출은 utm_campaign의 _PC/_MO로 가릅니다 — '
            '기기 표시가 없는 캠페인은 MO로 봅니다.'
            + (' <b>리포트가 이 기간 광고비와 달라(업로드 전 날짜 등) 기기별 광고비는 비중으로 나눈 값입니다.</b>'
@@ -13815,9 +13821,35 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 본문 20 + 보조 19를 더해 약 63px. 머리글 41, 아래 설명글 약 100.
     # 조금 넉넉하게 잡고 scrolling=False로 둬서, 어긋나도 스크롤바 대신 여백만 생기게 한다.
     # (아래 스크립트가 실제 높이를 재서 다시 맞춰준다 — 되면 여백도 사라진다.)
-    _h = 41 + 63 * (len(view) + 1) + 46 * sum(len(v) for v in _gfa_subs.values()) + 110 \
-        + (40 if _gfa_subs else 0)
+    _h = 41 + 63 * (len(view) + 1) + 110 + (40 if _gfa_subs else 0)
     html += """
+<style>
+tr.cp-has-sub{cursor:pointer}
+tr.cp-has-sub:hover td{background:#F4F2EA}
+.cp-tog{color:#2F6FED;font-weight:600}
+</style>
+<script>
+(function(){
+  function fitNow(){
+    try{
+      var h = document.documentElement.scrollHeight;
+      window.parent.postMessage({type:'streamlit:setFrameHeight', height:h+8}, '*');
+    }catch(e){}
+  }
+  // 부모 줄(GFA_자사몰)을 누르면 └ PC / └ MO 줄을 펼치고 접는다
+  Array.prototype.forEach.call(document.querySelectorAll('tr.cp-has-sub'), function(tr){
+    tr.addEventListener('click', function(){
+      var name = tr.getAttribute('data-name');
+      var subs = document.querySelectorAll('tr.cp-subrow[data-parent="' + name + '"]');
+      var open = subs.length && subs[0].style.display === 'none';
+      Array.prototype.forEach.call(subs, function(s){ s.style.display = open ? '' : 'none'; });
+      var t = tr.querySelector('.cp-tog');
+      if(t){ t.textContent = open ? '▾ PC/MO 접기' : '▸ PC/MO 보기'; }
+      setTimeout(fitNow, 30);
+    });
+  });
+})();
+</script>
 <script>
 (function(){
   function fit(){
