@@ -12223,7 +12223,7 @@ MEDIA_MASTER_DEFAULT = [
     ("카카오톡 플친",       "자사몰",  90, "카카오",             "카카오톡 플친",        1.0,
      "kakao_msg/email,kakaotalk/display", 0),
     # 법인카드 정산분. 매체는 아니지만 월 예산 합계를 맞추려면 '기타'로 들고 있어야 한다.
-    ("기타",               "자사몰", 100, "",                 "법인카드정산",         1.0, "", 0),
+    ("법인카드정산",         "자사몰", 100, "",                 "법인카드정산",         1.0, "", 0),
     # ── 외부몰: 매출이 GA4에 안 잡힌다(스마트스토어). 예산도 파일에 없어 직접 지정한다. ──
     ("네이버 쇼핑검색광고",   "외부몰", 110, "네이버 쇼핑검색광고",  "",                  0.0, "", 2_200_000),
     ("네이버 맨즈탭_외부몰",  "외부몰", 120, "네이버 맨즈탭_외부몰", "",                  0.0, "", 0),
@@ -12262,6 +12262,11 @@ def media_master_frame(saved: pd.DataFrame = None) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = defaults.get(c, "")
     df = df[MEDIA_MASTER_COLS]
+    # 예전 이름 '기타'(법인카드정산 예산 줄)는 '법인카드정산'으로 보여준다
+    _old = (df["media"].astype(str).str.strip() == "기타") & \
+        df["budget_line"].astype(str).str.contains("법인카드", na=False)
+    if _old.any():
+        df.loc[_old, "media"] = "법인카드정산"
 
     have = set(df["media"].astype(str).str.strip())
     missing = base[~base["media"].astype(str).str.strip().isin(have)]
