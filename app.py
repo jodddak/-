@@ -14018,6 +14018,14 @@ def _br_ratio_actual(budget: pd.DataFrame, year: int, scope: str = "자사몰"):
     return (spend / rev if rev else None), spend, rev
 
 
+# 예산 파일 '매체 세부내역'의 줄 순서(26년 기준). 화면 표도 이 순서로 그린다.
+BUDGET_FILE_ROW_ORDER = [
+    "네이버 검색광고", "네이버 브랜드검색광고", "네이버 GFA", "네이버 맨즈탭", "카카오톡 플친",
+    "메타", "모비온", "구글", "크리테오", "신규 매체", "카카오모먼트", "법인카드정산 (기타)",
+    "촬영샘플", "잔여비용",
+]
+
+
 def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰") -> str:
     """연도별 월×매체 예산표. 예산 파일의 '매체 세부내역' 블록을 그대로 옮긴 화면.
 
@@ -14031,7 +14039,7 @@ def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰")
         b[c] = pd.to_numeric(b.get(c), errors="coerce")
     # month 0 = 파일의 'TOTAL' 열, -1 = '당월 누계' 열. 촬영샘플·잔여비용은 월별로 안 나뉘고
     # TOTAL에만 값이 있어서, 월 합계만 보면 이 둘이 통째로 사라진다.
-    b = b[(b.get("scope") == scope) & (b["year"] == year) & (b["month"].between(0, 12))]
+    b = b[(b.get("scope") == scope) & (b["year"] == year) & (b["month"].between(-1, 12))]
     if b.empty:
         return '<div class="cp-note">해당 연도 예산 데이터가 없습니다.</div>'
 
@@ -14052,9 +14060,17 @@ def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰")
     if media.empty:
         return '<div class="cp-note">매체별 예산 데이터가 없습니다.</div>'
 
+    # '법인카드정산'과 '법인카드정산 (기타)'가 둘 다 들어오는 파일이 있다. 예산 파일의
+    # 매체 세부내역에 있는 건 (기타) 쪽이라, 둘 다 있으면 (기타)만 남긴다(합계가 2번 잡히지 않게).
+    _chs = set(media["channel"].astype(str))
+    _drop = {c for c in _chs if _budget_key(c) in {_budget_key(x) for x in _chs if x != c}
+             and "(" not in c}
+    if _drop:
+        media = media[~media["channel"].astype(str).isin(_drop)]
+
     piv = media.pivot_table(index="channel", columns="month", values="budget_cost",
                             aggfunc="sum", fill_value=0)
-    for m in range(0, 13):
+    for m in range(-1, 13):
         if m not in piv.columns:
             piv[m] = 0
     piv = piv[sorted(piv.columns)]
@@ -14062,13 +14078,35 @@ def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰")
     # 항목(촬영샘플·잔여비용)이 0이 되어 연간 총액이 안 맞는다.
     month_sum = piv[list(range(1, 13))].sum(axis=1)
     piv["TOTAL"] = np.where(piv[0] > 0, piv[0], month_sum)
-    piv["누계"] = piv[[m for m in range(1, ref_month + 1)]].sum(axis=1)
-    piv = piv[piv["TOTAL"] > 0].sort_values("TOTAL", ascending=False)
+    # 누계도 파일에 적힌 '당월 누계'(-1열)를 그대로 쓴다 — 예산 파일과 같은 숫자가 나오게.
+    # 파일에 누계 열이 없을 때만 1월~이번 달을 더한다.
+    _has_mtd = bool((piv[-1] != 0).any())
+    if _has_mtd:
+        piv["누계"] = piv[-1]
+        # 몇 월까지의 누계인지 알아낸다(월 합계가 파일 누계와 맞는 달)
+        mtd_month, _best = None, 0
+        _nz = piv[piv[-1] != 0]
+        for _m in range(1, 13):
+            _cum = _nz[list(range(1, _m + 1))].sum(axis=1)
+            _hit = int(((_cum - _nz[-1]).abs() <= (_nz[-1].abs() * 0.005 + 1)).sum())
+            if _hit > _best:
+                mtd_month, _best = _m, _hit
+        if _best < max(1, len(_nz) // 2):
+            mtd_month = None
+        mtd_label = f"~{mtd_month}월 누계" if mtd_month else "당월 누계"
+    else:
+        piv["누계"] = piv[[m for m in range(1, ref_month + 1)]].sum(axis=1)
+        mtd_label = f"~{ref_month}월 누계"
+    piv = piv[piv["TOTAL"] > 0]
+    # 줄 순서는 예산 파일(매체 세부내역)과 같게. 목록에 없는 매체는 금액 큰 순으로 뒤에 붙인다.
+    _order = {_budget_key(n): i for i, n in enumerate(BUDGET_FILE_ROW_ORDER)}
+    piv = piv.assign(_o=[_order.get(_budget_key(c), 999) for c in piv.index],
+                     _t=-piv["TOTAL"]).sort_values(["_o", "_t"]).drop(columns=["_o", "_t"])
 
     def w(v):
         return f"{v:,.0f}" if v else '<span class="cp-mute">-</span>'
 
-    heads = (['<th class="l">매체</th>', "<th>TOTAL</th>", f"<th>~{ref_month}월 누계</th>"]
+    heads = (['<th class="l">매체</th>', "<th>TOTAL</th>", f"<th>{mtd_label}</th>"]
              + [f'<th class="{"br-now" if m == ref_month else ""}">{m}월</th>'
                 for m in range(1, 13)])
     tot = piv.sum()
