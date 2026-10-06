@@ -8037,6 +8037,206 @@ def _ga_visit_sums(df: pd.DataFrame) -> dict:
             "types": ut.value_counts().to_dict()}
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def ga4_monthly_users(start: date, end: date) -> pd.DataFrame:
+    """월별 총 사용자·새 사용자 (GA4 연월 차원 — 달마다 중복 제거된 사람 수).
+    대행사 데이터 스튜디오에서 한 달씩 기간을 걸고 본 '총 사용자·새 사용자'와 같은 값이다."""
+    client, _err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return pd.DataFrame()
+    from google.analytics.data_v1beta.types import (DateRange, Dimension, Metric,
+                                                    RunReportRequest)
+    resp = client.run_report(RunReportRequest(
+        property=f"properties/{prop}",
+        date_ranges=[DateRange(start_date=str(start), end_date=str(end))],
+        dimensions=[Dimension(name="yearMonth")],
+        metrics=[Metric(name="totalUsers"), Metric(name="newUsers")], limit=1000))
+    rows = [{"ym": r.dimension_values[0].value,
+             "users": float(r.metric_values[0].value or 0),
+             "new_users": float(r.metric_values[1].value or 0)} for r in resp.rows]
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["returning_users"] = (out["users"] - out["new_users"]).clip(lower=0)
+        out = out.sort_values("ym").reset_index(drop=True)
+    return out
+
+
+def _xlsx_set_numbers(xbytes: bytes, sheet: str, values: dict) -> bytes:
+    """xlsx 안의 한 시트에서 지정한 칸({"X167": 67139, ...})의 숫자만 바꾼다.
+
+    openpyxl로 열어 저장하면 차트·그림·일부 서식이 사라지므로, 시트 XML의 해당 칸만
+    직접 고친다. 칸의 서식(s=)은 유지하고, 다른 칸·시트·차트는 손대지 않는다.
+    저장 뒤 Excel이 수식을 다시 계산하도록 fullCalcOnLoad를 켠다."""
+    import io
+    import re as _re
+    import zipfile
+    zin = zipfile.ZipFile(io.BytesIO(xbytes))
+    wbx = zin.read("xl/workbook.xml").decode("utf-8")
+    rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    m = _re.search(r'<sheet[^>]*name="%s"[^>]*r:id="([^"]+)"' % _re.escape(sheet), wbx)
+    if not m:
+        m = _re.search(r'<sheet[^>]*r:id="([^"]+)"[^>]*name="%s"' % _re.escape(sheet), wbx)
+    if not m:
+        raise ValueError(f"'{sheet}' 시트를 못 찾았습니다.")
+    rid = m.group(1)
+    tm = (_re.search(r'<Relationship[^>]*Id="%s"[^>]*Target="([^"]+)"' % rid, rels)
+          or _re.search(r'<Relationship[^>]*Target="([^"]+)"[^>]*Id="%s"' % rid, rels))
+    target = tm.group(1).lstrip("/")
+    path = target if target.startswith("xl/") else "xl/" + target
+    xml = zin.read(path).decode("utf-8")
+
+    def col_num(ref):
+        letters = _re.match(r"[A-Z]+", ref).group(0)
+        n = 0
+        for ch in letters:
+            n = n * 26 + ord(ch) - 64
+        return n
+
+    for ref, val in values.items():
+        rown = _re.search(r"\d+", ref).group(0)
+        num = repr(float(val)) if not float(val).is_integer() else str(int(val))
+        cell_re = _re.compile(r'<c r="%s"(?P<attrs>[^>]*?)(?:/>|>(?P<body>.*?)</c>)' % ref, _re.S)
+        cm = cell_re.search(xml)
+        if cm:
+            attrs = _re.sub(r'\s+t="[^"]*"', "", cm.group("attrs") or "")
+            xml = xml[:cm.start()] + f'<c r="{ref}"{attrs}><v>{num}</v></c>' + xml[cm.end():]
+            continue
+        rm = _re.search(r'<row r="%s"[^>]*?(?:/>|>(.*?)</row>)' % rown, xml, _re.S)
+        newc = f'<c r="{ref}"><v>{num}</v></c>'
+        if not rm:
+            raise ValueError(f"{ref} 행을 시트에서 못 찾았습니다.")
+        if rm.group(0).endswith("/>"):
+            row_open = rm.group(0)[:-2] + ">"
+            xml = xml[:rm.start()] + row_open + newc + "</row>" + xml[rm.end():]
+            continue
+        body_start = rm.start(1)
+        ins = rm.end(1)
+        for cc in _re.finditer(r'<c r="([A-Z]+)\d+"', rm.group(1)):
+            if col_num(cc.group(1)) > col_num(ref):
+                ins = body_start + cc.start()
+                break
+        xml = xml[:ins] + newc + xml[ins:]
+
+    if "<calcPr" in wbx:
+        wbx2 = _re.sub(r"<calcPr([^>]*?)(/?)>", lambda mm: "<calcPr" + _re.sub(
+            r'\s+fullCalcOnLoad="[^"]*"', "", mm.group(1)) + ' fullCalcOnLoad="1"' + mm.group(2) + ">",
+            wbx, count=1)
+    else:
+        wbx2 = wbx.replace("</workbook>", '<calcPr fullCalcOnLoad="1"/></workbook>')
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == path:
+                data = xml.encode("utf-8")
+            elif item.filename == "xl/workbook.xml":
+                data = wbx2.encode("utf-8")
+            elif item.filename == "xl/calcChain.xml":
+                pass
+            zout.writestr(item, data)
+    return out.getvalue()
+
+
+def fill_visitor_excel(xbytes: bytes, monthly: pd.DataFrame,
+                       sheet: str = "자사몰 지표 RAW 데이터") -> tuple:
+    """엑셀 시트의 월별 줄(B열 날짜)에서 '총방문자수'·'신규방문자수' 칸만 GA4 값으로 바꾼다.
+    차트·서식·수식·다른 칸은 그대로 둔다. (바뀐 엑셀 bytes, 바꾼 내역 표, 못 채운 달 목록)"""
+    import io
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+    wb = openpyxl.load_workbook(io.BytesIO(xbytes))     # 위치 찾기용으로만 읽는다(저장 안 함)
+    if sheet not in wb.sheetnames:
+        raise ValueError(f"'{sheet}' 시트가 없습니다 (있는 시트: {', '.join(wb.sheetnames)})")
+    ws = wb[sheet]
+    hdr_row = c_tot = c_new = None
+    for row in ws.iter_rows(min_row=1, max_row=60):
+        for c in row:
+            v = str(c.value or "").replace(" ", "").replace("\n", "")
+            if v == "총방문자수" and c_tot is None:
+                hdr_row, c_tot = c.row, c.column
+            elif v == "신규방문자수" and c_new is None:
+                c_new = c.column
+        if c_tot and c_new:
+            break
+    if not (c_tot and c_new):
+        raise ValueError("'총방문자수'·'신규방문자수' 머리글을 못 찾았습니다.")
+    m = {str(r["ym"]): r for _, r in monthly.iterrows()}
+    changes, missing, vals = [], [], {}
+    L_t, L_n = get_column_letter(c_tot), get_column_letter(c_new)
+    for r in range(hdr_row + 1, ws.max_row + 1):
+        b = ws.cell(r, 2).value
+        if isinstance(b, str) and ("합계" in b or "TOTAL" in b.upper()):
+            break
+        if not isinstance(b, (datetime, date)):
+            continue
+        ym = f"{b.year:04d}{b.month:02d}"
+        if ym not in m:
+            if ws.cell(r, c_tot).value not in (None, ""):
+                missing.append(f"{b.year}-{b.month:02d}")
+            continue
+        g = m[ym]
+        t, n = int(round(g["users"])), int(round(g["new_users"]))
+        vals[f"{L_t}{r}"] = t
+        vals[f"{L_n}{r}"] = n
+        changes.append({"월": f"{b.year}-{b.month:02d}",
+                        "총방문자수(전)": ws.cell(r, c_tot).value, "총방문자수(GA 총 사용자)": t,
+                        "신규방문자수(전)": ws.cell(r, c_new).value, "신규방문자수(GA 새 사용자)": n})
+    xb = _xlsx_set_numbers(xbytes, sheet, vals) if vals else xbytes
+    return xb, pd.DataFrame(changes), missing
+
+
+def _render_monthly_users_tool():
+    """월별 총 사용자·새 사용자를 GA4에서 받아 엑셀(자사몰 지표 RAW)에 채워 넣는 도구."""
+    st.caption(
+        "GA4에서 **달마다 총 사용자·새 사용자**를 받아(대행사 데이터 스튜디오와 같은 값), "
+        "올린 엑셀의 '자사몰 지표 RAW 데이터' 시트 **총방문자수·신규방문자수** 칸만 바꿉니다. "
+        "서식·수식·다른 칸은 그대로입니다. GA4에 데이터가 없는 달(GA4 도입 전)은 손대지 않고 "
+        "목록으로 알려드립니다.")
+    c1, c2 = st.columns(2)
+    _s = c1.date_input("시작 월", date(2019, 1, 1), key="mu_start")
+    _e = c2.date_input("끝 월(그 달 말일까지)",
+                       (kst_today().replace(day=1) - timedelta(days=1)).replace(day=1),
+                       key="mu_end")
+    _s = _s.replace(day=1)
+    _e = (_e.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    up = st.file_uploader("채울 엑셀 파일 (.xlsx)", type=["xlsx"], key="mu_file")
+    if not st.button("GA4에서 받아 채우기", key="mu_go", type="primary"):
+        return
+    try:
+        mon = ga4_monthly_users(_s, _e)
+    except Exception as e:
+        st.error(f"GA4 조회 실패: {e}")
+        return
+    if mon is None or mon.empty:
+        st.warning("GA4에서 받은 월별 데이터가 없습니다(연동 상태를 확인해주세요).")
+        return
+    first = str(mon["ym"].iloc[0])
+    st.caption(f"GA4 데이터는 **{first[:4]}-{first[4:]}부터** 있습니다.")
+    show = mon.rename(columns={"ym": "연월", "users": "총 사용자", "new_users": "새 사용자",
+                               "returning_users": "재사용자(총−새)"})
+    st.dataframe(show.style.format({"총 사용자": "{:,.0f}", "새 사용자": "{:,.0f}",
+                                    "재사용자(총−새)": "{:,.0f}"}),
+                 use_container_width=True, hide_index=True)
+    st.download_button("월별 표만 CSV로 받기", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"GA4_월별_사용자_{_s:%Y%m}_{_e:%Y%m}.csv", key="mu_csv")
+    if up is None:
+        st.info("엑셀을 올리면 그 파일에 바로 채워서 돌려드립니다.")
+        return
+    try:
+        xb, ch, miss = fill_visitor_excel(up.getvalue(), mon)
+    except Exception as e:
+        st.error(f"엑셀 채우기 실패: {e}")
+        return
+    st.success(f"{len(ch)}개월을 바꿨습니다.")
+    if miss:
+        st.warning("GA4에 데이터가 없어 **기존 값을 그대로 둔 달**: " + ", ".join(miss))
+    st.dataframe(ch, use_container_width=True, hide_index=True)
+    st.download_button("✅ 채운 엑셀 받기", xb, file_name=up.name.replace(".xlsx", "_GA4반영.xlsx"),
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="mu_dl", type="primary")
+
+
 def _render_ga_visit_check(ga_daily: pd.DataFrame, lookup: dict, start: date, end: date):
     """저장된 GA 방문수와 GA4를 같은 기간으로 직접 대조한다.
 
@@ -18101,6 +18301,8 @@ def render_ga_channel_funnel_page(
         # 최초 연동 때 30일치만 받아와서 그 이전이 비어 있는 경우가 있다. 날짜 선택기는 비어 있는
         # 기간도 그냥 고를 수 있게 해줘서, 숫자가 작게 나오는 걸 '성과가 나빴다'로 오해하기 쉽다.
         # 그래서 '지금 저장된 첫 날짜'를 항상 보여주고, 그 이전을 채울 수단을 같이 둔다.
+        with st.expander("📊 월별 총 사용자·새 사용자 → 엑셀(자사몰 지표 RAW) 채우기", expanded=False):
+            _render_monthly_users_tool()
         with st.expander("🔎 GA4 화면과 방문수가 다를 때 — 이 기간 맞춰보기", expanded=False):
             _render_ga_visit_check(ga_daily, lookup, start, end)
         with st.expander("📥 과거 GA 데이터 채우기 — 예전 기간이 비어 보일 때", expanded=False):
