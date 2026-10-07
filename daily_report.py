@@ -318,7 +318,7 @@ def build_rows(ad_spend, ga_daily, master, start: date, end: date) -> pd.DataFra
             "conv": float(g["conv"]),
             "rev": rev,
             # 외부몰은 매출이 GA에 안 잡힌다 — 0%(빨강)가 아니라 '—'(모름)로 둔다(대시보드와 같게)
-            "roas": (None if (str(r.get("scope", "")) in ("외부몰", "제로라운지") and rev <= 0)
+            "roas": (None if (str(r.get("scope", "")) == "외부몰" and rev <= 0)
                      else (rev / cost * 100) if cost > 0 else None),
             "order": (int(pd.to_numeric(r.get("sort_order"), errors="coerce"))
                       if pd.notna(pd.to_numeric(r.get("sort_order"), errors="coerce")) else 100),
@@ -368,9 +368,7 @@ def build_actions(df: pd.DataFrame, n_days: int = 1) -> tuple[str, list[dict], f
     up, keep, down, hold, skip = [], [], [], [], []
     for _, r in df.iterrows():
         m, cost, roas, rev = r["media"], r["cost"], r["roas"], r["rev"]
-        if r["scope"] == "제로라운지":
-            skip.append((m, "제로라운지 — STCO GA4에 매출이 안 잡혀 판단 제외"))
-        elif r["scope"] == "외부몰":
+        if r["scope"] == "외부몰":
             skip.append((m, "외부몰 — 매출이 GA에 안 잡혀 판단 불가 (스마트스토어 연동 필요)"))
         elif cost <= 0 and rev > 0:
             skip.append((m, f"광고비 미연동 — 매출 {rev:,.0f}원은 잡히는데 비용이 없어 ROAS 계산 불가"))
