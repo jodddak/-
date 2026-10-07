@@ -4736,6 +4736,7 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
     c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
     c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
+    c_adset = _mr_pick(cols, ["광고 그룹 이름", "광고그룹 이름", "광고그룹명", "광고 그룹명", "adset_name"])
     # ── 전환은 '구매완료'만 쓴다 ────────────────────────────────
     # GFA 리포트는 전환 종류를 전부 따로 준다 — 구매완료·장바구니 담기·회원가입·
     # 위시리스트·컨텐츠보기… 그리고 그걸 다 더한 '총 전환매출액'도 같이 준다.
@@ -4808,6 +4809,7 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
         "conversions": conv,
         "revenue": num(df[c_rv]) if c_rv else 0.0,
         "source": MEDIA_REPORT_CREATIVE_SOURCE,
+        "adset": df[c_adset].fillna("").astype(str).str.strip() if c_adset else "",
         # 리포트에 적힌 캠페인 이름 그대로 — 소재별 표 아랫줄에 띄운다.
         # (GA의 utm_campaign은 줄여 적은 값이라 광고 관리자 화면과 다르다.)
         "campaign": ch_raw.astype(str).str.strip() if c_cmp else "",
@@ -10732,6 +10734,33 @@ AD_CREATIVE_KEY_ADSET = "report_date,channel,creative,source,adset"
 # stable campaign + asset-group identity without requiring new database columns.
 # These internal IDs must never be interpreted as audience names in the UI.
 GOOGLE_ASSET_KEY_PREFIX = "google_asset_group:"
+CAMPAIGN_ADSET_KEY_PREFIX = "campaign_adset:"
+
+
+def _precise_creative_key(value):
+    return str(value or "").startswith((GOOGLE_ASSET_KEY_PREFIX, CAMPAIGN_ADSET_KEY_PREFIX))
+
+
+def _campaign_adset_key(campaign, adset):
+    # Preserve campaign boundaries in the existing database conflict-key slot.
+    # JSON avoids delimiter collisions in real campaign/ad-set names.
+    return CAMPAIGN_ADSET_KEY_PREFIX + json.dumps(
+        [str(campaign or ""), str(adset or "")], ensure_ascii=False, separators=(",", ":"))
+
+
+def _creative_adset_label(value):
+    value = str(value or "")
+    if value.startswith(GOOGLE_ASSET_KEY_PREFIX):
+        return ""
+    if value.startswith(CAMPAIGN_ADSET_KEY_PREFIX):
+        try:
+            decoded = json.loads(value[len(CAMPAIGN_ADSET_KEY_PREFIX):])
+            if isinstance(decoded, list) and len(decoded) == 2:
+                return str(decoded[1] or "")
+        except (ValueError, TypeError):
+            pass
+    return value
+
 
 
 def _google_asset_storage_key(campaign_id, asset_group_id):
@@ -10835,15 +10864,15 @@ def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
                 return n
             # 저장 실패 한 번으로 세션 내내 옛 방식으로 바꾸지 않는다 — 열이 정말 없을 때만.
             if "adset" in _cols:
-                if df["adset"].str.startswith(GOOGLE_ASSET_KEY_PREFIX).any():
-                    raise RuntimeError("구글 캠페인별 소재 저장에 실패했습니다. 위 저장 오류를 확인해주세요.")
+                if df["adset"].map(_precise_creative_key).any():
+                    raise RuntimeError("캠페인별 소재 저장에 실패했습니다. 위 저장 오류를 확인해주세요.")
                 return n
             if _cols:
                 st.session_state["ad_creative_no_adset"] = True
-        if (df["adset"].str.startswith(GOOGLE_ASSET_KEY_PREFIX)).any():
+        if df["adset"].map(_precise_creative_key).any():
             # Falling back to the old key would silently merge campaigns again.
             raise RuntimeError(
-                "구글 캠페인별 저장 실패: ad_creative_daily의 adset 열과 "
+                "캠페인별 소재 저장 실패: ad_creative_daily의 adset 열과 "
                 "날짜·매체·소재·출처·adset 고유키를 확인해주세요. "
                 "캠페인을 합치는 옛 저장 방식으로는 대체하지 않았습니다.")
         df = _ad_creative_collapse(df.drop(columns=["adset"]))
@@ -11595,11 +11624,16 @@ def _creative_frame(rows: list) -> pd.DataFrame:
     if "campaign" not in out.columns:
         out["campaign"] = ""
     out["campaign"] = out["campaign"].astype(str).str.strip()
-    # 구글은 adset 자리에 캠페인/애셋그룹 ID를 저장하므로 캠페인 경계를
-    # 유지한다. 메타는 기존 광고세트 키를 그대로 사용한다.
+    # Every source must retain campaign boundaries before aggregation/storage.
+    # Google uses campaign/asset-group IDs; file reports and Meta preserve the
+    # campaign plus original ad-set label in the existing conflict-key slot.
     if "adset" not in out.columns:
         out["adset"] = ""
     out["adset"] = out["adset"].fillna("").astype(str).str.strip()
+    _protect = out["source"].isin(["media_report", "meta_api"]) & ~out["adset"].map(_precise_creative_key)
+    out.loc[_protect, "adset"] = [
+        _campaign_adset_key(cp, ads)
+        for cp, ads in zip(out.loc[_protect, "campaign"], out.loc[_protect, "adset"])]
     _key = ["report_date", "channel", "creative", "source", "adset"]
     _camp = (out.sort_values("cost_incl_vat", ascending=False)
              .drop_duplicates(subset=_key)[_key + ["campaign"]])
@@ -15937,6 +15971,15 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     # 안 쓴다 — 지우기가 실패해서 둘 다 남아 있으면 그날 실적이 두 번 잡힌다.
     if "adset" in c.columns:
         _ad = c["adset"].fillna("").astype(str).str.strip()
+        # Refetched rows supersede legacy campaign-collapsed rows. This also
+        # protects totals if database cleanup fails or no DB is configured.
+        _identity_cols = ["report_date", "channel", "creative"]
+        if "source" in c.columns:
+            _identity_cols.append("source")
+        _precise = c.assign(_precise=_ad.map(_precise_creative_key)).groupby(
+            _identity_cols)["_precise"].transform("any")
+        c = c[~(_precise & ~_ad.map(_precise_creative_key))]
+        _ad = c["adset"].fillna("").astype(str).str.strip()
         _has = (c.assign(_a=_ad.ne(""))
                 .groupby(["report_date", "channel", "creative"])["_a"].transform("any"))
         c = c[~(_has & _ad.eq(""))]
@@ -15958,7 +16001,7 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                 _ad, _cp = str(r["adset"]).strip(), str(r["campaign"]).strip()
                 # Keep each Google asset-group key distinct, but route matching
                 # through the campaign branch, never through audience matching.
-                _display_ad = "" if _ad.startswith(GOOGLE_ASSET_KEY_PREFIX) else _ad
+                _display_ad = _creative_adset_label(_ad)
                 _by_t.setdefault((r["channel"], r["creative"]), {})[f"{_cp}\x1f{_ad}"] = {
                     "adset": _display_ad, "campaign": _cp,
                     "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
@@ -17331,6 +17374,23 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _api_channels = {ch for ch, _ in _api_map}
     media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
     media_map.update(_api_map)
+    if ad_creative is not None and not ad_creative.empty and "source" in ad_creative.columns:
+        _legacy_other = ad_creative.copy()
+        _legacy_other["_day"] = pd.to_datetime(_legacy_other["report_date"], errors="coerce").dt.date
+        _legacy_other = _legacy_other[(_legacy_other["_day"] >= start)
+                                      & (_legacy_other["_day"] <= end)
+                                      & _legacy_other["source"].isin(["media_report", "meta_api"])]
+        _old_ads = (_legacy_other["adset"].fillna("").astype(str)
+                    if "adset" in _legacy_other.columns else pd.Series("", index=_legacy_other.index))
+        _old_sources = set(_legacy_other.loc[~_old_ads.map(_precise_creative_key), "source"])
+        if "media_report" in _old_sources:
+            st.warning("이 기간 매체 파일에는 캠페인 구분을 합쳐 저장한 이전 데이터가 남아 있습니다. "
+                       "GFA PC·모바일의 소재별 일일 원본 파일을 다시 업로드해주세요. "
+                       "재업로드 전 품목별·타겟팅별 합계는 정확하지 않을 수 있습니다.")
+        if "meta_api" in _old_sources:
+            st.warning("이 기간 메타에는 이전 방식으로 저장한 소재 데이터가 남아 있습니다. "
+                       "메타 탭 아래 '매체 관리자와 숫자가 다를 때'에서 "
+                       "선택 기간의 메타 소재를 다시 받아주세요.")
     # 등록 몇 일차인지 — 소재 운영 기준의 '10일' 판정에 쓴다
     try:
         _first_map, _last_map, _ch_max = _gc_spend_dates(ad_creative)
@@ -18636,7 +18696,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             _ac["adset"] = _ac["adset"].fillna("").astype(str)
                             _ac["adset"] = _ac["adset"].map(
                                 lambda v: "캠페인별 애셋그룹 " + v[len(GOOGLE_ASSET_KEY_PREFIX):]
-                                if v.startswith(GOOGLE_ASSET_KEY_PREFIX) else (v or "(합쳐 저장됨)"))
+                                if v.startswith(GOOGLE_ASSET_KEY_PREFIX)
+                                else (_creative_adset_label(v) or "(광고그룹 없음)"))
                             _by_c = (_ac.groupby(["campaign", "adset"], as_index=False)
                                      [["impressions", "clicks", "광고비(VAT 제외)", "cost_incl_vat"]].sum())
                             _by_d = (_ac.groupby("_d", as_index=False)
@@ -18645,10 +18706,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                     "clicks": "클릭", "cost_incl_vat": "광고비(VAT 포함·대시보드)"}
                             _fmt = {"노출": "{:,.0f}", "클릭": "{:,.0f}", "광고비(VAT 제외)": "{:,.0f}",
                                     "광고비(VAT 포함·대시보드)": "{:,.0f}"}
+                            _file_report = (_ac.get("source", pd.Series("", index=_ac.index))
+                                            .eq(MEDIA_REPORT_CREATIVE_SOURCE).all())
+                            _cost_note = ("GFA 원본 파일의 '총비용'은 VAT 포함으로 읽었습니다. "
+                                          "'광고비(VAT 포함·대시보드)' 열과 비교하세요."
+                                          if _file_report else
+                                          "매체 관리자 비용은 VAT 제외 기준이므로 VAT 제외 열과 비교하세요.")
                             st.caption(
-                                f"{start} ~ {end} · 매체 관리자 화면의 '비용'은 **VAT 제외** 금액이라 "
-                                "가운데 열과 비교하세요. 캠페인이 둘 이상 나오면 같은 이름의 소재가 "
-                                "다른 캠페인에도 있어서 대시보드가 합친 겁니다.")
+                                f"{start} ~ {end} · {_cost_note} "
+                                "같은 이름의 소재라도 캠페인·광고그룹별 실적을 구분해 표시합니다.")
                             st.dataframe(_by_c.rename(columns=_ren).style.format(_fmt),
                                          hide_index=True, use_container_width=True)
                             st.dataframe(_by_d.rename(columns=_ren).style.format(_fmt),
@@ -20450,3 +20516,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
