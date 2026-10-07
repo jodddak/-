@@ -9496,6 +9496,17 @@ def _loop_change_log(daily: pd.DataFrame, end: date, lookback: int = 7,
         if not sp.empty and "cost_incl_vat" in sp.columns:
             agg = sp.groupby("channel")["cost_incl_vat"].sum()
             spend_map = {_v4_canon_channel(k): float(v) for k, v in agg.items() if float(v) > 0}
+            # GA로 보는 게 맞지 않는 매체는 'UTM 확인' 경고 대상에서 뺀다.
+            #  · 외부몰(스마트스토어) — 자사몰 GA4에 원래 안 잡힌다
+            #  · 메타_제로라운지 — 방문이 Facebook / Facebook_Feed로 '메타' 줄에 잡힌다
+            _no_ga = {_v4_canon_channel(META_ZERO_CHANNEL)}
+            try:
+                for _, _r in media_master_frame(load_table("media_master")).iterrows():
+                    if str(_r.get("scope") or "") in NON_GA_SCOPES and str(_r.get("spend_channel") or "").strip():
+                        _no_ga.add(_v4_canon_channel(str(_r.get("spend_channel")).strip()))
+            except Exception:
+                pass
+            spend_map = {k: v for k, v in spend_map.items() if k not in _no_ga}
             chans |= set(spend_map)
     if universe:
         chans |= {_v4_canon_channel(c) for c in universe if str(c).strip()}
@@ -18488,10 +18499,33 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if level == "소재":
                 # UTM 없음 줄도 코멘트에 넣는다(돈은 나갔으니까)
                 for (ch_k, name_k), m in leftovers:
-                    _cr_items.append((str(m.get("name") or name_k), _cr_unmatched_label(m)[0], "",
-                                      float(m.get("cost", 0) or 0), 0.0, 0.0))
+                    if _media_basis:
+                        # 외부몰은 GA를 안 쓰는 탭이라 'UTM 없음'이 아니다 — 매체 신고
+                        # 구매·매출로 다른 줄과 같은 기준으로 판정해 코멘트에 넣는다.
+                        _nm = str(m.get("name") or name_k)
+                        _lr = pd.Series({"key": _nm, "target": str(m.get("_adset") or ""),
+                                         "campaign": m.get("campaign"), "sessions": 0.0,
+                                         "conv": 0.0, "rev": 0.0, "cre_name": _nm,
+                                         "cre_label": _nm, "cre_date": "", "creative": _nm})
+                        _summary_media = dict(m, _unmatched=True)
+                        _summary_onoff = cr_safe_onoff(
+                            label, _lr, _summary_media, _status_map, _last_map,
+                            _ch_max, _manual_status)
+                        _rl = cr_apply_onoff(
+                            cr_safe_rule(_lr, _summary_media, _avg_sp), _summary_onoff)
+                        _c = float(m.get("cost", 0) or 0)
+                        _mr = float(m.get("media_rev", 0) or 0)
+                        _cr_items.append((_nm, _rl[0], _rl[2], _c,
+                                          (_mr / _c * 100) if _c > 0 else 0.0,
+                                          float(m.get("media_conv", 0) or 0)))
+                    else:
+                        _cr_items.append((str(m.get("name") or name_k),
+                                          _cr_unmatched_label(m)[0], "",
+                                          float(m.get("cost", 0) or 0), 0.0, 0.0))
                 if _media_basis:
-                    _rv = sum(float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"])
+                    # GA에 못 붙은 줄(외부몰은 대부분)의 매체 신고 매출도 더한다 — 빼면 '매출 0원'으로 나왔다
+                    _rv = (sum(float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"])
+                           + sum(float((m or {}).get("media_rev", 0) or 0) for _, m in leftovers))
                 else:
                     _rv = tot_rev
                 _lines = cr_comment_lines(_cr_items, label + (f" ({view_lbl})" if view_lbl else ""),
