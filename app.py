@@ -10889,12 +10889,14 @@ def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
     return n
 
 
-def fetch_meta_creative(start: date, end: date) -> pd.DataFrame:
+def fetch_meta_creative(start: date, end: date, channels=None) -> pd.DataFrame:
     """메타 광고(ad) 단위 일별 실적. 광고 이름이 곧 소재명이다.
     자사몰·외부몰 계정을 둘 다 받아 매체명을 나눠 붙인다."""
     _META_FILTER_FALLBACK["used"] = False
     rows, errs = [], []
     for ch, acct in _meta_accounts():
+        if channels is not None and ch not in channels:
+            continue
         try:
             for d in _meta_insights(acct, {
                 "fields": ("campaign_name,adset_name,ad_name,spend,impressions,clicks,"
@@ -11688,7 +11690,7 @@ def _creative_last_dates(existing: pd.DataFrame) -> dict:
 
 
 def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
-                     progress=None, start: date = None, end: date = None):
+                     progress=None, start: date = None, end: date = None, meta_channels=None):
     """소재 단위 실적을 매체에서 받아 ad_creative_daily에 upsert한다.
 
     시작일은 **매체별로** 따로 잡는다. 예전엔 표 전체의 최신 날짜 하나로 잡아서, 메타가 어제까지
@@ -11708,6 +11710,8 @@ def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
     for label, fn in AD_CREATIVE_FETCHERS:
         if only and label not in only:
             continue
+        if label == "메타" and meta_channels is not None:
+            fn = lambda s, e: fetch_meta_creative(s, e, channels=meta_channels)
         s0 = _start_for(label)
         if s0 > end:
             continue
@@ -17018,6 +17022,48 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     return buf.getvalue()
 
 
+def _render_meta_refetch_button(label, start, end, existing, key):
+    """Always available at the top of a Meta tab, even without matched creatives."""
+    channel = {META_OWN_TAB: META_CHANNEL, META_EXT_TAB: META_EXT_CHANNEL,
+               META_ZERO_TAB: META_ZERO_CHANNEL}.get(label)
+    if channel is None:
+        return
+    fetch_end = min(end, kst_today() - timedelta(days=1))
+    disabled = start > fetch_end
+    clicked = st.button(
+        f"🔄 {label} 소재 다시 받기 ({start} ~ {end})",
+        key=key, disabled=disabled)
+    st.caption("현재 탭의 선택 기간 데이터를 캠페인·광고그룹별로 다시 받습니다. 오늘 데이터는 제외합니다.")
+    if not clicked:
+        return
+    st.session_state.pop("meta_account_errors", None)
+    try:
+        with st.status(f"{label} 소재 다시 받는 중...", expanded=True) as status:
+            count, saved, errors = sync_ad_creative(
+                existing, only=["메타"], unlimited=True, progress=st.write,
+                start=start, end=fetch_end, meta_channels=[channel])
+            account_errors = st.session_state.get("meta_account_errors") or {}
+            errors = {**errors, **account_errors}
+            if errors:
+                status.update(label="다시 받지 못했습니다 — 아래 오류를 확인해주세요.", state="error")
+            elif not count:
+                status.update(label="이 기간에 받아온 소재 데이터가 없습니다.", state="complete")
+            else:
+                status.update(label=f"완료 — {count:,}행 저장", state="complete")
+    except Exception as exc:
+        st.error(f"{label} 소재 다시 받기 실패 — {str(exc)[:300]}")
+        return
+    if errors:
+        for source, error in errors.items():
+            st.error(f"{source} — {str(error)[:300]}")
+        return
+    if not count:
+        st.warning("선택 기간의 집행 여부와 메타 계정 연결을 확인해주세요.")
+        return
+    st.cache_data.clear()
+    st.rerun()
+
+
 def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             utm_map: pd.DataFrame = None,
                             creative_perf: pd.DataFrame = None,
@@ -17955,6 +18001,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     for ti, label in enumerate(tab_labels):
         with tabs[ti]:
+            _render_meta_refetch_button(
+                label, start, end, ad_creative, key=f"gc_meta_refetch_top_{ti}")
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
             keep = [label]
