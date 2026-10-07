@@ -5935,6 +5935,93 @@ def _render_budget_box_table(scope_label: str, b_scope: pd.DataFrame, years: lis
     return channel_counts
 
 
+
+# ──────────────────────────────────────────────────────────────
+# 외부몰(스마트스토어) 예산 — 2026-10-06 형이 준 표 그대로 옮긴 값 (원 단위)
+# '◆26년 월별 예산 정리' 파서는 아직 자사몰만 읽어서(외부몰 섹션은 구조가 복잡해 보류),
+# 외부몰은 여기 상수로 따로 둔다. 표가 바뀌면 이 dict만 고치면 된다.
+# 1~9월은 실집행(쇼핑검색 7~9월은 검색광고 API 광고비와 일치 확인), 10~12월은 계획.
+# ──────────────────────────────────────────────────────────────
+EXT_MALL_BUDGET_YEAR = 2026
+EXT_MALL_BUDGET_ROWS = [
+    # (구분, 매체, {월: 금액})
+    ("네이버 맨즈탭", "네이버 맨즈탭", {1: 5000000, 2: 5000000, 3: 8000000, 4: 11000000,
+                                         5: 12300000, 9: 7000000}),
+    ("네이버 맨즈 외", "네이버 쇼핑검색광고", {1: 2163590, 2: 2191332, 3: 3494134, 4: 3262360,
+                                              5: 3257953, 6: 3275608, 7: 2282036, 8: 2163093,
+                                              9: 3192412, 10: 4400000, 11: 5500000, 12: 3300000}),
+    ("네이버 맨즈 외", "네이버 GFA (신규)", {3: 852685, 4: 2360518, 5: 2289694, 9: 1045524,
+                                            10: 3300000, 11: 3500000, 12: 2224264}),
+    ("네이버 맨즈 외", "메타 (신규)", {1: 2436213, 2: 2159225, 9: 930310, 10: 3431754,
+                                      11: 3500000, 12: 2200000}),
+    ("네이버 맨즈 외", "기타", {1: 35377, 2: 29439, 3: 28459}),
+]
+EXT_MALL_MONTH_NOTES = {9: "맨즈 1번", 10: "맨즈 종료", 11: "맨즈 종료", 12: "맨즈 종료"}
+EXT_MALL_PLAN_FROM_MONTH = 10  # 이 달부터는 계획값
+
+
+def render_ext_mall_budget_table():
+    """외부몰 매체별 월 예산/집행 표. 원본 엑셀처럼 구분 열을 rowspan으로 병합하고,
+    월 헤더 아래에 맨즈탭 운영 메모, 맨 아래 TOTAL 행을 둔다."""
+    year = EXT_MALL_BUDGET_YEAR
+    today = datetime.utcnow() + timedelta(hours=9)
+    months = range(1, 13)
+
+    def fmt(v):
+        return f"{v:,.0f}" if v else "-"
+
+    plan_style = ' style="background:#fff8e1;"'
+
+    def month_td(m, v, strong=False):
+        st_ = plan_style if m >= EXT_MALL_PLAN_FROM_MONTH else ""
+        val = f"<b>{fmt(v)}</b>" if strong else fmt(v)
+        return f"<td{st_}>{val}</td>"
+
+    head_months = ""
+    for m in months:
+        note = EXT_MALL_MONTH_NOTES.get(m)
+        note_html = (f'<br><span style="color:#d93025;font-weight:700;">{note}</span>' if note else "")
+        tag = ' <span style="font-weight:400;">(계획)</span>' if m >= EXT_MALL_PLAN_FROM_MONTH else ""
+        head_months += f"<th>{m}월{tag}{note_html}</th>"
+
+    html = ['<div class="stco-budget-wrap"><table class="stco-budget-table"><thead><tr>'
+            f"<th>구분</th><th>매체</th><th>합계(연간)</th><th>당월 누계</th>{head_months}"
+            "</tr></thead><tbody>"]
+
+    cutoff = today.month if year == today.year else 12
+    groups = []
+    for g, ch, vals in EXT_MALL_BUDGET_ROWS:
+        if groups and groups[-1][0] == g:
+            groups[-1][1].append((ch, vals))
+        else:
+            groups.append((g, [(ch, vals)]))
+
+    month_tot = {m: 0.0 for m in months}
+    for g, items in groups:
+        for i, (ch, vals) in enumerate(items):
+            total = sum(vals.values())
+            mtd = sum(v for m, v in vals.items() if m <= cutoff)
+            for m, v in vals.items():
+                month_tot[m] += v
+            g_cell = f'<td rowspan="{len(items)}">{g}</td>' if i == 0 else ""
+            cells = "".join(month_td(m, vals.get(m)) for m in months)
+            html.append(f'<tr>{g_cell}<td>{ch}</td><td class="stco-budget-strong">{fmt(total)}</td>'
+                        f"<td>{fmt(mtd)}</td>{cells}</tr>")
+
+    grand = sum(month_tot.values())
+    grand_mtd = sum(v for m, v in month_tot.items() if m <= cutoff)
+    cells = "".join(f'<td class="stco-budget-strong">{fmt(month_tot[m])}</td>' for m in months)
+    html.append(f'<tr><td colspan="2" class="stco-budget-strong">TOTAL</td>'
+                f'<td class="stco-budget-strong">{fmt(grand)}</td>'
+                f'<td class="stco-budget-strong">{fmt(grand_mtd)}</td>{cells}</tr>')
+    html.append("</tbody></table></div>")
+
+    st.markdown(f"##### 외부몰 현황 ({year}년, 스마트스토어)")
+    st.markdown(BUDGET_TABLE_CSS + "".join(html), unsafe_allow_html=True)
+    st.caption(f"1~9월은 실집행, {EXT_MALL_PLAN_FROM_MONTH}~12월(노란 칸)은 계획입니다. "
+               "외부몰 값은 예산 파일 업로드가 아니라 코드 안 표(EXT_MALL_BUDGET_ROWS)에서 읽습니다.")
+
+
 def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
     st.subheader("💰 예산 현황")
     st.caption(
@@ -5946,12 +6033,14 @@ def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
     )
     if budget is None or budget.empty:
         st.info("아직 예산 데이터가 없습니다. 왼쪽 사이드바 '③ 연간 예산 파일 업로드'에서 파일을 올려주세요.")
+        render_ext_mall_budget_table()
         return
 
     today = datetime.utcnow() + timedelta(hours=9)
     scopes_present = [s for s in BUDGET_SCOPE_TITLES if s in budget["scope"].unique()]
     if not scopes_present:
         st.info("예산 데이터를 찾지 못했습니다. 왼쪽 사이드바 업로드 화면의 진단 정보를 확인해주세요.")
+        render_ext_mall_budget_table()
         return
 
     for scope in scopes_present:
@@ -5964,6 +6053,9 @@ def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
         diag = " · ".join(f"{y}년 매체 {n}개" for y, n in channel_counts.items())
         st.caption(f"매체 세부내역 인식: {diag}")
         st.markdown("---")
+
+    render_ext_mall_budget_table()
+    st.markdown("---")
 
     st.caption(
         "'매체 세부내역' 매체명은 원본 파일 표기 그대로이며, 다른 페이지(매체별 성과 등)의 리포트 "
