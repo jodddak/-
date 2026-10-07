@@ -17074,6 +17074,46 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     return buf.getvalue()
 
 
+def _gc_inline_onoff_row(row_html, index, record):
+    import html
+    status = str(record.get("ON/OFF") or "")
+    options = '<option value="">' + html.escape(status or "미확인") + '</option>'
+    options += ''.join(f'<option value="{v}" {"selected" if status == v else ""}>{v}</option>'
+                       for v in ("ON", "OFF"))
+    control = (f'<select class="gc-inline-onoff" data-row="{index}" '
+               f'aria-label="{html.escape(str(record.get("이름") or ""), quote=True)} ON/OFF" '
+               f'style="font-size:11px;font-weight:800;border:1px solid #ddd;border-radius:8px;'
+               f'padding:2px 5px;background:{"#E4F6DC" if status.startswith("ON") else "#EFEEE8"};margin-right:6px">'
+               + options + '</select>')
+    if re.search(r'<span class="gc-onoff [^"]*"[^>]*>.*?</span>', row_html):
+        return re.sub(r'<span class="gc-onoff [^"]*"[^>]*>.*?</span>', lambda m: control,
+                      row_html, count=1)
+    return row_html.replace('<span class="fv4-chip ', control + '<span class="fv4-chip ', 1)
+
+
+@st.cache_resource
+def _gc_status_component():
+    import tempfile
+    from pathlib import Path
+    folder = Path(tempfile.mkdtemp(prefix="stco_onoff_"))
+    page = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><div id="root"></div>
+<script>
+function send(type, data){parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
+window.addEventListener('message',function(event){
+ if(event.data.type!=='streamlit:render')return;
+ var args=event.data.args, root=document.getElementById('root');root.innerHTML=args.html;
+ root.querySelectorAll('script').forEach(function(old){var sc=document.createElement('script');sc.textContent=old.textContent;old.replaceWith(sc);});
+ root.querySelectorAll('.gc-inline-onoff').forEach(function(el){el.addEventListener('change',function(){
+  if(!el.value)return;el.disabled=true;
+  send('streamlit:setComponentValue',{value:{row:Number(el.dataset.row),identity:args.identities[Number(el.dataset.row)],status:el.value,nonce:Date.now()+'-'+Math.random()},dataType:'json'});
+ });});
+ send('streamlit:setFrameHeight',{height:args.height});
+});send('streamlit:componentReady',{apiVersion:1});
+</script></body></html>"""
+    (folder / 'index.html').write_text(page, encoding='utf-8')
+    return st.components.v1.declare_component("stco_inline_onoff", path=str(folder))
+
+
 def _render_gfa_inventory_form(label, start, end, key):
     if not label.startswith("네이버 GFA"):
         return
@@ -18685,6 +18725,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
                          f'<span class="fv4-ar">&#8645;</span></th>'
                          for i, h in enumerate(_head))
+            if level == "소재" and label in GFA_TABS and recs:
+                body = [_gc_inline_onoff_row(h, i, recs[i]) for i, h in enumerate(body)]
             table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
                      f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
 
@@ -18744,65 +18786,33 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 표 위에 둔다. 기준 설명·차이 안내만 표 아래로 내렸다.
             # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
             # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
-            if level == "소재" and label in GFA_TABS and recs:
-                with st.expander("🔘 GFA 소재 ON/OFF 직접 선택 · 저장"):
-                    st.markdown("**ON/OFF를 선택한 뒤 변경 저장을 눌러주세요.**")
-                    st.caption(
-                        "GFA는 상태를 API로 못 받아서, 여기서 체크한 값을 씁니다. "
-                        "**바꾼 것만** 고르고 저장하세요 — 비워두면 '미확인'으로 둡니다. "
-                        "타겟팅까지 같이 저장돼서, 같은 소재라도 방문자180일만 끈 경우를 구분합니다.")
-                    _seen, _er = set(), []
-                    for _rc in recs:
-                        _nm, _tg = str(_rc.get("이름") or ""), str(_rc.get("타겟팅") or "")
-                        if not _nm or _nm == "TOTAL" or (_nm, _tg) in _seen:
-                            continue
-                        _seen.add((_nm, _tg))
-                        _cur = _manual_status.get((label, _creative_image_key(_nm), _tg)) \
-                            or _manual_status.get((label, _creative_image_key(_nm), ""))
-                        _er.append({"소재": _nm, "캠페인": _rc.get("캠페인") or "", "타겟팅": _tg,
-                                    "광고비": float(_rc.get("광고비(VAT+)") or 0),
-                                    "판정": _rc.get("판정") or "",
-                                    "ON/OFF": (_cur[0] if _cur else ""),
-                                    "_orig": (_cur[0] if _cur else "")})
-                    _edf = pd.DataFrame(_er).sort_values("광고비", ascending=False).reset_index(drop=True)
-                    _ed = st.data_editor(
-                        _edf.drop(columns=["_orig"]), hide_index=True, use_container_width=True,
-                        key=f"gc_manual_{ti}", disabled=[c for c in _edf.columns if c not in ("ON/OFF", "_orig")],
-                        column_config={
-                            "광고비": st.column_config.NumberColumn("광고비(VAT+)", format=ST_NUM_COMMA),
-                            "ON/OFF": st.column_config.SelectboxColumn(
-                                "ON/OFF", options=["", "ON", "OFF"],
-                                help="관리자 화면 상태와 같게 골라주세요. 비우면 미확인"),
-                        })
-                    if st.button("ON/OFF 변경 저장", key=f"gc_manual_save_{ti}", type="primary"):
-                        _chg = _ed.assign(_orig=_edf["_orig"].values)
-                        _chg = _chg[_chg["ON/OFF"].fillna("") != _chg["_orig"].fillna("")]
-                        if _chg.empty:
-                            st.info("바뀐 게 없습니다.")
-                        else:
-                            _now = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
-                            _save = pd.DataFrame({
-                                "channel": label, "creative": _chg["소재"].values,
-                                "target": _chg["타겟팅"].fillna("").values,
-                                "status": _chg["ON/OFF"].fillna("").values,
-                                "updated_at": _now})
-                            n = save_table("creative_status_manual", _save,
-                                           "channel,creative,target", "직접 체크")
-                            if n:
-                                st.cache_data.clear()
-                                st.rerun()
-                            else:
-                                st.error(
-                                    "저장하지 못했습니다 — Supabase에 표가 아직 없으면 "
-                                    "같이 드린 `creative_status_manual.sql`을 SQL Editor에서 "
-                                    "한 번 실행해주세요.")
             if cmt:
                 st.markdown(cmt, unsafe_allow_html=True)
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
             if not _media_basis:
                 _gap_panel(label, tot_rev, tot_conv)
-            st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
-                                  scrolling=False)
+            if level == "소재" and label in GFA_TABS and recs:
+                event = _gc_status_component()(html=card,
+                    identities=[[str(r.get("이름") or ""), str(r.get("타겟팅") or "")] for r in recs],
+                    height=min(14000, 288 + row_h * len(body)), key=f"gc_inline_status_{ti}", default=None)
+                if isinstance(event, dict) and event.get("nonce") != st.session_state.get(f"gc_status_event_{ti}"):
+                    st.session_state[f"gc_status_event_{ti}"] = event.get("nonce")
+                    index = event.get("row")
+                    status = event.get("status")
+                    if (isinstance(index, int) and 0 <= index < len(recs) and status in ("ON", "OFF")
+                            and event.get("identity") == [str(recs[index].get("이름") or ""),
+                                                          str(recs[index].get("타겟팅") or "")]):
+                        record = recs[index]
+                        frame = pd.DataFrame([dict(channel=label, creative=record.get("이름"),
+                            target=record.get("타겟팅") or "", status=status,
+                            updated_at=(datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M"))])
+                        if save_table("creative_status_manual", frame, "channel,creative,target", "소재 옆 ON/OFF 선택"):
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error("ON/OFF 저장에 실패했습니다. 저장소 연결과 creative_status_manual 테이블을 확인해주세요.")
+            else:
+                st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)), scrolling=False)
 
             # ── 표 아래 ── 경고·안내 → 읽는 법
             for _kind, _txt in notes:
