@@ -16775,13 +16775,30 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # (표 전체의 최신 날짜만 보면 메타가 최신이라는 이유로 멈춘 크리테오를 못 잡는다)
     _l1 = _last(cre)
     _media_last = _creative_last_dates(ad_creative)
+    # 한 fetcher가 계정 여러 개를 받는 경우(메타: 자사몰·외부몰·제로라운지)는 계정별 매체도 본다.
+    # 예전엔 '메타'(STCO_AD) 날짜만 봐서, 새로 붙인 제로라운지가 한 번도 안 받아졌는데도
+    # '메타 최신'으로 보고 자동 동기화를 건너뛰었다.
+    def _sub_lag(lab):
+        for _c in FETCHER_CHANNELS.get(lab, []):
+            _k = _v4_canon_channel(_c)
+            if _k == _v4_canon_channel(lab):
+                continue
+            _d = _media_last.get(_k)
+            if _d is None or _d < _yday - timedelta(days=2):
+                return _c
+        return None
+    _sub_missing = {lab: _sub_lag(lab) for lab, _ in AD_CREATIVE_FETCHERS if _sub_lag(lab)}
     _stale = [lab for lab, _ in AD_CREATIVE_FETCHERS
-              if _media_last.get(lab) is None or _media_last[lab] < _yday]
+              if _media_last.get(lab) is None or _media_last[lab] < _yday
+              or lab in _sub_missing]
     with c1:
         st.caption(
             "소재 데이터 최신 날짜 — GA4 " + (str(_l1) if _l1 else "없음") + " · "
             + " · ".join(f"{lab} {_media_last[lab]}" if _media_last.get(lab) else f"{lab} 없음"
                          for lab, _ in AD_CREATIVE_FETCHERS)
+            + "".join(f" · {_c} " + (str(_media_last.get(_v4_canon_channel(_c)))
+                                     if _media_last.get(_v4_canon_channel(_c)) else "없음")
+                      for _c in _sub_missing.values())
             + (f"  ⚠️ {', '.join(_stale)} 늦음" if _stale else "  ✅ 모두 어제까지")
         )
     if "gc_synced" not in st.session_state and get_ga4_client()[0] is not None:
@@ -16838,10 +16855,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     def _never_panel():
         # 자동 동기화는 세션당 한 번뿐이라, 실패한 매체를 다시 받으려면 버튼이 필요하다.
         _never = [lab for lab, _ in AD_CREATIVE_FETCHERS if _media_last.get(lab) is None]
+        # 계정별 매체(메타_제로라운지 등)가 한 번도 안 들어온 경우도 다시 받기 대상이다
+        _never += [lab for lab, _c in _sub_missing.items()
+                   if lab not in _never and _media_last.get(_v4_canon_channel(_c)) is None]
         if not _never:
             return
+        _who = [(_sub_missing.get(l) if (_media_last.get(l) is not None and _sub_missing.get(l))
+                 else l) for l in _never]
         st.warning(
-            f"**{', '.join(_never)}** 소재 실적이 한 건도 저장돼 있지 않습니다. "
+            f"**{', '.join(_who)}** 소재 실적이 한 건도 저장돼 있지 않습니다. "
             "그 매체 소재는 대행사 리포트로만 채워지고 있어 최근 소재가 빠질 수 있습니다."
         )
         if st.button(f"🔁 {', '.join(_never)} 소재만 다시 받기 (원인까지 표시)",
@@ -17573,6 +17595,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             keep = [label]
             ch_keep = keep
             rows = rows_all[rows_all["channel"].isin(keep)].copy()
+
+            # 메타 계정(자사몰·외부몰·제로라운지) 탭인데 매체 실적이 한 줄도 없으면
+            # 그 자리에서 바로 다시 받게 한다 — 새 계정을 붙인 직후나 토큰 권한을 고친 직후.
+            if (label in (META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB)
+                    and not any(k[0] == label for k in media_map)):
+                st.warning(f"**{label}** 노출·클릭·광고비(메타 API)가 이 기간에 한 줄도 없습니다. "
+                           "토큰 권한을 고쳤다면 아래 버튼으로 최근 30일을 다시 받아주세요.")
+                if st.button("🔁 메타 소재 최근 30일 다시 받기", key=f"gc_meta_refill_{ti}"):
+                    st.session_state.pop("meta_account_errors", None)   # 지난 실패 기록은 지운다
+                    with st.status("메타 소재를 받는 중...", expanded=True) as _st4:
+                        _n, _sv, _er = sync_ad_creative(
+                            ad_creative, only=["메타"], unlimited=True, progress=st.write,
+                            start=kst_today() - timedelta(days=AD_SPEND_LOOKBACK_DAYS),
+                            end=kst_today() - timedelta(days=1))
+                        _st4.update(label=f"완료 — {_n:,}행", state="complete")
+                    _acct_err = st.session_state.get("meta_account_errors") or {}
+                    if _er or _acct_err:
+                        for _k, _v in {**_er, **_acct_err}.items():
+                            st.error(f"**{_k}** — {str(_v)[:300]}")
+                    else:
+                        st.cache_data.clear()
+                        st.rerun()
 
             # ── 매체 실적은 **필터(신규/리타·품목)를 걸기 전에** 붙인다 ──
             # 필터 후에 붙이면, 두 타겟팅에 걸친 소재가 한 줄만 남아 광고비를 100% 받는다
