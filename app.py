@@ -15598,7 +15598,7 @@ def _gc_filter_media(m, row_seg, row_item, seg, item):
     # The metrics were filtered, but the original campaign-name list used to
     # remain unchanged, showing excluded campaigns beside the surviving row.
     visible_campaigns = [c for c, values in kept.items()
-                         if str(c).strip() and any(float(values.get(f, 0) or 0) for f in _GC_MF)]
+                         if str(c).strip()]
     return dict(m, **agg, _by_campaign=kept,
                 campaigns=visible_campaigns,
                 campaign=visible_campaigns[0] if visible_campaigns else ""), frac
@@ -15663,7 +15663,7 @@ def _gc_filter_left(left, seg, item, row_of):
     for k, v in left:
         lr = row_of(v, k)
         mf, _ = _gc_filter_media(v, _gc_target_group(lr), _gc_item_group(lr), seg, item)
-        if mf and any(float(mf.get(f, 0) or 0) for f in _GC_MF):
+        if mf is not None:
             out.append((k, mf))
     return out
 
@@ -17028,6 +17028,35 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     return buf.getvalue()
 
 
+def _render_gfa_inventory_form(label, start, end, key):
+    if not label.startswith("네이버 GFA"):
+        return
+    with st.expander("➕ 보고서에 없는 신규 소재 등록 (실적 0)"):
+        st.caption("GFA는 업로드한 보고서의 소재만 가져옵니다. 아직 노출되지 않아 보고서에 없는 소재는 여기서 등록하세요. 광고비·클릭 합계는 바뀌지 않습니다. 이미 집행된 소재는 일별 보고서를 다시 업로드하세요.")
+        with st.form(key):
+            campaign = st.text_input("캠페인 이름", key=key + "_campaign")
+            adset = st.text_input("광고 그룹 이름", key=key + "_adset")
+            registered = st.date_input("소재 등록일", value=end, key=key + "_date")
+            names = st.text_area("소재 이름 (한 줄에 하나씩)", key=key + "_names")
+            submitted = st.form_submit_button("신규 소재 등록")
+        if submitted:
+            creatives = list(dict.fromkeys(n.strip() for n in names.splitlines() if n.strip()))
+            if not campaign.strip() or not adset.strip() or not creatives:
+                st.error("캠페인·광고 그룹·소재 이름을 모두 입력해주세요.")
+                return
+            frame = pd.DataFrame([dict(report_date=str(registered), channel=label,
+                campaign=campaign.strip(), adset=_campaign_adset_key(campaign.strip(), adset.strip()),
+                creative=name, source="creative_inventory", impressions=0, clicks=0,
+                cost_incl_vat=0, conversions=0, revenue=0) for name in creatives])
+            # Inventory is separate from performance; never replace spend or purge report rows.
+            n = save_table("ad_creative_daily", frame, AD_CREATIVE_KEY_ADSET, "신규 소재 등록")
+            if n:
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("신규 소재 저장에 실패했습니다. 저장소 연결과 광고 그룹 열을 확인해주세요.")
+
+
 def _render_meta_refetch_button(label, start, end, existing, key):
     """Always available at the top of a Meta tab, even without matched creatives."""
     channel = {META_OWN_TAB: META_CHANNEL, META_EXT_TAB: META_EXT_CHANNEL,
@@ -18007,6 +18036,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     for ti, label in enumerate(tab_labels):
         with tabs[ti]:
+            _render_gfa_inventory_form(label, start, end, key=f"gc_inventory_{ti}")
             _render_meta_refetch_button(
                 label, start, end, ad_creative, key=f"gc_meta_refetch_top_{ti}")
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
@@ -18070,8 +18100,6 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 - sum(float(x.get(f, 0) or 0) for x in _bt.values())) for f in _MF2}
                 del media_map[_k]
                 for _a, _x in _bt.items():
-                    if not any(float(_x.get(f, 0) or 0) for f in _MF2):
-                        continue
                     media_map[(_k[0], f"{_k[1]}__{_a}")] = dict(
                         {f: float(_x.get(f, 0) or 0) for f in _MF2},
                         channel=_v.get("channel"), name=_v.get("name"), src=_v.get("src"),
