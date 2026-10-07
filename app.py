@@ -15666,6 +15666,32 @@ def _gc_filter_rows(rows: pd.DataFrame, seg, item) -> pd.DataFrame:
     return out
 
 
+def _gc_detail_target_label(row):
+    target = str(row.get("target") or "").strip()
+    media = row.get("_media")
+    if target in ("", "(미설정)", "(규칙 외)", "(타겟팅 없음)"):
+        target = str((media or {}).get("_adset") or "").strip() if isinstance(media, dict) else ""
+    if not target:
+        return "그룹 미확인"
+    norm = _gc_tgt_norm(target)
+    pretty = {"패션관심타겟": "패션 관심타겟", "쇼핑관심타겟": "쇼핑 관심타겟",
+              "방문자180일": "방문자 180일"}.get(norm, target)
+    seg = _gc_target_group(dict(target=target, campaign=row.get("campaign") or ""))
+    suffix = "리타겟팅" if seg == GC_SEG_RT else "신규"
+    return f"{pretty} ({suffix})"
+
+
+def _gc_gfa_target_matches(target, choice):
+    if choice == "전체":
+        return True
+    text = _gc_tgt_norm(target)
+    words = {"패션 관심타겟 (신규)": "패션관심",
+             "쇼핑 관심타겟 (신규)": "쇼핑관심",
+             "방문자 180일 (리타겟팅)": "방문자180일"}
+    word = words.get(choice)
+    return bool(word and word in text)
+
+
 def _gc_filter_left(left, seg, item, row_of):
     """GA에 못 붙은 매체 줄에 같은 필터를 건다. [(키, 걸러낸 실적)]."""
     if seg == GC_SEG_ALL and item == GC_ITEM_ALL:
@@ -18183,13 +18209,44 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                       key=f"gc_item_{ti}", counts=_item_cnt)
             # 필터는 **캠페인 단위**로 건다 — 줄에 섞인 다른 캠페인 몫은 빼고 남긴다
             # (광고 관리자의 캠페인 합계와 맞게).
+            _detail_pool_rows = rows.copy()
             if not rows.empty:
                 rows = _gc_filter_rows(rows, seg, item)
             _left_f = _gc_filter_left(_left_all, seg, item, _left_row)
 
+            # Show actual ad-group choices for every media tab, including Meta.
+            detail_target = "전체"
+            def _detail_left_label(v, k):
+                return _gc_detail_target_label(dict(
+                    target=v.get("_adset") or "", campaign=v.get("campaign") or ""))
+            _groups = {_gc_detail_target_label(r) for _, r in _detail_pool_rows.iterrows()}
+            _groups.update(_detail_left_label(v, k) for k, v in _left_all)
+            if _groups - {"그룹 미확인"}:
+                _target_options = ["전체"] + sorted(_groups,
+                    key=lambda x: ("리타겟팅" in x, x == "그룹 미확인", x))
+                _detail_counts = {choice: (
+                    sum(_gc_detail_target_label(r) == choice for _, r in rows.iterrows())
+                    + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
+                    for choice in _target_options[1:]}
+                _tc1, _tc2 = st.columns([0.09, 0.91])
+                _tc1.markdown('<div class="gc-flt-lbl">세부 타겟팅</div>', unsafe_allow_html=True)
+                with _tc2:
+                    _detail_key = f"gc_detail_target_{ti}"
+                    if st.session_state.get(_detail_key) not in _target_options:
+                        st.session_state.pop(_detail_key, None)
+                    detail_target = _gc_choice("세부 타겟팅", _target_options,
+                                               key=_detail_key, counts=_detail_counts)
+                if detail_target != "전체":
+                    if not rows.empty:
+                        rows = rows[rows.apply(
+                            lambda r: _gc_detail_target_label(r) == detail_target, axis=1)].copy()
+                    _left_f = [(k, v) for k, v in _left_f
+                               if _detail_left_label(v, k) == detail_target]
+
             # 지금 보고 있는 조건 — 배지·제목·엑셀 시트에 그대로 쓴다
             _view_bits = [b for b in (seg if seg != GC_SEG_ALL else "",
-                                      item if item != GC_ITEM_ALL else "") if b]
+                                      item if item != GC_ITEM_ALL else "",
+                                      detail_target if detail_target != "전체" else "") if b]
             view_lbl = " · ".join(_view_bits)
             if _view_bits and rows.empty and not _left_f:
                 st.info(f"이 매체에 **{view_lbl}** 소재가 없습니다.")
@@ -18688,7 +18745,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
             # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
             if level == "소재" and label in GFA_TABS and recs:
-                with st.expander("🔘 GFA 소재 ON/OFF 직접 체크 — 표의 OFF?/ON? 를 확정하려면 여기서"):
+                with st.container():
+                    st.markdown("**GFA 소재 성과 · ON/OFF 직접 선택**")
                     st.caption(
                         "GFA는 상태를 API로 못 받아서, 여기서 체크한 값을 씁니다. "
                         "**바꾼 것만** 고르고 저장하세요 — 비워두면 '미확인'으로 둡니다. "
@@ -18701,22 +18759,32 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         _seen.add((_nm, _tg))
                         _cur = _manual_status.get((label, _creative_image_key(_nm), _tg)) \
                             or _manual_status.get((label, _creative_image_key(_nm), ""))
-                        _er.append({"소재": _nm, "타겟팅": _tg,
+                        _er.append({"소재": _nm, "캠페인": _rc.get("캠페인") or "", "타겟팅": _tg,
+                                    "이미지": _rc.get("_img"),
+                                    "노출": float(_rc.get("노출") or 0),
+                                    "클릭": float(_rc.get("클릭") or 0),
                                     "광고비": float(_rc.get("광고비(VAT+)") or 0),
+                                    "구매": float(_rc.get("구매") or 0),
+                                    "매출": float(_rc.get("매출") or 0),
+                                    "ROAS(%)": _rc.get("ROAS(%)"),
                                     "판정": _rc.get("판정") or "",
                                     "ON/OFF": (_cur[0] if _cur else ""),
                                     "_orig": (_cur[0] if _cur else "")})
-                    _edf = pd.DataFrame(_er).sort_values("광고비", ascending=False)
+                    _edf = pd.DataFrame(_er).sort_values("광고비", ascending=False).reset_index(drop=True)
                     _ed = st.data_editor(
                         _edf.drop(columns=["_orig"]), hide_index=True, use_container_width=True,
-                        key=f"gc_manual_{ti}", disabled=["소재", "타겟팅", "광고비", "판정"],
+                        key=f"gc_manual_{ti}", disabled=[c for c in _edf.columns if c not in ("ON/OFF", "_orig")],
+                        row_height=90,
                         column_config={
-                            "광고비": st.column_config.NumberColumn("광고비", format=ST_NUM_COMMA),
+                            "이미지": st.column_config.ImageColumn("소재 이미지"),
+                            "광고비": st.column_config.NumberColumn("광고비(VAT+)", format=ST_NUM_COMMA),
+                            "매출": st.column_config.NumberColumn("매출", format=ST_NUM_COMMA),
+                            "ROAS(%)": st.column_config.NumberColumn("ROAS(%)", format="%.0f%%"),
                             "ON/OFF": st.column_config.SelectboxColumn(
                                 "ON/OFF", options=["", "ON", "OFF"],
                                 help="관리자 화면 상태와 같게 골라주세요. 비우면 미확인"),
                         })
-                    if st.button("저장", key=f"gc_manual_save_{ti}", type="primary"):
+                    if st.button("ON/OFF 변경 저장", key=f"gc_manual_save_{ti}", type="primary"):
                         _chg = _ed.assign(_orig=_edf["_orig"].values)
                         _chg = _chg[_chg["ON/OFF"].fillna("") != _chg["_orig"].fillna("")]
                         if _chg.empty:
@@ -18743,8 +18811,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
             if not _media_basis:
                 _gap_panel(label, tot_rev, tot_conv)
-            st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
-                                  scrolling=False)
+            if not (level == "소재" and label in GFA_TABS and recs):
+                st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
+                                      scrolling=False)
+            else:
+                st.caption(f"TOTAL · 광고비 {tot_cost:,.0f}원 · "
+                           f"매출 {float(tot_media.get('media_rev', tot_r.get('rev', 0)) or 0):,.0f}원")
 
             # ── 표 아래 ── 경고·안내 → 읽는 법
             for _kind, _txt in notes:
