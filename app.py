@@ -2930,19 +2930,26 @@ GFA_EXT_TABS = {GFA_PC_EXT, GFA_MO_EXT}
 # 메타도 자사몰/외부몰을 다른 광고 계정으로 돌린다(STCO_AD / STCO_스마트스토어).
 META_OWN_TAB = "메타 (자사몰)"
 META_EXT_TAB = "메타 (외부몰)"
-# 제로라운지 — 메타 광고 계정 STCO_코디갤러리(2056061161396388). STCO 자사몰 GA4로 안 들어오는
-# 별도 몰이라 외부몰처럼 구매·매출을 '매체(메타)가 신고한 값'으로 본다.
+# 제로라운지 — 메타 광고 계정 STCO_코디갤러리(2056061161396388).
+# 랜딩은 STCO 자사몰이고 UTM이 STCO 메타와 똑같이 Facebook / Facebook_Feed로 나간다.
+# 그래서 소스/매체로는 못 가르고 **utm_campaign=제로라운지**로 가른다(GA 기준 매출).
 META_ZERO_TAB = "메타 (제로라운지)"
 ZERO_SCOPE = "제로라운지"
+ZERO_MEDIA = "메타_자사몰"          # 채널 성과의 매체명([제로라운지] 메타_자사몰)
 # 구매·매출이 STCO 자사몰 GA4에 안 잡히는 구분 — 매체 신고값을 쓰고 ROAS 판단에서 뺀다.
-NON_GA_SCOPES = ("외부몰", ZERO_SCOPE)
+NON_GA_SCOPES = ("외부몰",)
+
+
+def _is_zero_campaign(campaign) -> bool:
+    s = str(campaign or "").lower().replace(" ", "")
+    return ("제로라운지" in s) or ("zerolounge" in s)
 
 # 맨즈탭도 자사몰/외부몰을 따로 돌린다(외부몰은 2026-09 기준 아직 미집행, 곧 시작 예정).
 MANS_OWN_TAB = "네이버 맨즈탭 (자사몰)"
 MANS_EXT_TAB = "네이버 맨즈탭 (외부몰)"
 
 # 외부몰 탭 — GA4가 못 보는 영역이라 구매·매출을 '매체가 신고한 값'으로 본다.
-EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB, MANS_EXT_TAB, META_ZERO_TAB}
+EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB, MANS_EXT_TAB}
 
 
 def gfa_tab_of(text) -> str | None:
@@ -12253,7 +12260,8 @@ MEDIA_MASTER_DEFAULT = [
     ("GFA_외부몰",         "외부몰", 130, "네이버 GFA_외부몰",   "",                  0.0, "", 0),
     # 메타는 아예 광고 계정이 다르다 — STCO_스마트스토어(1932624177545739).
     ("메타_외부몰",         "외부몰", 140, "메타_외부몰",         "",                  0.0, "", 0),
-    # ── 제로라운지: 메타 STCO_코디갤러리 계정. STCO GA4에 안 잡혀 메타 신고 구매·매출로 본다. ──
+    # ── 제로라운지: 메타 STCO_코디갤러리 계정. 매출은 GA4(utm_campaign=제로라운지) 기준. ──
+    # GA는 utm_campaign=제로라운지 줄을 STCO 메타에서 옮겨 온다(_ga_media_fix).
     ("메타_자사몰",         ZERO_SCOPE, 150, META_ZERO_CHANNEL,   "",                  0.0, "", 0),
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
@@ -12937,9 +12945,7 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
     for _, r in df.iterrows():
         m, cost, roas = r["매체"], float(r["비용"] or 0), r["GA ROAS"]
         rev = float(r["GA매출"] or 0)
-        if r["구분"] == ZERO_SCOPE:
-            skip.append((m, "제로라운지 — STCO GA4에 매출이 안 잡혀 판단 제외 (메타 신고값만 있음)"))
-        elif r["구분"] == "외부몰":
+        if r["구분"] == "외부몰":
             skip.append((m, "외부몰 — 매출이 GA에 안 잡혀 판단 불가 (스마트스토어 연동 필요)"))
         elif cost <= 0 and rev > 0:
             skip.append((m, f"광고비 미연동 — 매출 {rev:,.0f}원은 잡히는데 비용이 없어 ROAS 계산 불가"))
@@ -13614,7 +13620,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         if _ext_basis:
             st.caption(
                 "ℹ️ " + ", ".join(_ext_basis) + " 의 구매·매출은 **매체가 신고한 값**입니다 — "
-                "외부몰(스마트스토어)·제로라운지는 STCO 자사몰 GA4에 안 잡히기 때문입니다. "
+                "외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. "
                 "어트리뷰션 기준이 GA와 달라(보통 더 후합니다) 자사몰 매체와 나란히 "
                 "비교하진 마세요."
             )
@@ -13638,9 +13644,17 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             )
 
         # 매체를 옮긴 게 있으면 그 자리에서 밝힌다 — 조용히 옮기면 GA4 화면과 안 맞는 이유를 못 찾는다.
-        if _rc_ga:
+        _rc_zero = {k: v for k, v in (_rc_ga or {}).items() if k[1] == ZERO_MEDIA}
+        if _rc_zero:
+            st.caption(
+                "ℹ️ 제로라운지 — utm_campaign=제로라운지 줄을 " + " / ".join(
+                    f"**{_s}**에서 구매 {_v['conv']:,.0f}건 · 매출 {_v['rev']:,.0f}원"
+                    for (_s, _d), _v in _rc_zero.items())
+                + " 옮겼습니다(소스/매체가 STCO 메타와 같은 Facebook / Facebook_Feed라서).")
+        _rc_fix = {k: v for k, v in (_rc_ga or {}).items() if k[1] != ZERO_MEDIA}
+        if _rc_fix:
             _bits = []
-            for (_s, _d), _v in sorted(_rc_ga.items(), key=lambda kv: -kv[1]["rev"]):
+            for (_s, _d), _v in sorted(_rc_fix.items(), key=lambda kv: -kv[1]["rev"]):
                 _nm = " · ".join(sorted(_v["names"], key=lambda k: -_v["names"][k])[:2])
                 _bits.append(f"**{_s} → {_d}** 구매 {_v['conv']:,.0f}건 · "
                              f"매출 {_v['rev']:,.0f}원 (캠페인 {_nm})")
@@ -13698,8 +13712,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 '· 외부몰 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 ROAS는 0으로 나옵니다.'
                 '</div>') if scope_f == "외부몰" else (
         ('<div class="cp-note" style="margin:-6px 0 12px">'
-         '· 제로라운지(메타 STCO_코디갤러리 계정)는 STCO GA4에 안 잡혀 구매·매출을 '
-         '<b>메타가 신고한 값</b>으로 보여줍니다.</div>') if scope_f == ZERO_SCOPE else "")
+         '· 제로라운지(메타 STCO_코디갤러리 계정) — GA4에서 '
+         '<b>utm_campaign=제로라운지</b>인 구매·매출입니다(STCO 메타에서 덜어내 옮김).'
+         '</div>') if scope_f == ZERO_SCOPE else "")
     st.markdown(
         '<div class="cp-wrap">'
         '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
@@ -14877,6 +14892,9 @@ def _ga_media_fix(source_medium, campaign):
     돌려주는 값: 옮겨야 할 매체 이름, 옮길 필요 없으면 None.
     """
     sm = str(source_medium or "").lower()
+    # 제로라운지 — STCO 메타와 같은 Facebook / Facebook_Feed로 들어오지만 캠페인이 '제로라운지'다.
+    if _is_zero_campaign(campaign):
+        return ZERO_MEDIA
     if "gfa" not in sm:
         return None
     if "애드부스트" in sm or "adboost" in sm:
@@ -14891,6 +14909,9 @@ def _gc_ga_channel(channel, campaign) -> str:
     'STCO_자사몰_데일리_전환_PC' 꼴로 짓고 그걸 utm_campaign에 그대로 쓰기 때문에
     거기서 읽는다. 기기를 못 읽으면 '네이버 GFA'(미상)로 남긴다 — 억지로 안 나눈다.
     """
+    # 제로라운지 캠페인은 소스/매체가 STCO 메타와 같아도 제로라운지 탭으로 간다.
+    if _is_zero_campaign(campaign):
+        return META_ZERO_TAB
     base = _gc_channel(channel)
     # 애드부스트 링크가 utm_medium=GFA로 나간 줄은 GFA가 아니라 애드부스트다.
     if base.startswith("네이버 GFA") and _is_adboost_campaign(campaign):
@@ -18680,6 +18701,16 @@ def render_ga_channel_funnel_page(
     visits = _ga_visits_by_channel(ga_channel_inflow, start, end)
     # 광고비: API 실집행 > 대행사 주간(일할) > 채널믹스 예산(일할) 순으로 채널마다 확정한다.
     spend_all, spend_src_summary = resolve_channel_spend(ad_spend, channels_weekly, channel_mix, start, end)
+    # 제로라운지 광고비는 퍼널에선 '메타'에 합친다 — 퍼널은 GA 소스/매체 단위라
+    # 제로라운지 방문·매출(Facebook / Facebook_Feed)이 메타 줄에 들어가 있기 때문이다.
+    if spend_all is not None and not spend_all.empty and (spend_all["channel"] == META_ZERO_CHANNEL).any():
+        _sa = spend_all.copy()
+        _sa["channel"] = _sa["channel"].replace({META_ZERO_CHANNEL: "메타"})
+        _first = {c: g_.sort_values("cost_incl_vat", ascending=False)["source"].iloc[0]
+                  for c, g_ in _sa.groupby("channel")}
+        _sa = _sa.groupby("channel", as_index=False)["cost_incl_vat"].sum()
+        _sa["source"] = _sa["channel"].map(_first)
+        spend_all = _sa
     spend_by_channel_src = dict(zip(spend_all["channel"], spend_all["source"])) if not spend_all.empty else {}
     # 계획 비중은 '연간' 채널 믹스 기준으로 잡는다 — 표 헤더가 '연간 계획 / 실제 집행'이고,
     # 기간을 좁힐 때마다 계획 비중까지 흔들리면 계획 대비 이탈을 판단할 수 없기 때문이다.
@@ -18963,6 +18994,9 @@ def render_ga_channel_funnel_page(
     spend_map = {}
     for _, r in spend_now.iterrows():
         k = _v4_canon_channel(r["channel"])
+        # 제로라운지 광고비는 메타 줄에 합친다 — 방문·매출이 Facebook / Facebook_Feed(메타)로 잡힌다
+        if k == META_ZERO_CHANNEL:
+            k = "메타"
         if k in spend_map:      # 원본이 여러 개라도 대표명 하나로 합친다
             for c in ("impressions", "clicks", "cost_incl_vat"):
                 spend_map[k][c] = float(spend_map[k].get(c, 0) or 0) + float(r.get(c, 0) or 0)
