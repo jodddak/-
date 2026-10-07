@@ -20032,13 +20032,10 @@ def main():
     #    그래서 배지만 떠 보였다. span에 line-height:1을 줘 상자를 글자에 딱 붙이면
     #    상자 중앙 = 글자 중앙이 되어 배지와 수평이 맞는다.
     #    img도 display:block으로 둬야 인라인 baseline 여백이 안 생긴다.
+    # 제목 앞 'S' 배지는 뺐다 — Streamlit이 h1 안의 flex 배치를 안 지켜서 배지가 제목 위로
+    # 따로 떠 보였다. 브랜드 표시는 사이드바 로고·브라우저 탭 아이콘으로 충분하다.
     st.markdown(
-        f'<h1 style="display:flex;align-items:center;gap:20px;'
-        f'margin:0 0 0.5rem 0;line-height:1.15;">'
-        f'<img src="data:image/png;base64,{PAGE_TITLE_ICON_B64}" '
-        f'style="height:33px;width:auto;border-radius:6px;display:block;flex:none;" />'
-        f'<span style="line-height:1;display:block;">온라인사업팀 광고 성과 대시보드</span>'
-        f'</h1>',
+        '<h1 style="margin:0 0 0.5rem 0;line-height:1.15;">온라인사업팀 광고 성과 대시보드</h1>',
         unsafe_allow_html=True,
     )
     render_upload_panel()
