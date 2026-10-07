@@ -10728,6 +10728,18 @@ AD_CREATIVE_KEY = "report_date,channel,creative,source"
 # 새 기본키가 있으면(ad_creative_adset.sql) 광고세트별로 저장하고, 없으면 예전처럼 합쳐 저장한다.
 AD_CREATIVE_KEY_ADSET = "report_date,channel,creative,source,adset"
 
+# Google has no ad sets. Reuse the existing adset conflict-key slot to retain
+# stable campaign + asset-group identity without requiring new database columns.
+# These internal IDs must never be interpreted as audience names in the UI.
+GOOGLE_ASSET_KEY_PREFIX = "google_asset_group:"
+
+
+def _google_asset_storage_key(campaign_id, asset_group_id):
+    if not campaign_id or not asset_group_id:
+        raise RuntimeError("구글 캠페인/애셋그룹 ID가 없어 정확히 저장할 수 없습니다.")
+    return f"{GOOGLE_ASSET_KEY_PREFIX}{campaign_id}:{asset_group_id}"
+
+
 
 def _ad_creative_collapse(df: pd.DataFrame) -> pd.DataFrame:
     """광고세트 구분 없이 예전 키로 합친다(표가 아직 새 구조가 아닐 때)."""
@@ -10823,9 +10835,17 @@ def save_ad_creative(df: pd.DataFrame, source_file: str) -> int:
                 return n
             # 저장 실패 한 번으로 세션 내내 옛 방식으로 바꾸지 않는다 — 열이 정말 없을 때만.
             if "adset" in _cols:
+                if df["adset"].str.startswith(GOOGLE_ASSET_KEY_PREFIX).any():
+                    raise RuntimeError("구글 캠페인별 소재 저장에 실패했습니다. 위 저장 오류를 확인해주세요.")
                 return n
             if _cols:
                 st.session_state["ad_creative_no_adset"] = True
+        if (df["adset"].str.startswith(GOOGLE_ASSET_KEY_PREFIX)).any():
+            # Falling back to the old key would silently merge campaigns again.
+            raise RuntimeError(
+                "구글 캠페인별 저장 실패: ad_creative_daily의 adset 열과 "
+                "날짜·매체·소재·출처·adset 고유키를 확인해주세요. "
+                "캠페인을 합치는 옛 저장 방식으로는 대체하지 않았습니다.")
         df = _ad_creative_collapse(df.drop(columns=["adset"]))
     _stamp0 = datetime.utcnow().isoformat()
     n = save_table("ad_creative_daily", df, AD_CREATIVE_KEY, source_file)
@@ -11152,8 +11172,8 @@ def _meta_action_value(row: dict, field: str, action_type: str) -> float:
 
 
 def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
-    """구글 P-MAX 애셋 그룹 단위 일별 실적. 애셋 그룹 이름이 소재명이다.
-    (P-MAX는 개별 소재 단위 지표를 안 주고 애셋 그룹까지만 준다.)"""
+    """구글 P-MAX 애셋그룹 단위 일별 실적. 이름은 표시용, ID는 저장 구분용.
+    동일 소재명이 신규/리타겟 캠페인에 있어도 별개의 행으로 보존한다."""
     cfg = _secrets_section("google_ads")
     need = ["developer_token", "client_id", "client_secret", "refresh_token", "customer_id"]
     if not cfg or any(not cfg.get(k) for k in need):
@@ -11178,7 +11198,7 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
     # campaign.name도 같이 받는다 — 광고비 조회와 같은 기준으로 마케팅팀 캠페인의
     # 애셋 그룹을 빼야 소재별 표와 채널 성과 표의 합계가 서로 안 어긋난다.
     query = (
-        "SELECT segments.date, campaign.name, asset_group.name, metrics.cost_micros, "
+        "SELECT segments.date, campaign.id, campaign.name, asset_group.id, asset_group.name, metrics.cost_micros, "
         "metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value "
         "FROM asset_group "
         f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
@@ -11208,6 +11228,9 @@ def fetch_google_creative(start: date, end: date) -> pd.DataFrame:
                     "channel": "구글",
                     "creative": str((res.get("assetGroup") or {}).get("name") or "").strip(),
                     "campaign": str((res.get("campaign") or {}).get("name") or "").strip(),
+                    "adset": _google_asset_storage_key(
+                        (res.get("campaign") or {}).get("id"),
+                        (res.get("assetGroup") or {}).get("id")),
                     "impressions": float(m.get("impressions") or 0),
                     "clicks": float(m.get("clicks") or 0),
                     # 구글 비용은 VAT 별도(마이크로 단위)
@@ -11572,9 +11595,8 @@ def _creative_frame(rows: list) -> pd.DataFrame:
     if "campaign" not in out.columns:
         out["campaign"] = ""
     out["campaign"] = out["campaign"].astype(str).str.strip()
-    # 같은 날 같은 소재가 여러 캠페인에 걸쳐 있으면 합산한다.
-    # 캠페인 이름은 광고비가 가장 많이 나간 쪽을 대표로 쓴다 — 한 소재가 여러 캠페인에
-    # 걸리는 일은 드물고, 걸렸을 때 '주로 어디서 돌았나'를 보여주는 게 맞다.
+    # 구글은 adset 자리에 캠페인/애셋그룹 ID를 저장하므로 캠페인 경계를
+    # 유지한다. 메타는 기존 광고세트 키를 그대로 사용한다.
     if "adset" not in out.columns:
         out["adset"] = ""
     out["adset"] = out["adset"].fillna("").astype(str).str.strip()
@@ -11669,7 +11691,15 @@ def sync_ad_creative(existing: pd.DataFrame, only=None, unlimited: bool = False,
             if progress:
                 progress(f"· {label} 0행")
             continue
-        n = save_ad_creative(df, f"{label} 소재 API")
+        try:
+            n = save_ad_creative(df, f"{label} 소재 API")
+            if not n:
+                raise RuntimeError("받아온 소재 데이터를 저장하지 못했습니다. 위 저장 오류를 확인해주세요.")
+        except Exception as e:
+            errors[label] = str(e)[:250]
+            if progress:
+                progress(f"⚠️ {label} 저장 실패 — {str(e)[:160]}")
+            continue
         saved[label] = n
         total += n
         if progress:
@@ -15926,8 +15956,11 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                 ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum()
             for _, r in _ga.iterrows():
                 _ad, _cp = str(r["adset"]).strip(), str(r["campaign"]).strip()
+                # Keep each Google asset-group key distinct, but route matching
+                # through the campaign branch, never through audience matching.
+                _display_ad = "" if _ad.startswith(GOOGLE_ASSET_KEY_PREFIX) else _ad
                 _by_t.setdefault((r["channel"], r["creative"]), {})[f"{_cp}\x1f{_ad}"] = {
-                    "adset": _ad, "campaign": _cp,
+                    "adset": _display_ad, "campaign": _cp,
                     "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
                     "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
                     "media_rev": float(r["revenue"])}
@@ -17277,6 +17310,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 리포트만 있으므로 폴백이 반드시 필요하다.
     _report_map = _gc_media_by_key(creative_perf, start, end)     # 대행사 리포트
     _api_map = _gc_api_by_key(ad_creative, start, end)            # 매체 API
+    # Old rows cannot be split accurately after ingestion has lost campaign identity.
+    if ad_creative is not None and not ad_creative.empty and "source" in ad_creative.columns:
+        _legacy_g = ad_creative.copy()
+        _legacy_g["_day"] = pd.to_datetime(_legacy_g["report_date"], errors="coerce").dt.date
+        _legacy_g = _legacy_g[(_legacy_g["source"] == "google_ads_api")
+                              & (_legacy_g["_day"] >= start) & (_legacy_g["_day"] <= end)]
+        if not _legacy_g.empty:
+            _legacy_ad = (_legacy_g["adset"].fillna("").astype(str) if "adset" in _legacy_g.columns
+                          else pd.Series("", index=_legacy_g.index))
+            if not _legacy_ad.str.startswith(GOOGLE_ASSET_KEY_PREFIX).all():
+                st.warning("이 기간 구글 소재에는 캠페인을 합쳐 저장한 이전 데이터가 남아 있습니다. "
+                           "구글 탭 아래 '매체 관리자와 숫자가 다를 때'를 펼쳐 "
+                           "'구글 소재 다시 받기 (새 기준)'를 실행해주세요. "
+                           "재수집 전 신규·리타겟팅 합계는 정확하지 않을 수 있습니다.")
     # 매체 단위로 하나만 쓴다 — API가 있는 매체는 리포트를 아예 안 본다.
     # 둘을 소재명으로만 합치면, 리포트에만 있고 API엔 이름이 조금 다른 소재가 남아서
     # 그 매체 광고비가 실제보다 커진다(형이 잡은 메타 84만원 → 104만원).
@@ -18586,7 +18633,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             _ac["광고비(VAT 제외)"] = _ac["cost_incl_vat"] / 1.1
                             if "adset" not in _ac.columns:
                                 _ac["adset"] = ""
-                            _ac["adset"] = _ac["adset"].fillna("").replace("", "(합쳐 저장됨)")
+                            _ac["adset"] = _ac["adset"].fillna("").astype(str)
+                            _ac["adset"] = _ac["adset"].map(
+                                lambda v: "캠페인별 애셋그룹 " + v[len(GOOGLE_ASSET_KEY_PREFIX):]
+                                if v.startswith(GOOGLE_ASSET_KEY_PREFIX) else (v or "(합쳐 저장됨)"))
                             _by_c = (_ac.groupby(["campaign", "adset"], as_index=False)
                                      [["impressions", "clicks", "광고비(VAT 제외)", "cost_incl_vat"]].sum())
                             _by_d = (_ac.groupby("_d", as_index=False)
