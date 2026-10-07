@@ -16231,7 +16231,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                 {f: float(v.get(f, 0) or 0) for f in _F},
                                 channel=base.get("channel"), name=base.get("name"),
                                 src=base.get("src"), _first=base.get("_first"),
-                                campaign=f'{v.get("campaign", "")} · {v.get("adset", "")}'.strip(" ·"),
+                                campaign=f'{v.get("campaign", "")} · {_adset_short(v.get("adset", ""))}'.strip(" ·"),
                                 campaigns=[v.get("campaign", "")], _adset=v.get("adset", ""),
                                 _media_basis=base.get("_media_basis"), _adset_rest=True)
                 continue
@@ -16308,6 +16308,12 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
         cur["media_conv"] += float(r["conversions"])
         cur["media_rev"] += float(r["revenue"])
     return out
+
+
+def _adset_short(a) -> str:
+    """화면 표시용 광고세트 이름 — GA 줄(utm_content 앞부분)과 같은 꼴로 앞부분만.
+    '리타겟팅_방문자180일' → '리타겟팅'. 매칭·상태 판정은 원래 이름(_adset)을 그대로 쓴다."""
+    return str(a or "").split("_")[0].strip()
 
 
 def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
@@ -17682,7 +17688,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         {f: float(_x.get(f, 0) or 0) for f in _MF2},
                         channel=_v.get("channel"), name=_v.get("name"), src=_v.get("src"),
                         _first=_v.get("_first"), _media_basis=_v.get("_media_basis"),
-                        campaign=f'{_x.get("campaign", "")} · {_x.get("adset", "")}'.strip(" ·"),
+                        campaign=f'{_x.get("campaign", "")} · {_adset_short(_x.get("adset", ""))}'.strip(" ·"),
                         campaigns=[_x.get("campaign", "")], _adset=_x.get("adset", ""))
                 if any(_coll.values()):
                     media_map[_k] = dict(_v, **_coll, _by_target=None)
@@ -18105,12 +18111,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         leftovers, key=lambda x: -float(x[1].get("cost", 0) or 0)):
                     _nm = str(m.get("name") or name_k)
                     _row = pd.Series({
+                        # 소재명 아래 설명은 캠페인만 — 'GA 방문 없음' 같은 꼬리는 판정 칸
+                        # (유입 없음 / UTM 없음)에 이미 나와서 중복이라 뺐다.
                         "key": (f'{_nm}<span class="gc-sub">'
-                                f'{str(m.get("campaign") or "").strip() or ch_k} · '
-                                + ('이 광고세트로 들어온 GA 방문 없음' if m.get("_adset_rest")
-                                   else ('클릭이 거의 없어 GA 방문 없음' if _cr_no_visit(m)
-                                         else 'GA 매칭 안 됨')) + '</span>'),
-                        "target": str(m.get("_adset") or ""),
+                                f'{str(m.get("campaign") or "").strip() or ch_k}</span>'),
+                        # 광고세트 이름은 GA 줄과 같은 꼴로 앞부분만 보여준다
+                        # ('리타겟팅_방문자180일' → '리타겟팅')
+                        "target": str(m.get("_adset") or "").split("_")[0].strip(),
                         "sessions": 0.0, "conv": 0.0, "rev": 0.0,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
                     })
