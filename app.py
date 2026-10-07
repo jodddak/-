@@ -15677,7 +15677,7 @@ def _gc_detail_target_label(row):
     pretty = {"패션관심타겟": "패션 관심타겟", "쇼핑관심타겟": "쇼핑 관심타겟",
               "방문자180일": "방문자 180일"}.get(norm, target)
     seg = _gc_target_group(dict(target=target, campaign=row.get("campaign") or ""))
-    suffix = "리타겟팅" if seg == GC_SEG_RT else "신규"
+    suffix = "리타겟팅" if seg == GC_SEG_RT else ("신규" if seg == GC_SEG_NEW else "구분 미확인")
     return f"{pretty} ({suffix})"
 
 
@@ -18745,8 +18745,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
             # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
             if level == "소재" and label in GFA_TABS and recs:
-                with st.container():
-                    st.markdown("**GFA 소재 성과 · ON/OFF 직접 선택**")
+                with st.expander("🔘 GFA 소재 ON/OFF 직접 선택 · 저장"):
+                    st.markdown("**ON/OFF를 선택한 뒤 변경 저장을 눌러주세요.**")
                     st.caption(
                         "GFA는 상태를 API로 못 받아서, 여기서 체크한 값을 씁니다. "
                         "**바꾼 것만** 고르고 저장하세요 — 비워두면 '미확인'으로 둡니다. "
@@ -18760,13 +18760,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         _cur = _manual_status.get((label, _creative_image_key(_nm), _tg)) \
                             or _manual_status.get((label, _creative_image_key(_nm), ""))
                         _er.append({"소재": _nm, "캠페인": _rc.get("캠페인") or "", "타겟팅": _tg,
-                                    "이미지": _rc.get("_img"),
-                                    "노출": float(_rc.get("노출") or 0),
-                                    "클릭": float(_rc.get("클릭") or 0),
                                     "광고비": float(_rc.get("광고비(VAT+)") or 0),
-                                    "구매": float(_rc.get("구매") or 0),
-                                    "매출": float(_rc.get("매출") or 0),
-                                    "ROAS(%)": _rc.get("ROAS(%)"),
                                     "판정": _rc.get("판정") or "",
                                     "ON/OFF": (_cur[0] if _cur else ""),
                                     "_orig": (_cur[0] if _cur else "")})
@@ -18774,12 +18768,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _ed = st.data_editor(
                         _edf.drop(columns=["_orig"]), hide_index=True, use_container_width=True,
                         key=f"gc_manual_{ti}", disabled=[c for c in _edf.columns if c not in ("ON/OFF", "_orig")],
-                        row_height=90,
                         column_config={
-                            "이미지": st.column_config.ImageColumn("소재 이미지"),
                             "광고비": st.column_config.NumberColumn("광고비(VAT+)", format=ST_NUM_COMMA),
-                            "매출": st.column_config.NumberColumn("매출", format=ST_NUM_COMMA),
-                            "ROAS(%)": st.column_config.NumberColumn("ROAS(%)", format="%.0f%%"),
                             "ON/OFF": st.column_config.SelectboxColumn(
                                 "ON/OFF", options=["", "ON", "OFF"],
                                 help="관리자 화면 상태와 같게 골라주세요. 비우면 미확인"),
@@ -18811,12 +18801,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
             if not _media_basis:
                 _gap_panel(label, tot_rev, tot_conv)
-            if not (level == "소재" and label in GFA_TABS and recs):
-                st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
-                                      scrolling=False)
-            else:
-                st.caption(f"TOTAL · 광고비 {tot_cost:,.0f}원 · "
-                           f"매출 {float(tot_media.get('media_rev', tot_r.get('rev', 0)) or 0):,.0f}원")
+            st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)),
+                                  scrolling=False)
 
             # ── 표 아래 ── 경고·안내 → 읽는 법
             for _kind, _txt in notes:
