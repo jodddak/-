@@ -279,7 +279,7 @@ def use_dashboard_rules(ga_creative: pd.DataFrame) -> bool:
         return False
     _gc = ga_creative if ga_creative is not None else pd.DataFrame()
     if not _gc.empty and "source_medium" in _gc.columns:
-        _gc = _gc[~_gc["source_medium"].map(_a._ga_sm_excluded)]
+        _gc = _gc[~_gc["source_medium"].map(_a._ga_sm_excluded).astype(bool)]
     # 대시보드 함수들이 표를 읽을 때 이 메일이 이미 읽어둔 걸 쓰게 한다
     _a.load_table = lambda name: (_gc.copy() if name == "ga_creative_daily" else pd.DataFrame())
     _APP = _a
@@ -290,7 +290,7 @@ def apply_ga_exclusions(ga_daily: pd.DataFrame) -> pd.DataFrame:
     """다른 팀 소스(기본 'meta / …')를 대시보드와 똑같이 걷어낸다."""
     if _APP is None or ga_daily is None or ga_daily.empty or "source_medium" not in ga_daily.columns:
         return ga_daily
-    return ga_daily[~ga_daily["source_medium"].map(_APP._ga_sm_excluded)].copy()
+    return ga_daily[~ga_daily["source_medium"].map(_APP._ga_sm_excluded).astype(bool)].copy()
 
 
 def build_rows(ad_spend, ga_daily, master, start: date, end: date) -> pd.DataFrame:
@@ -317,8 +317,11 @@ def build_rows(ad_spend, ga_daily, master, start: date, end: date) -> pd.DataFra
             "cost": cost,
             "conv": float(g["conv"]),
             "rev": rev,
-            "roas": (rev / cost * 100) if cost > 0 else None,
-            "order": int(pd.to_numeric(r.get("sort_order"), errors="coerce") or 100),
+            # 외부몰은 매출이 GA에 안 잡힌다 — 0%(빨강)가 아니라 '—'(모름)로 둔다(대시보드와 같게)
+            "roas": (None if (str(r.get("scope", "")) in ("외부몰", "제로라운지") and rev <= 0)
+                     else (rev / cost * 100) if cost > 0 else None),
+            "order": (int(pd.to_numeric(r.get("sort_order"), errors="coerce"))
+                      if pd.notna(pd.to_numeric(r.get("sort_order"), errors="coerce")) else 100),
         })
     df = pd.DataFrame(recs).sort_values("order")
     return df[(df["cost"] > 0) | (df["rev"] > 0) | (df["impressions"] > 0)]
@@ -365,7 +368,9 @@ def build_actions(df: pd.DataFrame, n_days: int = 1) -> tuple[str, list[dict], f
     up, keep, down, hold, skip = [], [], [], [], []
     for _, r in df.iterrows():
         m, cost, roas, rev = r["media"], r["cost"], r["roas"], r["rev"]
-        if r["scope"] == "외부몰":
+        if r["scope"] == "제로라운지":
+            skip.append((m, "제로라운지 — STCO GA4에 매출이 안 잡혀 판단 제외"))
+        elif r["scope"] == "외부몰":
             skip.append((m, "외부몰 — 매출이 GA에 안 잡혀 판단 불가 (스마트스토어 연동 필요)"))
         elif cost <= 0 and rev > 0:
             skip.append((m, f"광고비 미연동 — 매출 {rev:,.0f}원은 잡히는데 비용이 없어 ROAS 계산 불가"))
@@ -563,7 +568,8 @@ def render_html(weekly: bool, start: date, end: date, df: pd.DataFrame,
             ro_txt = f"{ro:,.0f}%"
             ro_col = ("#2C7A3C" if ro >= KPI_ROAS_HIGH
                       else "#8A6714" if ro >= KPI_ROAS_LOW else "#C0273A")
-        badge = "#4B3FA8" if r["scope"] == "외부몰" else "#14181F"
+        badge = ("#4B3FA8" if r["scope"] == "외부몰"
+                 else "#1F6B4A" if r["scope"] == "제로라운지" else "#14181F")
         body_rows.append(f"""
         <tr>
           <td style="padding:11px 10px;border-bottom:1px solid #F0EFE7">
