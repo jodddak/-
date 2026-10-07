@@ -15458,6 +15458,142 @@ def _gc_target_group_m(row) -> str:
     return _gc_target_group(row)
 
 
+# ── 필터(타겟팅·품목)는 **매체 캠페인 단위**로 가른다 (2026-10) ──
+# 광고 관리자에서 '신규 캠페인 합계', 'GFA 수트 캠페인 합계'를 보고 대조하므로,
+# 소재 줄 하나에 여러 캠페인 실적이 섞여 있으면 캠페인별로 쪼개서 맞는 쪽만 남긴다.
+# 캠페인 이름으로 못 가르는 경우(STCO_자사몰_데일리_전환, 아우터/이너)만 소재명·타겟팅으로 본다.
+_GC_MF = ("impressions", "clicks", "cost", "media_conv", "media_rev")
+
+
+def _gc_seg_of_campaign(c):
+    s = str(c or "").lower()
+    if not s.strip():
+        return None
+    rt = any(w in s for w in _GC_RT_WORDS)
+    nw = any(w in s for w in _GC_NEW_WORDS)
+    if rt and not nw:
+        return GC_SEG_RT
+    if nw and not rt:
+        return GC_SEG_NEW
+    return None
+
+
+def _gc_item_of_campaign(c):
+    low = str(c or "").lower()
+    if not low.strip():
+        return None
+    hits = {it for it, ws in _GC_ITEM_WORDS if any(w in low for w in ws)}
+    # '수트자켓'처럼 수트 안에 자켓이 들어간 이름은 수트로 본다
+    if GC_ITEM_SUIT in hits and GC_ITEM_OUTER in hits and "수트" in low and not any(
+            w in low.replace("수트자켓", "").replace("수트 자켓", "")
+            for w in dict(_GC_ITEM_WORDS)[GC_ITEM_OUTER]):
+        hits.discard(GC_ITEM_OUTER)
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _gc_scale_parts(parts, w):
+    return {c: {f: float(v.get(f, 0) or 0) * w for f in _GC_MF} for c, v in (parts or {}).items()}
+
+
+def _gc_add_parts(dst, parts, w=1.0):
+    for c, v in (parts or {}).items():
+        d = dst.setdefault(c, {f: 0.0 for f in _GC_MF})
+        for f in _GC_MF:
+            d[f] += float(v.get(f, 0) or 0) * w
+    return dst
+
+
+def _gc_filter_media(m, row_seg, row_item, seg, item):
+    """매체 실적 m에서 (타겟팅 seg, 품목 item)에 맞는 캠페인 몫만 남긴다.
+    돌려주는 값: (걸러낸 실적 dict 또는 None, 광고비 기준 남은 비율)."""
+    if not m:
+        return None, 0.0
+    parts = m.get("_by_campaign") or {}
+    if not parts:
+        parts = {"": {f: float(m.get(f, 0) or 0) for f in _GC_MF}}
+    # 캠페인별 몫의 합을 줄 값에 맞춘다(반올림·추정 배분 오차)
+    tot = {f: sum(float(v.get(f, 0) or 0) for v in parts.values()) for f in _GC_MF}
+    fac = {f: (float(m.get(f, 0) or 0) / tot[f]) if tot[f] > 0 else 0.0 for f in _GC_MF}
+    kept = {}
+    for c, v in parts.items():
+        cs = _gc_seg_of_campaign(c) or row_seg
+        ci = _gc_item_of_campaign(c) or row_item
+        if (seg == GC_SEG_ALL or cs == seg) and (item == GC_ITEM_ALL or ci == item):
+            kept[c] = {f: float(v.get(f, 0) or 0) * fac[f] for f in _GC_MF}
+    agg = {f: sum(v[f] for v in kept.values()) for f in _GC_MF}
+    base_c = float(m.get("cost", 0) or 0)
+    base_i = float(m.get("impressions", 0) or 0)
+    frac = (agg["cost"] / base_c) if base_c > 0 else ((agg["impressions"] / base_i) if base_i > 0
+                                                      else (1.0 if kept else 0.0))
+    if not kept:
+        return None, 0.0
+    return dict(m, **agg, _by_campaign=kept), frac
+
+
+_GC_GA_COLS = ("sessions", "new", "signup", "conv", "rev")
+
+
+def _gc_filter_rows(rows: pd.DataFrame, seg, item) -> pd.DataFrame:
+    """표 줄 전체에 (타겟팅, 품목) 필터를 건다 — 매체 실적은 캠페인 몫만, GA 실적은
+    GA 캠페인으로 확실히 가를 수 있으면 그대로, 아니면 매체 실적과 같은 비율로 남긴다."""
+    if rows is None or rows.empty or (seg == GC_SEG_ALL and item == GC_ITEM_ALL):
+        return rows
+    keep_idx, new_media, ga_w = [], [], []
+    for idx, r in rows.iterrows():
+        rs, ri = r.get("_seg"), r.get("_item")
+        camps = [c for c in (r.get("camp_list") or [r.get("campaign")]) if str(c or "").strip()]
+        gs = {_gc_seg_of_campaign(c) for c in camps}
+        gi = {_gc_item_of_campaign(c) for c in camps}
+        g_seg = next(iter(gs)) if len(gs) == 1 else None
+        g_item = next(iter(gi)) if len(gi) == 1 else None
+        m = r.get("_media")
+        mf, frac = _gc_filter_media(m, rs, ri, seg, item) if isinstance(m, dict) else (None, 0.0)
+        if isinstance(m, dict) and (float(m.get("cost", 0) or 0) > 0
+                                    or float(m.get("impressions", 0) or 0) > 0):
+            if (seg != GC_SEG_ALL and g_seg is not None and g_seg != seg) or \
+                    (item != GC_ITEM_ALL and g_item is not None and g_item != item):
+                w = 0.0
+            elif (seg == GC_SEG_ALL or g_seg is not None) and (item == GC_ITEM_ALL or g_item is not None):
+                w = 1.0
+            else:
+                w = frac
+        else:
+            ok = ((seg == GC_SEG_ALL or (g_seg or rs) == seg)
+                  and (item == GC_ITEM_ALL or (g_item or ri) == item))
+            w = 1.0 if ok else 0.0
+            mf = m if ok else None
+        has_m = isinstance(mf, dict) and any(float(mf.get(f, 0) or 0) for f in _GC_MF)
+        if w <= 0 and not has_m:
+            continue
+        keep_idx.append(idx)
+        new_media.append(mf)
+        ga_w.append(w)
+    out = rows.loc[keep_idx].copy()
+    for c in _GC_GA_COLS:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0) * pd.Series(ga_w, index=out.index)
+    out["_media"] = pd.Series(new_media, index=out.index, dtype=object)
+    # 걸러서 남은 몫은 그 필터 쪽 실적이다 — 판정 기준(신규/리타겟팅)도 그쪽으로 맞춘다
+    if seg != GC_SEG_ALL and "_seg" in out.columns:
+        out["_seg"] = seg
+    if item != GC_ITEM_ALL and "_item" in out.columns:
+        out["_item"] = item
+    return out
+
+
+def _gc_filter_left(left, seg, item, row_of):
+    """GA에 못 붙은 매체 줄에 같은 필터를 건다. [(키, 걸러낸 실적)]."""
+    if seg == GC_SEG_ALL and item == GC_ITEM_ALL:
+        return list(left)
+    out = []
+    for k, v in left:
+        lr = row_of(v, k)
+        mf, _ = _gc_filter_media(v, _gc_target_group(lr), _gc_item_group(lr), seg, item)
+        if mf and any(float(mf.get(f, 0) or 0) for f in _GC_MF):
+            out.append((k, mf))
+    return out
+
+
 # 품목 — 신규/리타겟팅과 별개로 '무엇을 파는 소재인가'로도 나눠 본다(PPT 4번, 2026-10).
 # 소재명이 가장 정확하다(같은 PMax 캠페인 안에 수트·셔츠 소재가 섞여 있다). 소재명에 품목
 # 말이 없을 때만(다이나믹_리텐션, 출근룩 등) 캠페인 이름(STCO_셔츠_전환)으로 물러난다.
@@ -15820,6 +15956,16 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                         "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
                         "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
                         "media_rev": float(r["revenue"])}
+    # 캠페인별 실적 — 타겟팅·품목 필터를 캠페인 단위로 가르는 데 쓴다(_gc_filter_media)
+    _bc_of = {}
+    _cc0 = c.assign(_cp=(c["campaign"].fillna("").astype(str).str.strip()
+                         if "campaign" in c.columns else ""))
+    for _, r in _cc0.groupby(["channel", "creative", "_cp"], as_index=False)[
+            ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum().iterrows():
+        _bc_of.setdefault((r["channel"], r["creative"]), {})[str(r["_cp"])] = {
+            "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
+            "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
+            "media_rev": float(r["revenue"])}
     _src_of, _camp_of = {}, {}
     if "source" in c.columns:
         for _, r in c.drop_duplicates(subset=["channel", "creative"], keep="last").iterrows():
@@ -15850,6 +15996,8 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
             for _cp in _camp_of.get((r["channel"], r["creative"]), []):
                 if _cp not in o["campaigns"]:
                     o["campaigns"].append(_cp)
+            o["_by_campaign"] = _gc_add_parts(dict(o.get("_by_campaign") or {}),
+                                              _bc_of.get((r["channel"], r["creative"]), {}))
             _bt = _by_t.get((r["channel"], r["creative"]))
             if _bt:
                 dst = o.setdefault("_by_target", {})
@@ -15872,6 +16020,7 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                   "src": _src_of.get((r["channel"], r["creative"]), "api"),
                   "campaigns": list(_camp_of.get((r["channel"], r["creative"]), []))}
         out[k]["campaign"] = (out[k]["campaigns"] or [""])[0]
+        out[k]["_by_campaign"] = _gc_add_parts({}, _bc_of.get((r["channel"], r["creative"]), {}))
         if (r["channel"], r["creative"]) in _by_t:
             out[k]["_by_target"] = {a: dict(v) for a, v in
                                     _by_t[(r["channel"], r["creative"])].items()}
@@ -16245,6 +16394,20 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                     - sum(float(v.get(f, 0) or 0) for v in bt.values()))
                              for f in _F}
                 _all = sum(ses[j] for j in idxs)
+                # 캠페인별 몫(필터용) — 광고세트별 실적은 캠페인을 알고, 합쳐 저장된 날의
+                # 몫(collapsed)은 소재 전체의 캠페인 비중에서 광고세트 몫을 뺀 나머지로 본다.
+                _bt_bc = {}
+                for _a, _v in bt.items():
+                    _gc_add_parts(_bt_bc, {_v.get("campaign", ""): _v})
+                _res_bc = {}
+                for _c, _v in (base.get("_by_campaign") or {}).items():
+                    _b2 = _bt_bc.get(_c, {})
+                    _res_bc[_c] = {f: max(0.0, float(_v.get(f, 0) or 0) - float(_b2.get(f, 0) or 0))
+                                   for f in _GC_MF}
+                _rest_bc = {}
+                for _a, _v in bt.items():
+                    if _a not in used:
+                        _gc_add_parts(_rest_bc, {_v.get("campaign", ""): _v})
                 # 짝 없는 광고세트의 돈은 **타겟팅을 모르는 줄**((미설정)·규칙 외)에만 나눈다.
                 # 예전엔 아무 남는 줄에나 넣어서, 유사타겟(신규) 광고비가 방문자180일(리타) 줄에
                 # 붙는 일이 있었다. 그런 줄이 없으면 광고세트별 'GA 방문 없음' 줄로 세운다.
@@ -16254,13 +16417,17 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                     and _nt[i] in ("", "(미설정)", "(규칙외)", "(타겟팅없음)")]
                 for i in idxs:
                     w_all = (ses[i] / _all) if _all > 0 else (1.0 / len(idxs))
+                    _pbc = _gc_scale_parts(_res_bc, w_all)
                     if i in assigned:
                         d = {f: sum(float(bt[a].get(f, 0) or 0) * wts[i][a] for a in assigned[i])
                              + collapsed[f] * w_all for f in _F}
+                        for a in assigned[i]:
+                            _gc_add_parts(_pbc, {bt[a].get("campaign", ""): bt[a]}, wts[i][a])
                     elif i in free:
                         tot = sum(ses[j] for j in free)
                         w = (ses[i] / tot) if tot > 0 else (1.0 / len(free))
                         d = {f: rest[f] * w + collapsed[f] * w_all for f in _F}
+                        _gc_add_parts(_pbc, _rest_bc, w)
                     else:
                         d = {f: collapsed[f] * w_all for f in _F}
                     _cps = (sorted({bt[a].get("campaign", "") for a in assigned[i]} - {""})
@@ -16273,7 +16440,8 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                   # 실제로 붙인 광고세트의 캠페인만 적는다(다른 캠페인 이름이 섞여 보이지 않게)
                                   campaigns=_cps,
                                   campaign=((_cps or [None])[0] if i in assigned else None)
-                                  or base.get("campaign"))
+                                  or base.get("campaign"),
+                                  _by_campaign=_pbc)
                 # GA 줄이 없는 광고세트의 돈은 버리지 않고, 메타 관리자 화면처럼
                 # **광고세트 하나에 한 줄씩** 'GA 방문 없음' 줄로 세운다(합계가 관리자와 맞게).
                 if not free:
@@ -16289,7 +16457,9 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                 src=base.get("src"), _first=base.get("_first"),
                                 campaign=f'{v.get("campaign", "")} · {_adset_short(v.get("adset", ""))}'.strip(" ·"),
                                 campaigns=[v.get("campaign", "")], _adset=v.get("adset", ""),
-                                _media_basis=base.get("_media_basis"), _adset_rest=True)
+                                _media_basis=base.get("_media_basis"), _adset_rest=True,
+                                _by_campaign={v.get("campaign", ""): {f: float(v.get(f, 0) or 0)
+                                                                      for f in _F}})
                 continue
         if len(idxs) < 2:
             continue
@@ -16304,6 +16474,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 # (예전엔 빠뜨려서 나눠진 줄은 매출 0원·캠페인 이름 없음으로 나왔다)
                 "_media_basis": base.get("_media_basis"),
                 "campaigns": base.get("campaigns"), "campaign": base.get("campaign"),
+                "_by_campaign": _gc_scale_parts(base.get("_by_campaign"), w),
                 # 판정은 쪼개기 전 '소재 전체 광고비'로 해야 한다 — 비중이 균등하지 않아
                 # 곱셈으로는 되돌릴 수 없으므로 원본을 그대로 들고 간다.
                 "_full_cost": float(base.get("cost", 0) or 0),
@@ -17745,9 +17916,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         channel=_v.get("channel"), name=_v.get("name"), src=_v.get("src"),
                         _first=_v.get("_first"), _media_basis=_v.get("_media_basis"),
                         campaign=f'{_x.get("campaign", "")} · {_adset_short(_x.get("adset", ""))}'.strip(" ·"),
-                        campaigns=[_x.get("campaign", "")], _adset=_x.get("adset", ""))
+                        campaigns=[_x.get("campaign", "")], _adset=_x.get("adset", ""),
+                        _by_campaign={_x.get("campaign", ""): {f: float(_x.get(f, 0) or 0)
+                                                               for f in _MF2}})
                 if any(_coll.values()):
-                    media_map[_k] = dict(_v, **_coll, _by_target=None)
+                    _bt_bc2 = {}
+                    for _x in _bt.values():
+                        _gc_add_parts(_bt_bc2, {_x.get("campaign", ""): _x})
+                    _res2 = {}
+                    for _c, _x in (_v.get("_by_campaign") or {}).items():
+                        _b2 = _bt_bc2.get(_c, {})
+                        _res2[_c] = {f: max(0.0, float(_x.get(f, 0) or 0) - float(_b2.get(f, 0) or 0))
+                                     for f in _MF2}
+                    media_map[_k] = dict(_v, **_coll, _by_target=None, _by_campaign=_res2)
             _left_all = [(k, v) for k, v in media_map.items()
                          if k[0] in ch_keep and id(v) not in _matched]
 
@@ -17755,12 +17936,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 return {"target": str(v.get("_adset") or ""), "campaign": v.get("campaign"),
                         "creative": v.get("name") or k[1]}
 
-            _seg_n = _seg_r = 0
             if not rows.empty:
                 rows["_seg"] = [_gc_target_group_m(r) for _, r in rows.iterrows()]
                 rows["_item"] = [_gc_item_group(r) for _, r in rows.iterrows()]
-                _seg_n = int((rows["_seg"] == GC_SEG_NEW).sum())
-                _seg_r = int((rows["_seg"] == GC_SEG_RT).sum())
+
+            # 버튼 숫자 = 그 필터를 걸었을 때 남는 줄 수(매체 캠페인 몫이 있는 줄 + GA에 못 붙은 줄)
+            def _cnt(sg, it):
+                _r = _gc_filter_rows(rows, sg, it) if not rows.empty else rows
+                return (0 if _r is None or _r.empty else len(_r)) + len(
+                    _gc_filter_left(_left_all, sg, it, _left_row))
+
+            _seg_n = _cnt(GC_SEG_NEW, GC_ITEM_ALL)
+            _seg_r = _cnt(GC_SEG_RT, GC_ITEM_ALL)
 
             # ── 타겟팅 / 품목 두 줄 버튼 (PPT 4번) ──
             # '타겟팅'을 고르면 아래 품목 숫자도 그 안에서 다시 센다 — 두 단계로 좁혀 들어간다.
@@ -17772,16 +17959,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     seg = _gc_choice("타겟팅", [GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT],
                                      key=f"gc_seg_{ti}",
                                      counts={GC_SEG_NEW: _seg_n, GC_SEG_RT: _seg_r})
-            if seg != GC_SEG_ALL and not rows.empty:
-                rows = rows[rows["_seg"] == seg].copy()
 
             item = GC_ITEM_ALL
             _item_cnt = {}
             for _it in GC_ITEMS:
-                _n = int((rows["_item"] == _it).sum()) if not rows.empty else 0
-                _n += sum(1 for k, v in _left_all
-                          if _gc_item_group(_left_row(v, k)) == _it
-                          and (seg == GC_SEG_ALL or _gc_target_group(_left_row(v, k)) == seg))
+                _n = _cnt(seg, _it)
                 if _n:
                     _item_cnt[_it] = _n
             if len(_item_cnt) >= 2:    # 품목이 하나뿐이면 고를 게 없다
@@ -17790,17 +17972,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 with _ic2:
                     item = _gc_choice("품목", [GC_ITEM_ALL] + list(_item_cnt),
                                       key=f"gc_item_{ti}", counts=_item_cnt)
-            if item != GC_ITEM_ALL and not rows.empty:
-                rows = rows[rows["_item"] == item].copy()
+            # 필터는 **캠페인 단위**로 건다 — 줄에 섞인 다른 캠페인 몫은 빼고 남긴다
+            # (광고 관리자의 캠페인 합계와 맞게).
+            if not rows.empty:
+                rows = _gc_filter_rows(rows, seg, item)
+            _left_f = _gc_filter_left(_left_all, seg, item, _left_row)
 
             # 지금 보고 있는 조건 — 배지·제목·엑셀 시트에 그대로 쓴다
             _view_bits = [b for b in (seg if seg != GC_SEG_ALL else "",
                                       item if item != GC_ITEM_ALL else "") if b]
             view_lbl = " · ".join(_view_bits)
-            if _view_bits and rows.empty and not any(
-                    (seg == GC_SEG_ALL or _gc_target_group(_left_row(v, k)) == seg)
-                    and (item == GC_ITEM_ALL or _gc_item_group(_left_row(v, k)) == item)
-                    for k, v in _left_all):
+            if _view_bits and rows.empty and not _left_f:
                 st.info(f"이 매체에 **{view_lbl}** 소재가 없습니다.")
                 continue
             # GA 줄이 없어도 매체 리포트에 실적이 있으면 표를 그린다.
@@ -17970,15 +18152,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 rows["key"] = _keys
             # 매체에는 있는데 GA에서 못 찾은 소재 — 소재 탭에서는 줄로 세우고,
             # 타겟팅·캠페인·매체 탭에서는 그 매체 합계에 넣는다(합계가 매체 관리자와 맞게).
-            leftovers = [(k, v) for k, v in media_map.items()
-                         if k[0] in ch_keep and id(v) not in _matched]
-            if seg != GC_SEG_ALL:
-                # GA에 못 붙은 매체 소재도 이름·캠페인·광고세트로 같은 기준을 적용한다.
-                leftovers = [(k, v) for k, v in leftovers
-                             if _gc_target_group(_left_row(v, k)) == seg]
-            if item != GC_ITEM_ALL:
-                leftovers = [(k, v) for k, v in leftovers
-                             if _gc_item_group(_left_row(v, k)) == item]
+            # GA에 못 붙은 매체 소재도 같은 기준(캠페인 몫)으로 걸러둔 것을 쓴다.
+            leftovers = list(_left_f)
 
             if level != "소재":
                 # 소재 줄에 붙은 매체 실적을 원하는 단위로 다시 합친다.
