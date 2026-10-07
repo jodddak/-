@@ -15444,6 +15444,20 @@ def _gc_target_group(row) -> str:
     return "기타"
 
 
+def _gc_target_group_m(row) -> str:
+    """_gc_target_group + 붙은 매체 실적의 **실제 캠페인**.
+    타겟팅이 안 적힌 줄(구글 P-MAX)은 GA의 utm_campaign보다 매체 API가 준 캠페인 이름이
+    정확하다 — 붙은 실적이 전부 한쪽(신규/리타겟) 캠페인이면 그쪽으로 본다."""
+    m = row.get("_media") if hasattr(row, "get") else None
+    if isinstance(m, dict) and _gc_tgt_norm(row.get("target")) in (
+            "", "(미설정)", "(규칙외)", "(타겟팅없음)"):
+        cps = [c for c in (m.get("campaigns") or [m.get("campaign")]) if str(c or "").strip()]
+        segs = {_gc_target_group({"campaign": c}) for c in cps} - {"기타"}
+        if len(segs) == 1:
+            return segs.pop()
+    return _gc_target_group(row)
+
+
 # 품목 — 신규/리타겟팅과 별개로 '무엇을 파는 소재인가'로도 나눠 본다(PPT 4번, 2026-10).
 # 소재명이 가장 정확하다(같은 PMax 캠페인 안에 수트·셔츠 소재가 섞여 있다). 소재명에 품목
 # 말이 없을 때만(다이나믹_리텐션, 출근룩 등) 캠페인 이름(STCO_셔츠_전환)으로 물러난다.
@@ -15660,6 +15674,16 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
         _mk = (g["cre_date"].str.replace("-", "", regex=False).str[2:] + "_"
                + g["target"] + "_" + g["cre_name"])
         g["_gkey"] = [_creative_image_key(v) for v in _mk]
+        # 타겟팅이 안 적힌 줄(구글 P-MAX처럼 utm_content에 타겟팅이 없음)은 같은 소재라도
+        # **신규 캠페인 줄과 리타겟 캠페인 줄을 따로** 둔다. 한 줄로 합치면 신규타겟팅/리타겟팅
+        # 필터가 소재 단위로만 갈려서, 리타겟 캠페인 방문·광고비가 신규 쪽에 섞여 들어갔다.
+        _tn = g["target"].map(_gc_tgt_norm)
+        _no_t = _tn.isin(["", "(미설정)", "(규칙외)", "(타겟팅없음)"])
+        if _no_t.any():
+            _sg = [(_gc_target_group({"campaign": c}) if nt else "")
+                   for c, nt in zip(g["campaign"], _no_t)]
+            g["_gkey"] = [k + ("|" + s if s and s != "기타" else "")
+                          for k, s in zip(g["_gkey"], _sg)]
 
     if "_gkey" not in g.columns:
         g["_gkey"] = g["key"]
@@ -15771,6 +15795,31 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
                     "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
                     "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
                     "media_rev": float(r["revenue"])}
+    # 광고세트가 없는 매체(구글 P-MAX의 애셋 그룹)인데 **같은 소재가 캠페인 여러 곳에** 있으면
+    # 캠페인을 광고세트 자리에 넣어 캠페인별 실적을 따로 쥔다. 안 그러면 '신규_수트'와
+    # '리타겟' 캠페인의 같은 이름 애셋 그룹이 한 덩어리로 합쳐져 GA 방문 비중으로 나뉘고,
+    # 신규타겟팅 필터를 걸면 광고 관리자 캠페인 합계와 안 맞는다(2026-10 구글 신규 확인).
+    if "campaign" in c.columns:
+        _adcol = (c["adset"].fillna("").astype(str).str.strip() if "adset" in c.columns
+                  else pd.Series("", index=c.index))
+        _cn = c.assign(_cp=c["campaign"].fillna("").astype(str).str.strip(), _ad=_adcol)
+        _has_ad = set(map(tuple, _cn.loc[_cn["_ad"].ne(""), ["channel", "creative"]]
+                          .drop_duplicates().values.tolist()))
+        _cn = _cn[_cn["_ad"].eq("") & _cn["_cp"].ne("")]
+        if not _cn.empty:
+            _ncp = _cn.groupby(["channel", "creative"])["_cp"].nunique()
+            _multi = {k for k, v in _ncp.items() if v >= 2 and k not in _has_ad}
+            if _multi:
+                _gc2 = (_cn[[(ch, cr) in _multi for ch, cr in zip(_cn["channel"], _cn["creative"])]]
+                        .groupby(["channel", "creative", "_cp"], as_index=False)[
+                            ["impressions", "clicks", "cost_incl_vat", "conversions", "revenue"]].sum())
+                for _, r in _gc2.iterrows():
+                    _cp = str(r["_cp"])
+                    _by_t.setdefault((r["channel"], r["creative"]), {})[f"{_cp}\x1f"] = {
+                        "adset": "", "campaign": _cp,
+                        "impressions": float(r["impressions"]), "clicks": float(r["clicks"]),
+                        "cost": float(r["cost_incl_vat"]), "media_conv": float(r["conversions"]),
+                        "media_rev": float(r["revenue"])}
     _src_of, _camp_of = {}, {}
     if "source" in c.columns:
         for _, r in c.drop_duplicates(subset=["channel", "creative"], keep="last").iterrows():
@@ -16147,6 +16196,11 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
 
             def _rows_for(a):
                 an = _gc_tgt_norm(bt[a].get("adset", a))
+                if not an:
+                    # 캠페인 단위로만 나뉜 실적(구글 애셋 그룹) — **캠페인이 같은 GA 줄**에만 붙인다.
+                    # 맞는 줄이 없으면 비워둬서 아래에서 캠페인별 'GA 방문 없음' 줄로 세운다
+                    # (다른 캠페인 줄에 얹으면 신규/리타겟팅이 섞인다).
+                    return [i for i in idxs if _camp_ok(i, a)]
                 ex = [i for i in idxs if _nt[i] and _nt[i] == an]
                 if ex:
                     return ex
@@ -16194,8 +16248,10 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 # 짝 없는 광고세트의 돈은 **타겟팅을 모르는 줄**((미설정)·규칙 외)에만 나눈다.
                 # 예전엔 아무 남는 줄에나 넣어서, 유사타겟(신규) 광고비가 방문자180일(리타) 줄에
                 # 붙는 일이 있었다. 그런 줄이 없으면 광고세트별 'GA 방문 없음' 줄로 세운다.
-                free = [i for i in idxs if i not in assigned
-                        and _nt[i] in ("", "(미설정)", "(규칙외)", "(타겟팅없음)")]
+                _camp_only = all(not str(v.get("adset") or "").strip() for v in bt.values())
+                free = [] if _camp_only else [
+                    i for i in idxs if i not in assigned
+                    and _nt[i] in ("", "(미설정)", "(규칙외)", "(타겟팅없음)")]
                 for i in idxs:
                     w_all = (ses[i] / _all) if _all > 0 else (1.0 / len(idxs))
                     if i in assigned:
@@ -17701,7 +17757,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             _seg_n = _seg_r = 0
             if not rows.empty:
-                rows["_seg"] = [_gc_target_group(r) for _, r in rows.iterrows()]
+                rows["_seg"] = [_gc_target_group_m(r) for _, r in rows.iterrows()]
                 rows["_item"] = [_gc_item_group(r) for _, r in rows.iterrows()]
                 _seg_n = int((rows["_seg"] == GC_SEG_NEW).sum())
                 _seg_r = int((rows["_seg"] == GC_SEG_RT).sum())
