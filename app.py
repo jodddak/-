@@ -15595,7 +15595,13 @@ def _gc_filter_media(m, row_seg, row_item, seg, item):
                                                       else (1.0 if kept else 0.0))
     if not kept:
         return None, 0.0
-    return dict(m, **agg, _by_campaign=kept), frac
+    # The metrics were filtered, but the original campaign-name list used to
+    # remain unchanged, showing excluded campaigns beside the surviving row.
+    visible_campaigns = [c for c, values in kept.items()
+                         if str(c).strip() and any(float(values.get(f, 0) or 0) for f in _GC_MF)]
+    return dict(m, **agg, _by_campaign=kept,
+                campaigns=visible_campaigns,
+                campaign=visible_campaigns[0] if visible_campaigns else ""), frac
 
 
 _GC_GA_COLS = ("sessions", "new", "signup", "conv", "rev")
