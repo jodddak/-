@@ -2930,13 +2930,19 @@ GFA_EXT_TABS = {GFA_PC_EXT, GFA_MO_EXT}
 # 메타도 자사몰/외부몰을 다른 광고 계정으로 돌린다(STCO_AD / STCO_스마트스토어).
 META_OWN_TAB = "메타 (자사몰)"
 META_EXT_TAB = "메타 (외부몰)"
+# 제로라운지 — 메타 광고 계정 STCO_코디갤러리(2056061161396388). STCO 자사몰 GA4로 안 들어오는
+# 별도 몰이라 외부몰처럼 구매·매출을 '매체(메타)가 신고한 값'으로 본다.
+META_ZERO_TAB = "메타 (제로라운지)"
+ZERO_SCOPE = "제로라운지"
+# 구매·매출이 STCO 자사몰 GA4에 안 잡히는 구분 — 매체 신고값을 쓰고 ROAS 판단에서 뺀다.
+NON_GA_SCOPES = ("외부몰", ZERO_SCOPE)
 
 # 맨즈탭도 자사몰/외부몰을 따로 돌린다(외부몰은 2026-09 기준 아직 미집행, 곧 시작 예정).
 MANS_OWN_TAB = "네이버 맨즈탭 (자사몰)"
 MANS_EXT_TAB = "네이버 맨즈탭 (외부몰)"
 
 # 외부몰 탭 — GA4가 못 보는 영역이라 구매·매출을 '매체가 신고한 값'으로 본다.
-EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB, MANS_EXT_TAB}
+EXT_TABS = GFA_EXT_TABS | {META_EXT_TAB, MANS_EXT_TAB, META_ZERO_TAB}
 
 
 def gfa_tab_of(text) -> str | None:
@@ -3285,6 +3291,7 @@ CREATIVE_IMAGE_BUCKET = "creative-images"
 # 소재별 성과 화면의 매체탭(기기 분리 후) → 이미지가 들어있는 원본 채널명 역매핑
 TAB_TO_ORIGIN_CHANNEL = {
     "메타": "페이스북", META_OWN_TAB: "페이스북", META_EXT_TAB: "페이스북",
+    META_ZERO_TAB: "페이스북",
     "구글(P-MAX)": "구글",
     "크리테오": "크리테오",
     # GFA는 기기×몰 네 갈래지만 이미지는 한 폴더에 같이 들어 있다.
@@ -5935,93 +5942,6 @@ def _render_budget_box_table(scope_label: str, b_scope: pd.DataFrame, years: lis
     return channel_counts
 
 
-
-# ──────────────────────────────────────────────────────────────
-# 외부몰(스마트스토어) 예산 — 2026-10-06 형이 준 표 그대로 옮긴 값 (원 단위)
-# '◆26년 월별 예산 정리' 파서는 아직 자사몰만 읽어서(외부몰 섹션은 구조가 복잡해 보류),
-# 외부몰은 여기 상수로 따로 둔다. 표가 바뀌면 이 dict만 고치면 된다.
-# 1~9월은 실집행(쇼핑검색 7~9월은 검색광고 API 광고비와 일치 확인), 10~12월은 계획.
-# ──────────────────────────────────────────────────────────────
-EXT_MALL_BUDGET_YEAR = 2026
-EXT_MALL_BUDGET_ROWS = [
-    # (구분, 매체, {월: 금액})
-    ("네이버 맨즈탭", "네이버 맨즈탭", {1: 5000000, 2: 5000000, 3: 8000000, 4: 11000000,
-                                         5: 12300000, 9: 7000000}),
-    ("네이버 맨즈 외", "네이버 쇼핑검색광고", {1: 2163590, 2: 2191332, 3: 3494134, 4: 3262360,
-                                              5: 3257953, 6: 3275608, 7: 2282036, 8: 2163093,
-                                              9: 3192412, 10: 4400000, 11: 5500000, 12: 3300000}),
-    ("네이버 맨즈 외", "네이버 GFA (신규)", {3: 852685, 4: 2360518, 5: 2289694, 9: 1045524,
-                                            10: 3300000, 11: 3500000, 12: 2224264}),
-    ("네이버 맨즈 외", "메타 (신규)", {1: 2436213, 2: 2159225, 9: 930310, 10: 3431754,
-                                      11: 3500000, 12: 2200000}),
-    ("네이버 맨즈 외", "기타", {1: 35377, 2: 29439, 3: 28459}),
-]
-EXT_MALL_MONTH_NOTES = {9: "맨즈 1번", 10: "맨즈 종료", 11: "맨즈 종료", 12: "맨즈 종료"}
-EXT_MALL_PLAN_FROM_MONTH = 10  # 이 달부터는 계획값
-
-
-def render_ext_mall_budget_table():
-    """외부몰 매체별 월 예산/집행 표. 원본 엑셀처럼 구분 열을 rowspan으로 병합하고,
-    월 헤더 아래에 맨즈탭 운영 메모, 맨 아래 TOTAL 행을 둔다."""
-    year = EXT_MALL_BUDGET_YEAR
-    today = datetime.utcnow() + timedelta(hours=9)
-    months = range(1, 13)
-
-    def fmt(v):
-        return f"{v:,.0f}" if v else "-"
-
-    plan_style = ' style="background:#fff8e1;"'
-
-    def month_td(m, v, strong=False):
-        st_ = plan_style if m >= EXT_MALL_PLAN_FROM_MONTH else ""
-        val = f"<b>{fmt(v)}</b>" if strong else fmt(v)
-        return f"<td{st_}>{val}</td>"
-
-    head_months = ""
-    for m in months:
-        note = EXT_MALL_MONTH_NOTES.get(m)
-        note_html = (f'<br><span style="color:#d93025;font-weight:700;">{note}</span>' if note else "")
-        tag = ' <span style="font-weight:400;">(계획)</span>' if m >= EXT_MALL_PLAN_FROM_MONTH else ""
-        head_months += f"<th>{m}월{tag}{note_html}</th>"
-
-    html = ['<div class="stco-budget-wrap"><table class="stco-budget-table"><thead><tr>'
-            f"<th>구분</th><th>매체</th><th>합계(연간)</th><th>당월 누계</th>{head_months}"
-            "</tr></thead><tbody>"]
-
-    cutoff = today.month if year == today.year else 12
-    groups = []
-    for g, ch, vals in EXT_MALL_BUDGET_ROWS:
-        if groups and groups[-1][0] == g:
-            groups[-1][1].append((ch, vals))
-        else:
-            groups.append((g, [(ch, vals)]))
-
-    month_tot = {m: 0.0 for m in months}
-    for g, items in groups:
-        for i, (ch, vals) in enumerate(items):
-            total = sum(vals.values())
-            mtd = sum(v for m, v in vals.items() if m <= cutoff)
-            for m, v in vals.items():
-                month_tot[m] += v
-            g_cell = f'<td rowspan="{len(items)}">{g}</td>' if i == 0 else ""
-            cells = "".join(month_td(m, vals.get(m)) for m in months)
-            html.append(f'<tr>{g_cell}<td>{ch}</td><td class="stco-budget-strong">{fmt(total)}</td>'
-                        f"<td>{fmt(mtd)}</td>{cells}</tr>")
-
-    grand = sum(month_tot.values())
-    grand_mtd = sum(v for m, v in month_tot.items() if m <= cutoff)
-    cells = "".join(f'<td class="stco-budget-strong">{fmt(month_tot[m])}</td>' for m in months)
-    html.append(f'<tr><td colspan="2" class="stco-budget-strong">TOTAL</td>'
-                f'<td class="stco-budget-strong">{fmt(grand)}</td>'
-                f'<td class="stco-budget-strong">{fmt(grand_mtd)}</td>{cells}</tr>')
-    html.append("</tbody></table></div>")
-
-    st.markdown(f"##### 외부몰 현황 ({year}년, 스마트스토어)")
-    st.markdown(BUDGET_TABLE_CSS + "".join(html), unsafe_allow_html=True)
-    st.caption(f"1~9월은 실집행, {EXT_MALL_PLAN_FROM_MONTH}~12월(노란 칸)은 계획입니다. "
-               "외부몰 값은 예산 파일 업로드가 아니라 코드 안 표(EXT_MALL_BUDGET_ROWS)에서 읽습니다.")
-
-
 def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
     st.subheader("💰 예산 현황")
     st.caption(
@@ -6033,14 +5953,12 @@ def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
     )
     if budget is None or budget.empty:
         st.info("아직 예산 데이터가 없습니다. 왼쪽 사이드바 '③ 연간 예산 파일 업로드'에서 파일을 올려주세요.")
-        render_ext_mall_budget_table()
         return
 
     today = datetime.utcnow() + timedelta(hours=9)
     scopes_present = [s for s in BUDGET_SCOPE_TITLES if s in budget["scope"].unique()]
     if not scopes_present:
         st.info("예산 데이터를 찾지 못했습니다. 왼쪽 사이드바 업로드 화면의 진단 정보를 확인해주세요.")
-        render_ext_mall_budget_table()
         return
 
     for scope in scopes_present:
@@ -6053,9 +5971,6 @@ def render_budget_page(monthly: pd.DataFrame, budget: pd.DataFrame):
         diag = " · ".join(f"{y}년 매체 {n}개" for y, n in channel_counts.items())
         st.caption(f"매체 세부내역 인식: {diag}")
         st.markdown("---")
-
-    render_ext_mall_budget_table()
-    st.markdown("---")
 
     st.caption(
         "'매체 세부내역' 매체명은 원본 파일 표기 그대로이며, 다른 페이지(매체별 성과 등)의 리포트 "
@@ -6128,7 +6043,7 @@ def render_channel_mix(fc: pd.DataFrame):
 # ──────────────────────────────────────────────────────────────
 # 현재 실제로 운영 중인 매체 탭만 고정 순서로 노출 (TOTAL이 맨 왼쪽)
 CREATIVE_TABS = (["TOTAL"] + GFA_TABS
-                 + [META_OWN_TAB, META_EXT_TAB, "구글(P-MAX)", "크리테오"])
+                 + [META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB, "구글(P-MAX)", "크리테오"])
 
 
 def _render_creative_table(fc: pd.DataFrame, channel_name: str = None):
@@ -6793,11 +6708,11 @@ TARGETING_STORE_CHANNELS = {"네이버 쇼핑검색광고"}
 
 # 사용자가 정리해준 리포트 순서(비용순 정렬이 아니라 매체 관례상 고정 순서) — 목록에 없는
 # 채널은 뒤에 광고비 내림차순으로 붙는다.
-TARGETING_NEW_CHANNEL_ORDER = GFA_TABS + [META_OWN_TAB, META_EXT_TAB,
+TARGETING_NEW_CHANNEL_ORDER = GFA_TABS + [META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB,
                                           "구글(P-MAX)", "네이버 맨즈탭"]
 TARGETING_RETARGET_OWN_CHANNEL_ORDER = (
     ["네이버 검색광고", "네이버 브랜드검색광고"] + GFA_TABS
-    + [META_OWN_TAB, META_EXT_TAB, "크리테오"])
+    + [META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB, "크리테오"])
 
 TARGETING_CORE_COLS = ["channel", "impressions", "clicks", "ctr", "cpc", "cost_incl_vat",
                         "signups", "signup_rate", "conversions", "revenue", "roas"]
@@ -8873,6 +8788,8 @@ FUNNEL_CANON_RULES = [
     # 메타 외부몰(STCO_스마트스토어 계정)은 메타보다 먼저 봐야 한다 —
     # '메타' 규칙이 먼저 걸리면 자사몰과 합쳐진다.
     ("메타_외부몰", ["메타_외부몰", "메타 (외부몰)", "메타외부몰", "meta_ext"]),
+    # 제로라운지(STCO_코디갤러리 계정)도 '메타' 규칙보다 먼저 — 안 그러면 STCO 메타와 합쳐진다.
+    ("메타_제로라운지", ["메타_제로라운지", "메타 (제로라운지)", "메타제로라운지", "meta_zero"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
     ("카카오톡 플친", ["카카오", "kakao", "플친"]),
@@ -9800,6 +9717,10 @@ def _meta_link_clicks(row: dict) -> float:
 #   ad_account_id_ext = "1932624177545739"   ← STCO_스마트스토어 (외부몰)
 META_CHANNEL = "메타"
 META_EXT_CHANNEL = "메타_외부몰"
+#   ad_account_id_zero = "2056061161396388"  ← STCO_코디갤러리 (제로라운지)
+# 제로라운지 계정은 Secrets에 따로 안 적어도 아래 기본 ID로 받는다(적으면 그 값이 우선).
+META_ZERO_CHANNEL = "메타_제로라운지"
+META_ZERO_ACCOUNT_DEFAULT = "2056061161396388"
 
 
 def _meta_accounts() -> list:
@@ -9823,6 +9744,14 @@ def _meta_accounts() -> list:
         if ext:
             out.append((META_EXT_CHANNEL, ext))
             break
+    zero = None
+    for k in ("ad_account_id_zero", "ad_account_id_제로라운지", "ad_account_id_zerolounge"):
+        zero = _act(cfg.get(k))
+        if zero:
+            break
+    zero = zero or _act(META_ZERO_ACCOUNT_DEFAULT)
+    if zero and zero not in {a for _c, a in out}:
+        out.append((META_ZERO_CHANNEL, zero))
     return out
 
 
@@ -11665,7 +11594,7 @@ AD_CREATIVE_FETCHERS = [
 # 받아버린다 — 외부몰이 영영 안 채워진다. 그래서 fetcher가 덮는 매체를 전부 적어두고
 # 그중 **가장 뒤처진 매체**를 기준으로 시작일을 잡는다.
 FETCHER_CHANNELS = {
-    "메타": ["메타", META_EXT_CHANNEL],
+    "메타": ["메타", META_EXT_CHANNEL, META_ZERO_CHANNEL],
 }
 
 
@@ -12324,6 +12253,8 @@ MEDIA_MASTER_DEFAULT = [
     ("GFA_외부몰",         "외부몰", 130, "네이버 GFA_외부몰",   "",                  0.0, "", 0),
     # 메타는 아예 광고 계정이 다르다 — STCO_스마트스토어(1932624177545739).
     ("메타_외부몰",         "외부몰", 140, "메타_외부몰",         "",                  0.0, "", 0),
+    # ── 제로라운지: 메타 STCO_코디갤러리 계정. STCO GA4에 안 잡혀 메타 신고 구매·매출로 본다. ──
+    ("메타_자사몰",         ZERO_SCOPE, 150, META_ZERO_CHANNEL,   "",                  0.0, "", 0),
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
                      "budget_line", "budget_share", "utm_match", "budget_override", "note"]
@@ -12772,12 +12703,49 @@ def _channel_mix_panel(channel_mix) -> str:
             f'<div class="fv4-mix-list">{rows}</div></div></div>')
 
 
+# ── 외부몰 월 예산 (VAT 포함) — '26년 외부몰 예산 (최종)' 파일 그대로 ──
+# 자사몰 예산 파일(◆26년 월별 예산 정리)에는 외부몰 줄이 없어서 예전엔 쇼핑검색광고만
+# '예산 직접 지정'(220만 원 고정)으로 들고 있었고 맨즈탭·GFA·메타 외부몰은 0원이었다.
+# 맨즈탭 외부몰은 9월(맨즈 1번)까지 집행, 10월부터 종료라 0원이다.
+EXT_BUDGET_MONTHLY = {
+    2026: {
+        "네이버 맨즈탭_외부몰": [5_000_000, 5_000_000, 8_000_000, 11_000_000, 12_300_000, 0,
+                           0, 0, 7_000_000, 0, 0, 0],
+        "네이버 쇼핑검색광고": [2_163_590, 2_191_332, 3_494_133.5, 3_262_360.2, 3_257_952.5,
+                          3_275_607.5, 2_282_035.8, 2_163_092.8, 3_192_412.3, 4_400_000,
+                          5_500_000, 3_300_000],
+        "GFA_외부몰": [0, 0, 852_684.8, 2_360_517.5, 2_289_694, 0, 0, 0, 1_045_523.6,
+                      3_300_000, 3_500_000, 2_224_264.4],
+        "메타_외부몰": [2_436_213, 2_159_225.2, 0, 0, 0, 0, 0, 0, 930_310.3, 3_431_753.8,
+                     3_500_000, 2_200_000],
+    },
+}
+_EXT_KEY = "__ext__:"
+
+
+def _ext_month_budget(ref: date) -> dict:
+    """그 달의 외부몰 예산을 budget_map 키('__ext__:매체') 모양으로 돌려준다.
+    파일에 그 해가 없으면 빈 dict — 그때는 예전처럼 '예산 직접 지정'을 쓴다."""
+    yr = EXT_BUDGET_MONTHLY.get(ref.year)
+    if not yr:
+        return {}
+    return {_EXT_KEY + m: float(v[ref.month - 1] or 0) for m, v in yr.items()}
+
+
+def _media_budget_is_ext(r, budget_map: dict) -> bool:
+    return (str(r.get("scope") or "") == "외부몰"
+            and (_EXT_KEY + str(r.get("media") or "")) in budget_map)
+
+
 def _media_budget(r, budget_map: dict) -> float:
     """매체 한 줄의 월 예산. 직접 지정값이 있으면 그게 우선이다.
 
     예산 파일(자사몰)에 줄이 없는 매체가 있다 — 네이버 쇼핑검색광고 같은 외부몰 매체.
     그런 건 '매체 정의' 패널의 '예산 직접 지정'에 넣어두면 그 값을 쓴다.
+    외부몰은 EXT_BUDGET_MONTHLY(외부몰 예산 파일) 값이 있으면 그게 직접 지정보다 우선이다.
     """
+    if _media_budget_is_ext(r, budget_map):
+        return float(budget_map[_EXT_KEY + str(r.get("media") or "")] or 0)
     try:
         ov = float(r.get("budget_override") or 0)
     except Exception:
@@ -12796,6 +12764,14 @@ def _media_budget(r, budget_map: dict) -> float:
 
 def _cp_month_budget(channel_mix: pd.DataFrame, ref: date,
                      budget: pd.DataFrame = None, scope: str = "자사몰") -> dict:
+    """자사몰 예산(아래 _cp_month_budget_base) + 외부몰 예산(EXT_BUDGET_MONTHLY)."""
+    out = dict(_cp_month_budget_base(channel_mix, ref, budget, scope))
+    out.update(_ext_month_budget(ref))
+    return out
+
+
+def _cp_month_budget_base(channel_mix: pd.DataFrame, ref: date,
+                          budget: pd.DataFrame = None, scope: str = "자사몰") -> dict:
     """해당 월의 매체별 예산을 꺼낸다.
 
     '◆26년 월별 예산 정리'(channel_budget)가 회사 공식 계획이라 이걸 먼저 본다.
@@ -12876,6 +12852,7 @@ CP_CSS = """
 .cp-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:13px;font-weight:700}
 .cp-own{background:#14181F;color:#EFEDE7}
 .cp-ext{background:#E7E4F7;color:#4B3FA8}
+.cp-zero{background:#E3F1EA;color:#1F6B4A;white-space:nowrap}
 .cp-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:13px;font-weight:700;background:#EAF7D9;color:#3F6B12}
 .cp-pill.warn{background:#FDEDE3;color:#9A4B14}
 .cp-pill.zero{background:#F1F1EF;color:#9AA0A8}
@@ -12960,7 +12937,9 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
     for _, r in df.iterrows():
         m, cost, roas = r["매체"], float(r["비용"] or 0), r["GA ROAS"]
         rev = float(r["GA매출"] or 0)
-        if r["구분"] == "외부몰":
+        if r["구분"] == ZERO_SCOPE:
+            skip.append((m, "제로라운지 — STCO GA4에 매출이 안 잡혀 판단 제외 (메타 신고값만 있음)"))
+        elif r["구분"] == "외부몰":
             skip.append((m, "외부몰 — 매출이 GA에 안 잡혀 판단 불가 (스마트스토어 연동 필요)"))
         elif cost <= 0 and rev > 0:
             skip.append((m, f"광고비 미연동 — 매출 {rev:,.0f}원은 잡히는데 비용이 없어 ROAS 계산 불가"))
@@ -13588,7 +13567,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         sp = spend_map.get(sc, {})
         budget = _media_budget(r, budget_map)
         try:   # '예산 직접 지정'은 월 단위 값이라 걸친 달 수만큼 곱한다
-            if float(r.get("budget_override") or 0) > 0:
+            # (외부몰 예산 파일 값은 이미 달마다 더해져 있어 곱하지 않는다)
+            if (float(r.get("budget_override") or 0) > 0
+                    and not _media_budget_is_ext(r, budget_map)):
                 budget *= n_months
         except Exception:
             pass
@@ -13596,7 +13577,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         cost = float(sp.get("cost_incl_vat", 0) or 0)
         _scope = r.get("scope", "자사몰")
         _basis = "GA4"
-        if _scope == "외부몰" and float(g["rev"] or 0) <= 0:
+        if _scope in NON_GA_SCOPES and float(g["rev"] or 0) <= 0:
             _mp = _ext_media_perf.get(_v4_canon_channel(sc)) or {}
             if float(_mp.get("rev", 0) or 0) > 0 or float(_mp.get("conv", 0) or 0) > 0:
                 g = {"conv": float(_mp.get("conv", 0)), "rev": float(_mp.get("rev", 0))}
@@ -13610,7 +13591,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             # 외부몰인데 매출이 0이면 ROAS를 0%가 아니라 '—'(모름)으로 둔다.
             # 스마트스토어는 외부 스크립트를 못 붙여서 메타 픽셀도, GA4도 매출을 못 본다.
             # 0%로 찍으면 '성과가 없다'로 읽히는데 실제로는 '측정이 안 된다'이다.
-            "GA ROAS": (None if (_scope == "외부몰" and float(g["rev"] or 0) <= 0)
+            "GA ROAS": (None if (_scope in NON_GA_SCOPES and float(g["rev"] or 0) <= 0)
                         else ((g["rev"] / cost * 100) if cost > 0 else None)),
             "월예산": budget,
             "예산 소진율": (cost / budget * 100) if budget > 0 else None,
@@ -13633,7 +13614,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         if _ext_basis:
             st.caption(
                 "ℹ️ " + ", ".join(_ext_basis) + " 의 구매·매출은 **매체가 신고한 값**입니다 — "
-                "외부몰은 스마트스토어로 보내서 자사몰 GA4에 안 잡히기 때문입니다. "
+                "외부몰(스마트스토어)·제로라운지는 STCO 자사몰 GA4에 안 잡히기 때문입니다. "
                 "어트리뷰션 기준이 GA와 달라(보통 더 후합니다) 자사몰 매체와 나란히 "
                 "비교하진 마세요."
             )
@@ -13682,7 +13663,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # ── 구분 필터 (KPI보다 위) ────────────────────────────
     # 필터를 KPI 아래에 두면 '자사몰'을 골라도 위 숫자는 전체라서 예산·ROAS를 잘못 읽게 된다.
     # 자사몰과 외부몰은 재원도 매출 집계 방식도 달라 반드시 같이 걸러야 한다.
-    scope_f = st.radio("구분", ["전체", "자사몰", "외부몰"], horizontal=True, key="cp_scope")
+    scope_f = st.radio("구분", ["전체", "자사몰", "외부몰", ZERO_SCOPE], horizontal=True,
+                       key="cp_scope")
     view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
 
     # ── 상단 KPI (선택한 구분 기준) ────────────────────────
@@ -13691,7 +13673,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 합계·KPI의 매출은 **GA 기준끼리만** 더한다. 외부몰의 '매체 신고 매출'은 기준이 달라
     # (보통 더 후하다) 섞으면 전체 ROAS가 부풀고 아침 메일(GA만 셈)과도 달라진다.
     # '외부몰'만 골랐을 땐 전부 같은 기준이라 그대로 더한다.
-    _tv = view if (scope_f == "외부몰" or "_basis" not in view.columns) \
+    _tv = view if (scope_f in NON_GA_SCOPES or "_basis" not in view.columns) \
         else view[view["_basis"] != "매체"]
     _mixed_out = (len(_tv) != len(view))
     tot_rev = _tv["GA매출"].sum()
@@ -13706,14 +13688,18 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0
     pace = (tot_cost / tot_budget * 100) if tot_budget > 0 else 0
     pace_word = "과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")
-    scope_note = "자사몰 + 외부몰" if scope_f == "전체" else scope_f
+    scope_note = ("자사몰 + 외부몰" + (" + 제로라운지" if (df["구분"] == ZERO_SCOPE).any() else "")
+                  if scope_f == "전체" else scope_f)
     _bud_label = "월 예산" if n_months == 1 else f"예산 ({n_months}개월 합)"
     _bud_sub = f"{ref_m.year}년 {ref_m.month}월"
     if n_months > 1:
         _bud_sub += f"~{_last_m.year}년 {_last_m.month}월"
     ext_note = ('<div class="cp-note" style="margin:-6px 0 12px">'
                 '· 외부몰 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 ROAS는 0으로 나옵니다.'
-                '</div>') if scope_f == "외부몰" else ""
+                '</div>') if scope_f == "외부몰" else (
+        ('<div class="cp-note" style="margin:-6px 0 12px">'
+         '· 제로라운지(메타 STCO_코디갤러리 계정)는 STCO GA4에 안 잡혀 구매·매출을 '
+         '<b>메타가 신고한 값</b>으로 보여줍니다.</div>') if scope_f == ZERO_SCOPE else "")
     st.markdown(
         '<div class="cp-wrap">'
         '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
@@ -13788,7 +13774,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 
     body = []
     for _, r in view.iterrows():
-        badge = "cp-ext" if r["구분"] == "외부몰" else "cp-own"
+        badge = ("cp-ext" if r["구분"] == "외부몰"
+                 else "cp-zero" if r["구분"] == ZERO_SCOPE else "cp-own")
         # CTR·CPC는 저장하지 않고 여기서 계산한다 — 노출·클릭·광고비에서 바로 나오고,
         # 따로 저장하면 원본이 보정될 때 같이 안 바뀌어 어긋난다.
         _imp, _clk, _cost = float(r["노출"] or 0), float(r["클릭"] or 0), float(r["비용"] or 0)
@@ -14067,7 +14054,7 @@ tr.cp-has-sub:hover td{background:#F4F2EA}
             mst, num_rows="dynamic", use_container_width=True, key="cp_master_editor",
             column_config={
                 "media": st.column_config.TextColumn("매체명", required=True),
-                "scope": st.column_config.SelectboxColumn("구분", options=["자사몰", "외부몰"], required=True),
+                "scope": st.column_config.SelectboxColumn("구분", options=["자사몰", "외부몰", ZERO_SCOPE], required=True),
                 "sort_order": st.column_config.NumberColumn("순서", format="%d", width="small"),
                 "spend_channel": st.column_config.TextColumn("광고비 출처(채널명)"),
                 "budget_line": st.column_config.TextColumn("예산 라인(채널믹스)"),
@@ -14375,7 +14362,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         ROAS가 0으로 보이는데, 그대로 읽으면 '감액'이라는 틀린 지시가 나간다.
         정액 계약 매체는 금액이 계약으로 묶여 있어 애초에 조정할 수 없다.
         """
-        if r["구분"] == "외부몰":
+        if r["구분"] in NON_GA_SCOPES:
             return "판단 제외"
         if r["고정"]:
             return "계약 고정"
@@ -14414,7 +14401,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
     heads = ["매체", "판정", "월 예산", "집행", "예산 소진율", "남은 예산", "GA ROAS"]
     th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
     body = []
-    for scope_name in ["자사몰", "외부몰"]:
+    for scope_name in ["자사몰", "외부몰", ZERO_SCOPE]:
         sub = df[df["구분"] == scope_name]
         if sub.empty:
             continue
@@ -14842,6 +14829,8 @@ def _gc_channel(name) -> str:
     # 메타·맨즈탭도 자사몰/외부몰을 따로 돌린다. 옛 데이터는 구분 없이 저장돼 있는데,
     # 그때는 외부몰을 안 받았으니 전부 자사몰로 보는 게 맞다.
     _ext = ("외부몰" in s) or ("스마트스토어" in s)
+    if canon == META_ZERO_CHANNEL:
+        return META_ZERO_TAB
     if canon in ("메타", META_EXT_CHANNEL):
         return META_EXT_TAB if (canon == META_EXT_CHANNEL or _ext) else META_OWN_TAB
     if canon in ("네이버 맨즈탭", "네이버 맨즈탭_외부몰"):
@@ -14856,6 +14845,7 @@ _GC_TAB_ORDER_FIX = {
     GFA_PC_EXT: "네이버 GFA 1 (외부몰)", GFA_MO_EXT: "네이버 GFA 2 (외부몰)",
     # 메타도 자사몰 → 외부몰 순으로
     META_OWN_TAB: "메타 1 (자사몰)", META_EXT_TAB: "메타 2 (외부몰)",
+    META_ZERO_TAB: "메타 3 (제로라운지)",
     # 맨즈탭 자사몰은 자사몰 매체 중 **맨 끝**(크리테오 다음)에 온다.
     # 가나다순이면 GFA와 애드부스트 사이로 끼어들어서, 'ㅎ'으로 시작하는 키를 줘 뒤로 민다.
     MANS_OWN_TAB: "하 네이버 맨즈탭 (자사몰)", MANS_EXT_TAB: "네이버 맨즈탭 2 (외부몰)",
@@ -18213,7 +18203,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     if not _names:
                         st.caption("광고비가 붙은 소재가 없습니다.")
                     else:
-                        if label in (META_OWN_TAB, META_EXT_TAB):
+                        if label in (META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB):
                             # 메타는 같은 광고를 여러 광고세트(타겟팅)에 올려서, 광고세트별로
                             # 받아야 관리자 화면과 숫자가 맞는다. 예전에 합쳐 받은 기간은 여기서 다시 받는다.
                             _has_adset = "adset" in ad_creative.columns
@@ -18731,7 +18721,7 @@ def render_ga_channel_funnel_page(
     _ext_ch = set()
     try:
         for _, _r in media_master_frame(master).iterrows():
-            if str(_r.get("scope") or "") == "외부몰" and str(_r.get("spend_channel") or "").strip():
+            if str(_r.get("scope") or "") in NON_GA_SCOPES and str(_r.get("spend_channel") or "").strip():
                 _ext_ch.add(_v4_canon_channel(str(_r.get("spend_channel")).strip()))
     except Exception:
         pass
