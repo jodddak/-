@@ -16461,6 +16461,12 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
             wts = {}
             for a in sorted(bt, key=lambda x: -float(bt[x].get("cost", 0) or 0)):
                 cands = _rows_for(a)
+                # GFA reports retain campaign identity. Do not attach another
+                # product campaign merely because its targeting name is identical.
+                # Unknown UTM campaign labels retain the existing fallback.
+                if str(base.get("channel") or "").startswith("네이버 GFA"):
+                    cands = [i for i in cands if _camp_ok(i, a)
+                             or _gc_item_of_campaign(camps[i]) is None]
                 if not cands:
                     continue
                 # 같은 타겟팅이 GA에서 캠페인별로 여러 줄이면 캠페인으로 가른다.
@@ -16527,8 +16533,11 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                         _gc_add_parts(_pbc, _rest_bc, w)
                     else:
                         d = {f: collapsed[f] * w_all for f in _F}
-                    _cps = (sorted({bt[a].get("campaign", "") for a in assigned[i]} - {""})
-                            if i in assigned else base.get("campaigns"))
+                    _assigned_cps = {bt[a].get("campaign", "") for a in assigned.get(i, [])}
+                    _cps = sorted(c for c, values in _pbc.items()
+                                  if c and (c in _assigned_cps or
+                                            any(float(values.get(f, 0) or 0) for f in _F)))
+                    _pbc = {c: values for c, values in _pbc.items() if c in _cps}
                     out[i] = dict(d, channel=base.get("channel"), name=base.get("name"),
                                   src=base.get("src"), _split=len(idxs), _first=base.get("_first"),
                                   _adset=", ".join(bt[a].get("adset", "") for a in assigned.get(i, [])),
@@ -16537,7 +16546,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                   # 실제로 붙인 광고세트의 캠페인만 적는다(다른 캠페인 이름이 섞여 보이지 않게)
                                   campaigns=_cps,
                                   campaign=((_cps or [None])[0] if i in assigned else None)
-                                  or base.get("campaign"),
+                                  or "",
                                   _by_campaign=_pbc)
                 # GA 줄이 없는 광고세트의 돈은 버리지 않고, 메타 관리자 화면처럼
                 # **광고세트 하나에 한 줄씩** 'GA 방문 없음' 줄로 세운다(합계가 관리자와 맞게).
