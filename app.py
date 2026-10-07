@@ -15127,7 +15127,28 @@ CR_EXCL = "판단 제외"
 # 칩 색 — 행동이 필요한 것만 진하게
 CR_CLS = {CR_OFF: "off", CR_CUT: "bad", CR_UP: "up", CR_HIDDEN: "good",
           CR_KEEP: "keep", CR_HOLD_UP: "warn", CR_LEARN: "hold", CR_THIN: "hold",
-          CR_EXCL: "hold", "광고비 없음": "hold", "UTM 없음": "hold", "꺼짐": "hold"}
+          CR_EXCL: "hold", "광고비 없음": "hold", "UTM 없음": "hold", "꺼짐": "hold",
+          "유입 없음": "hold"}
+
+# GA에 못 붙은 소재 중 **링크 클릭이 이 이하**면 'UTM 없음'이 아니라 '유입 없음'으로 본다.
+# 클릭이 0~2건이면 GA4에 방문이 안 남는 게 정상이다(클릭 후 바로 이탈하면 태그가 안 뜬다).
+# UTM이 멀쩡한데 'utm_content를 맞추라'고 하면 엉뚱한 걸 고치게 된다(261001_바시티자켓).
+CR_NO_VISIT_CLICKS = 2
+
+
+def _cr_no_visit(m) -> bool:
+    try:
+        return float((m or {}).get("clicks", 0) or 0) <= CR_NO_VISIT_CLICKS
+    except Exception:
+        return False
+
+
+def _cr_unmatched_label(m) -> tuple:
+    """GA에 못 붙은 매체 줄의 (판정, 사유)."""
+    if _cr_no_visit(m):
+        _c = int(float((m or {}).get("clicks", 0) or 0))
+        return "유입 없음", f"링크 클릭 {_c}건 — 아직 GA로 들어온 방문이 없음 (UTM 문제 아님)"
+    return "UTM 없음", "GA에서 못 찾음 — utm_content를 소재명과 맞춰주세요"
 CR_ORDER = [CR_OFF, CR_CUT, CR_UP, CR_HIDDEN, CR_HOLD_UP, CR_KEEP, CR_LEARN, CR_THIN]
 
 
@@ -15214,7 +15235,8 @@ def cr_rule_for(r, media, avg_spend=None) -> tuple:
     rev = float((m.get("media_rev") if basis else r.get("rev")) or 0)
     age = _cr_age(r, m)
     if m.get("_unmatched") and not basis and not m.get("_adset_rest"):
-        return "UTM 없음", "hold", "GA에서 못 찾음 — utm_content를 소재명과 맞춰주세요", age
+        _lb, _wy = _cr_unmatched_label(m)
+        return _lb, "hold", _wy, age
     if cost <= 0:
         return "광고비 없음", "hold", "매체 광고비가 안 붙음(꺼짐·이름 불일치)", age
     if basis and rev <= 0 and conv <= 0:
@@ -15304,6 +15326,9 @@ def cr_comment_lines(items: list, label: str, tot_cost: float, tot_rev: float) -
     nu = [x for x in items if x[1] == "UTM 없음" and x[3] > 0]
     if nu:
         out.append(f"UTM 없음 {len(nu)}개 · 광고비 {_cr_won(sum(x[3] for x in nu))} — 매출을 못 붙여 판단 불가. utm_content를 소재명과 맞춰주세요.")
+    nv = [x for x in items if x[1] == "유입 없음" and x[3] > 0]
+    if nv:
+        out.append(f"유입 없음 {len(nv)}개 · 광고비 {_cr_won(sum(x[3] for x in nv))} — 링크 클릭이 거의 없어 GA 방문이 아직 없습니다(UTM 문제 아님).")
     return out
 
 
@@ -16315,7 +16340,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     if (media or {}).get("_unmatched") and not _basis:
         # GA에서 이 소재를 못 찾았으니 매출이 0인 게 아니라 '알 수 없음'이다.
         # 성과가 나쁘다고 단정하면 안 된다 — UTM을 붙여야 판단이 가능해진다.
-        label, cls = "UTM 없음", "hold"
+        label, cls = _cr_unmatched_label(media)[0], "hold"
         roas_txt = "-"
     _why = ""
     _rule = (media or {}).get("_rule")
@@ -16412,7 +16437,7 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
     if cost <= 0:
         label = "광고비 없음"
     if (media or {}).get("_unmatched") and not _basis:
-        label, roas = "UTM 없음", None
+        label, roas = _cr_unmatched_label(media)[0], None
     _why, _age = "", None
     _rule = (media or {}).get("_rule")
     if _rule and not is_total:
@@ -18037,7 +18062,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if level == "소재":
                 # UTM 없음 줄도 코멘트에 넣는다(돈은 나갔으니까)
                 for (ch_k, name_k), m in leftovers:
-                    _cr_items.append((str(m.get("name") or name_k), "UTM 없음", "",
+                    _cr_items.append((str(m.get("name") or name_k), _cr_unmatched_label(m)[0], "",
                                       float(m.get("cost", 0) or 0), 0.0, 0.0))
                 if _media_basis:
                     _rv = sum(float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"])
@@ -18083,7 +18108,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         "key": (f'{_nm}<span class="gc-sub">'
                                 f'{str(m.get("campaign") or "").strip() or ch_k} · '
                                 + ('이 광고세트로 들어온 GA 방문 없음' if m.get("_adset_rest")
-                                   else 'GA 매칭 안 됨') + '</span>'),
+                                   else ('클릭이 거의 없어 GA 방문 없음' if _cr_no_visit(m)
+                                         else 'GA 매칭 안 됨')) + '</span>'),
                         "target": str(m.get("_adset") or ""),
                         "sessions": 0.0, "conv": 0.0, "rev": 0.0,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
