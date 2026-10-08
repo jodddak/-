@@ -16384,6 +16384,12 @@ def load_manual_status() -> dict:
         stt = str(r.get("status") or "").upper()
         if stt in ("ON", "OFF"):
             out[k] = (stt, str(r.get("updated_at") or "")[:10])
+    # 방금 표에서 바꾼 값 — 저장은 바로 하되 캐시를 통째로 비우지 않으므로(그러면 모든 표를
+    # 다시 읽어 느렸다) 이번 세션에서 바꾼 값을 위에 덮어 쓴다.
+    try:
+        out.update(st.session_state.get("gc_manual_overlay") or {})
+    except Exception:
+        pass
     return out
 
 
@@ -17115,6 +17121,39 @@ def _gc_inline_onoff_row(row_html, index, record):
     return row_html.replace('<span class="fv4-chip ', control + '<span class="fv4-chip ', 1)
 
 
+def _gc_status_table_body(card, recs, label, height, ti):
+    """GFA 소재 표 + 소재 옆 ON/OFF. 바꾼 줄 하나만 저장하고 **화면 전체를 다시 그리지 않는다.**
+    예전엔 저장 뒤 캐시를 통째로 비우고 전체를 다시 그려서, 버튼 하나 바꾸는 데 한참 걸렸다."""
+    event = _gc_status_component()(
+        html=card, identities=[[str(r.get("이름") or ""), str(r.get("타겟팅") or "")] for r in recs],
+        height=height, key=f"gc_inline_status_{ti}", default=None)
+    if not (isinstance(event, dict) and event.get("nonce") != st.session_state.get(f"gc_status_event_{ti}")):
+        return
+    st.session_state[f"gc_status_event_{ti}"] = event.get("nonce")
+    index, status = event.get("row"), event.get("status")
+    if not (isinstance(index, int) and 0 <= index < len(recs) and status in ("ON", "OFF")
+            and event.get("identity") == [str(recs[index].get("이름") or ""),
+                                          str(recs[index].get("타겟팅") or "")]):
+        return
+    record = recs[index]
+    _now = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
+    frame = pd.DataFrame([dict(channel=label, creative=record.get("이름"),
+                               target=record.get("타겟팅") or "", status=status, updated_at=_now)])
+    if save_table("creative_status_manual", frame, "channel,creative,target", "소재 옆 ON/OFF 선택"):
+        _ov = dict(st.session_state.get("gc_manual_overlay") or {})
+        _ov[(label, _creative_image_key(str(record.get("이름") or "")),
+             str(record.get("타겟팅") or ""))] = (status, _now[:10])
+        st.session_state["gc_manual_overlay"] = _ov
+        st.toast(f"{record.get('이름')} → {status} 저장")
+    else:
+        st.error("ON/OFF 저장에 실패했습니다. 저장소 연결과 creative_status_manual 테이블을 확인해주세요.")
+
+
+# 표 부분만 다시 그리는 조각(fragment) — 없는 Streamlit 버전이면 그냥 함수로 쓴다
+_gc_status_table = (st.fragment(_gc_status_table_body) if hasattr(st, "fragment")
+                    else _gc_status_table_body)
+
+
 @st.cache_resource
 def _gc_status_component():
     import tempfile
@@ -17123,12 +17162,20 @@ def _gc_status_component():
     page = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><div id="root"></div>
 <script>
 function send(type, data){parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
+var ov={};
 window.addEventListener('message',function(event){
  if(event.data.type!=='streamlit:render')return;
  var args=event.data.args, root=document.getElementById('root');root.innerHTML=args.html;
  root.querySelectorAll('script').forEach(function(old){var sc=document.createElement('script');sc.textContent=old.textContent;old.replaceWith(sc);});
+ root.querySelectorAll('.gc-inline-onoff').forEach(function(el){
+  var r=JSON.stringify(args.identities[Number(el.dataset.row)]||[]);
+  if(ov[r]){el.value=ov[r];el.style.background=(ov[r]==='ON'?'#E4F6DC':'#EFEEE8');
+   var td=el.closest('td'); if(td){td.setAttribute('data-o', ov[r]==='ON'?'3':'0');}}
+ });
  root.querySelectorAll('.gc-inline-onoff').forEach(function(el){el.addEventListener('change',function(){
-  if(!el.value)return;el.disabled=true;
+  if(!el.value)return; ov[JSON.stringify(args.identities[Number(el.dataset.row)]||[])]=el.value;
+  el.style.background=(el.value==='ON'?'#E4F6DC':'#EFEEE8');
+  var td=el.closest('td'); if(td){td.setAttribute('data-o', el.value==='ON'?'3':'0');}
   send('streamlit:setComponentValue',{value:{row:Number(el.dataset.row),identity:args.identities[Number(el.dataset.row)],status:el.value,nonce:Date.now()+'-'+Math.random()},dataType:'json'});
  });});
  send('streamlit:setFrameHeight',{height:args.height});
@@ -18860,25 +18907,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if not _media_basis:
                 _gap_panel(label, tot_rev, tot_conv)
             if level == "소재" and label in GFA_TABS and recs:
-                event = _gc_status_component()(html=card,
-                    identities=[[str(r.get("이름") or ""), str(r.get("타겟팅") or "")] for r in recs],
-                    height=min(14000, 288 + row_h * len(body)), key=f"gc_inline_status_{ti}", default=None)
-                if isinstance(event, dict) and event.get("nonce") != st.session_state.get(f"gc_status_event_{ti}"):
-                    st.session_state[f"gc_status_event_{ti}"] = event.get("nonce")
-                    index = event.get("row")
-                    status = event.get("status")
-                    if (isinstance(index, int) and 0 <= index < len(recs) and status in ("ON", "OFF")
-                            and event.get("identity") == [str(recs[index].get("이름") or ""),
-                                                          str(recs[index].get("타겟팅") or "")]):
-                        record = recs[index]
-                        frame = pd.DataFrame([dict(channel=label, creative=record.get("이름"),
-                            target=record.get("타겟팅") or "", status=status,
-                            updated_at=(datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M"))])
-                        if save_table("creative_status_manual", frame, "channel,creative,target", "소재 옆 ON/OFF 선택"):
-                            st.cache_data.clear()
-                            st.rerun()
-                        else:
-                            st.error("ON/OFF 저장에 실패했습니다. 저장소 연결과 creative_status_manual 테이블을 확인해주세요.")
+                _gc_status_table(card, recs, label, min(14000, 288 + row_h * len(body)), ti)
             else:
                 st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)), scrolling=False)
 
