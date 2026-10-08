@@ -3873,7 +3873,10 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
         # 고를 수 있는 날짜는 '오늘'까지 열어둔다. 데이터 마지막 날로 막아두면 오늘·어제가
         # 회색으로 안 눌려서 고장처럼 보였다. 데이터 범위를 넘으면 적용할 때 맞춰 자른다.
         applied_key = f"{key}_applied"
-        applied = st.session_state.get(applied_key) or (min_d, max_d)
+        # 처음 직접선택을 누르면 **이번달 1일 ~ 데이터 마지막 날**로 연다(예전엔 데이터 첫날부터라
+        # 7/21처럼 몇 달 전이 잡혀 매번 고쳐야 했다). 한 번 확인을 누른 기간은 그대로 기억한다.
+        _m1 = kst_today().replace(day=1)
+        applied = st.session_state.get(applied_key) or (max(_m1, min_d) if _m1 <= max_d else min_d, max_d)
         applied = (max(applied[0], min_d), min(applied[1], max_d))
         _today = kst_today()
         _lo = min(min_d, _today)
@@ -4464,7 +4467,9 @@ def render_cumulative_table(df: pd.DataFrame, date_col: str, show_cols: list, nu
         min_d, max_d = d[date_col].min().date(), d[date_col].max().date()
         narrow_col, _spacer = st.columns([3, 9])
         with narrow_col:
-            date_range = st.date_input("기간 직접 선택", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
+            _m1 = kst_today().replace(day=1)
+            _s0 = max(_m1, min_d) if _m1 <= max_d else min_d     # 기본은 이번달 1일부터
+            date_range = st.date_input("기간 직접 선택", value=(_s0, max_d), min_value=min_d, max_value=max_d, key=f"{key}_manual")
         start, end = date_range if isinstance(date_range, tuple) and len(date_range) == 2 else (min_d, max_d)
         view_all = d[(d[date_col].dt.date >= start) & (d[date_col].dt.date <= end)]
     else:  # "YYYY년"
