@@ -692,6 +692,19 @@ def inject_theme():
 
         [data-testid="stPopover"] {{ width: fit-content !important; }}
         [data-testid="stPopover"] > div {{ width: fit-content !important; }}
+        /* 타겟팅·품목·세부 타겟팅 버튼(segmented control) — 붙어 있는 버튼끼리 테두리를
+           나눠 쓰는 구조라, 화면 배율에 따라 선택된 칸 옆 경계선이 비어 보였다.
+           버튼마다 자기 테두리를 갖고 살짝 띄워서 칸이 항상 또렷하게 보이게 한다. */
+        div[data-testid="stButtonGroup"] > div {{ gap: 6px !important; flex-wrap: wrap !important; }}
+        div[data-testid="stButtonGroup"] button {{
+            border: 1px solid #D6D3CB !important;
+            border-radius: 8px !important; margin: 0 !important;
+        }}
+        div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"],
+        div[data-testid="stButtonGroup"] button[aria-checked="true"] {{
+            border-color: #F0596A !important;
+        }}
+
         [data-testid="stPopover"] > div > button {{
             background-color: {THEME_COLORS["canvas"]} !important;
             color: {THEME_COLORS["foreground"]} !important;
@@ -16376,7 +16389,7 @@ def load_manual_status() -> dict:
 
 def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
              manual: dict = None) -> tuple:
-    """(표시 'ON'/'OFF'/'일부 ON'/'ON?'/'OFF?', 켜짐 여부 True/False/None, 설명).
+    """(표시 'ON'/'OFF'/'일부 ON', 켜짐 여부 True/False/None, 설명).
 
     API 상태가 있으면 그걸 쓴다. 같은 소재가 여러 광고세트에 있으면 이 줄의 타겟팅
     (방문자180일 등)이 이름에 들어간 광고세트만 본다. API가 없는 매체는 마지막 집행일로
@@ -16415,8 +16428,8 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
     newest = ch_max.get(tab)
     if last and newest:
         if (newest - last).days <= 1:
-            return "ON?", True, f"최근 집행 {last:%m/%d} (추정)"
-        return "OFF?", False, f"마지막 집행 {last:%m/%d} (추정)"
+            return "ON", True, f"최근 집행 {last:%m/%d} (추정)"
+        return "OFF", False, f"마지막 집행 {last:%m/%d} (추정)"
     return "", None, ""
 
 
