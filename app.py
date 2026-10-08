@@ -16787,7 +16787,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
         f'<td data-v="{aov:.0f}">{dash(aov, ",.0f")}{"원" if aov else ""}</td>'
         f'<td data-v="{roas:.2f}">{roas_txt}</td>'
-        f'<td data-o="{_oo_rank}" data-j="{_lbl_attr}">{chip}</td>'
+        f'<td data-v="{_oo_rank}" data-o="{_oo_rank}" data-j="{_lbl_attr}">{chip}</td>'
         f'</tr>'
     )
 
@@ -17115,6 +17115,9 @@ def _gc_inline_onoff_row(row_html, index, record):
                f'style="font-size:11px;font-weight:800;border:1px solid #ddd;border-radius:8px;'
                f'padding:2px 5px;background:{"#E4F6DC" if status.startswith("ON") else "#EFEEE8"};margin-right:6px">'
                + options + '</select>')
+    # 정렬 값은 **화면에 보이는 상태**와 같게 맞춘다(ON 3 · 일부 ON 2 · 미확인 1 · OFF 0)
+    _rk = {"ON": 3, "일부 ON": 2, "OFF": 0}.get(status.rstrip("?"), 1)
+    row_html = re.sub(r'data-v="[^"]*" data-o="[^"]*"', f'data-v="{_rk}" data-o="{_rk}"', row_html)
     if re.search(r'<span class="gc-onoff [^"]*"[^>]*>.*?</span>', row_html):
         return re.sub(r'<span class="gc-onoff [^"]*"[^>]*>.*?</span>', lambda m: control,
                       row_html, count=1)
@@ -17170,12 +17173,12 @@ window.addEventListener('message',function(event){
  root.querySelectorAll('.gc-inline-onoff').forEach(function(el){
   var r=JSON.stringify(args.identities[Number(el.dataset.row)]||[]);
   if(ov[r]){el.value=ov[r];el.style.background=(ov[r]==='ON'?'#E4F6DC':'#EFEEE8');
-   var td=el.closest('td'); if(td){td.setAttribute('data-o', ov[r]==='ON'?'3':'0');}}
+   var td=el.closest('td'); if(td){var k=ov[r]==='ON'?'3':'0';td.setAttribute('data-o',k);td.setAttribute('data-v',k);}}
  });
  root.querySelectorAll('.gc-inline-onoff').forEach(function(el){el.addEventListener('change',function(){
   if(!el.value)return; ov[JSON.stringify(args.identities[Number(el.dataset.row)]||[])]=el.value;
   el.style.background=(el.value==='ON'?'#E4F6DC':'#EFEEE8');
-  var td=el.closest('td'); if(td){td.setAttribute('data-o', el.value==='ON'?'3':'0');}
+  var td=el.closest('td'); if(td){var k=el.value==='ON'?'3':'0';td.setAttribute('data-o',k);td.setAttribute('data-v',k);}
   send('streamlit:setComponentValue',{value:{row:Number(el.dataset.row),identity:args.identities[Number(el.dataset.row)],status:el.value,nonce:Date.now()+'-'+Math.random()},dataType:'json'});
  });});
  send('streamlit:setFrameHeight',{height:args.height});
