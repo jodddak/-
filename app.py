@@ -18831,10 +18831,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # '판정' 머리글은 두 가지로 정렬한다 — 판정 글자 / ON·OFF 상태
             th = "".join(
                 (f'<th class="{"l" if i == 0 else ""}">'
-                 f'<span data-k="o" title="ON 먼저 ↔ OFF 먼저" style="white-space:nowrap;">{h}'
-                 f'<span style="display:inline-block;margin-left:22px;padding:1px 8px;'
+                 f'<span data-k="o" title="ON 먼저 ↔ OFF 먼저" style="white-space:nowrap;">'
+                 f'<span style="display:inline-block;margin-right:22px;padding:1px 8px;'
                  f'border:1px solid #D6D3CB;border-radius:6px;">ON/OFF'
-                 f'<span class="fv4-ar">&#8645;</span></span></span></th>')
+                 f'<span class="fv4-ar">&#8645;</span></span>{h}</span></th>')
                 if h == "판정" else
                 (f'<th class="{"l" if i == 0 else ""}">{h}'
                  f'<span class="fv4-ar">&#8645;</span></th>')
