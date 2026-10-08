@@ -16762,6 +16762,12 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     def dash(v, fmt):
         return format(v, fmt) if v else "-"
 
+    # 판정 칸 정렬용 — ON/OFF 순서(ON 3 · 일부 ON 2 · 미확인 1 · OFF 0)와 판정 글자
+    _oo_s = str(((media or {}).get("_onoff") or ("",))[0] or "")
+    _oo_rank = {"ON": 3, "일부 ON": 2, "OFF": 0}.get(_oo_s, 1)
+    _lbl_attr = (str(label or "").replace("&", "&amp;").replace('"', "&quot;")
+                 .replace("<", "&lt;").replace(">", "&gt;"))
+
     return (
         f'<tr class="{extra_cls}">'
         f'<td class="l">{name}</td>'
@@ -16775,7 +16781,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
         f'<td data-v="{aov:.0f}">{dash(aov, ",.0f")}{"원" if aov else ""}</td>'
         f'<td data-v="{roas:.2f}">{roas_txt}</td>'
-        f'<td>{chip}</td>'
+        f'<td data-o="{_oo_rank}" data-j="{_lbl_attr}">{chip}</td>'
         f'</tr>'
     )
 
@@ -18772,9 +18778,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                       ("매체 매출" if h == "GA 매출" else h) for h in head]
                      if _media_basis else head)
             tid = f"gctbl{ti}"
-            th = "".join(f'<th class="{"l" if i == 0 else ""}">{h}'
-                         f'<span class="fv4-ar">&#8645;</span></th>'
-                         for i, h in enumerate(_head))
+            # '판정' 머리글은 두 가지로 정렬한다 — 판정 글자 / ON·OFF 상태
+            th = "".join(
+                (f'<th class="{"l" if i == 0 else ""}">'
+                 f'<span data-k="j">{h}<span class="fv4-ar">&#8645;</span></span>'
+                 f'<span data-k="o" title="ON/OFF 상태로 정렬" style="margin-left:10px;'
+                 f'padding:1px 6px;border:1px solid #D6D3CB;border-radius:6px;">'
+                 f'ON/OFF<span class="fv4-ar">&#8645;</span></span></th>')
+                if h == "판정" else
+                (f'<th class="{"l" if i == 0 else ""}">{h}'
+                 f'<span class="fv4-ar">&#8645;</span></th>')
+                for i, h in enumerate(_head))
             if level == "소재" and label in GFA_TABS and recs:
                 body = [_gc_inline_onoff_row(h, i, recs[i]) for i, h in enumerate(body)]
             table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
@@ -18807,17 +18821,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 <script>
 (function(){
   var t=document.getElementById('__TID__'); if(!t) return;
-  var ths=t.tHead.rows[0].cells, st={i:-1,asc:false};
-  function v(row,i){var c=row.cells[i]; if(!c) return '';
+  var ths=t.tHead.rows[0].cells, st={i:-1,k:'',asc:false};
+  function v(row,i,k){var c=row.cells[i]; if(!c) return '';
+    if(k==='o'){var o=c.getAttribute('data-o'); return o!==null?parseFloat(o):1;}
+    if(k==='j'){var j=c.getAttribute('data-j'); return j!==null?j:c.innerText.trim();}
     var d=c.getAttribute('data-v'); return d!==null?parseFloat(d):c.innerText.trim();}
   for(var i=0;i<ths.length;i++){(function(i){
     ths[i].style.cursor='pointer';
-    ths[i].onclick=function(){
-      var asc=(st.i===i)?!st.asc:false; st={i:i,asc:asc};
+    ths[i].onclick=function(ev){
+      var kel=ev&&ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null;
+      var k=kel?kel.getAttribute('data-k'):'';
+      var asc=(st.i===i&&st.k===k)?!st.asc:false; st={i:i,k:k,asc:asc};
       var tb=t.tBodies[0], all=Array.prototype.slice.call(tb.rows);
       var fixed=all.filter(function(r){return r.classList.contains('nosort');});
       var mov=all.filter(function(r){return !r.classList.contains('nosort');});
-      mov.sort(function(a,b){var x=v(a,i),y=v(b,i);
+      mov.sort(function(a,b){var x=v(a,i,k),y=v(b,i,k);
         if(typeof x==='number'&&typeof y==='number'){return asc?x-y:y-x;}
         return asc?String(x).localeCompare(String(y),'ko')
                   :String(y).localeCompare(String(x),'ko');});
