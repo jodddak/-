@@ -17148,6 +17148,32 @@ def _render_gfa_inventory_form(label, start, end, key):
                 st.error("신규 소재 저장에 실패했습니다. 저장소 연결과 광고 그룹 열을 확인해주세요.")
 
 
+def _render_legacy_refetch(kind, days, existing, key):
+    """이전 방식(캠페인을 합쳐 저장)으로 남은 날짜만 그 자리에서 다시 받는 버튼.
+    경고만 띄우고 '어디 가서 누르세요'라고 하면 찾기 어렵다 — 경고 바로 밑에 둔다."""
+    days = sorted(d for d in days if d is not None)
+    if not days:
+        return
+    s0, e0 = days[0], min(days[-1], kst_today() - timedelta(days=1))
+    if s0 > e0:
+        return
+    if not st.button(f"🔄 {kind} {s0} ~ {e0} 이전 데이터 지금 다시 받기", key=key):
+        return
+    st.session_state.pop("meta_account_errors", None)
+    with st.status(f"{kind} 소재 다시 받는 중... ({s0} ~ {e0})", expanded=True) as _stx:
+        _n, _sv, _er = sync_ad_creative(existing, only=[kind], unlimited=True,
+                                        progress=st.write, start=s0, end=e0)
+        _er = {**_er, **(st.session_state.get("meta_account_errors") or {})} if kind == "메타" else _er
+        _stx.update(label=(f"완료 — {_n:,}행 저장" if not _er else "일부 실패 — 아래 오류 확인"),
+                    state=("complete" if not _er else "error"))
+    if _er:
+        for _k, _v in _er.items():
+            st.error(f"{_k} — {str(_v)[:300]}")
+        return
+    st.cache_data.clear()
+    st.rerun()
+
+
 def _render_meta_refetch_button(label, start, end, existing, key):
     """Always available at the top of a Meta tab, even without matched creatives."""
     channel = {META_OWN_TAB: META_CHANNEL, META_EXT_TAB: META_EXT_CHANNEL,
@@ -17535,10 +17561,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _legacy_ad = (_legacy_g["adset"].fillna("").astype(str) if "adset" in _legacy_g.columns
                           else pd.Series("", index=_legacy_g.index))
             if not _legacy_ad.str.startswith(GOOGLE_ASSET_KEY_PREFIX).all():
-                st.warning("이 기간 구글 소재에는 캠페인을 합쳐 저장한 이전 데이터가 남아 있습니다. "
-                           "구글 탭 아래 '매체 관리자와 숫자가 다를 때'를 펼쳐 "
-                           "'구글 소재 다시 받기 (새 기준)'를 실행해주세요. "
-                           "재수집 전 신규·리타겟팅 합계는 정확하지 않을 수 있습니다.")
+                st.warning("이 기간 구글 소재에 캠페인을 합쳐 저장한 이전 데이터가 남아 있습니다. "
+                           "아래 버튼을 누르면 그 날짜만 새 기준으로 다시 받습니다 "
+                           "(다시 받기 전 신규·리타겟팅 합계는 정확하지 않을 수 있습니다).")
+                _render_legacy_refetch(
+                    "구글", set(_legacy_g.loc[~_legacy_ad.str.startswith(GOOGLE_ASSET_KEY_PREFIX), "_day"]),
+                    ad_creative, key="gc_legacy_google")
     # 매체 단위로 하나만 쓴다 — API가 있는 매체는 리포트를 아예 안 본다.
     # 둘을 소재명으로만 합치면, 리포트에만 있고 API엔 이름이 조금 다른 소재가 남아서
     # 그 매체 광고비가 실제보다 커진다(형이 잡은 메타 84만원 → 104만원).
@@ -17560,9 +17588,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                        "GFA PC·모바일의 소재별 일일 원본 파일을 다시 업로드해주세요. "
                        "재업로드 전 품목별·타겟팅별 합계는 정확하지 않을 수 있습니다.")
         if "meta_api" in _old_sources:
-            st.warning("이 기간 메타에는 이전 방식으로 저장한 소재 데이터가 남아 있습니다. "
-                       "메타 탭 아래 '매체 관리자와 숫자가 다를 때'에서 "
-                       "선택 기간의 메타 소재를 다시 받아주세요.")
+            st.warning("이 기간 메타에 이전 방식으로 저장한 소재 데이터가 남아 있습니다. "
+                       "아래 버튼을 누르면 그 날짜만 메타 3개 계정(자사몰·외부몰·제로라운지) "
+                       "모두 새 기준으로 다시 받습니다.")
+            _old_meta = _legacy_other[(_legacy_other["source"] == "meta_api")
+                                      & ~_old_ads.map(_precise_creative_key)]
+            _render_legacy_refetch("메타", set(_old_meta["_day"]), ad_creative,
+                                   key="gc_legacy_meta")
     # 등록 몇 일차인지 — 소재 운영 기준의 '10일' 판정에 쓴다
     try:
         _first_map, _last_map, _ch_max = _gc_spend_dates(ad_creative)
