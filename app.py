@@ -16459,13 +16459,18 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
              (r.get("cre_name") if hasattr(r, "get") else None)]
     keys = [(tab, _creative_image_key(str(n))) for n in names if n]
     # ① 직접 체크한 값(GFA 등) — 이 줄의 타겟팅 → 소재 전체 순으로 본다
+    ent = next((status_map[k] for k in keys if k in status_map), None)
     if manual:
         tgt0 = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
+        _today = kst_today().isoformat()
         for k in keys:
             hit = manual.get(k + (tgt0,)) or manual.get(k + ("",))
+            # API로 상태를 받는 매체(메타·구글 등)는 직접 바꾼 값을 **그날만** 쓴다.
+            # 다음 날부터는 매체에서 긁어온 실제 상태가 다시 기준이 된다.
+            if hit and ent and str(hit[1] or "")[:10] < _today:
+                continue
             if hit:
                 return hit[0], hit[0] == "ON", f"직접 체크 {hit[1]}"
-    ent = next((status_map[k] for k in keys if k in status_map), None)
     if ent:
         tgt = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
         # ① 이 줄에 실제로 붙인 광고세트 이름(정확히 같은 것) → ② 타겟팅과 이름이 같은 것
@@ -18917,7 +18922,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 (f'<th class="{"l" if i == 0 else ""}">{h}'
                  f'<span class="fv4-ar">&#8645;</span></th>')
                 for i, h in enumerate(_head))
-            if level == "소재" and label in GFA_TABS and recs:
+            # ON/OFF 직접 체크 — GFA만이 아니라 **모든 매체**. API로 받은 상태(메타·구글 등)는
+            # 그대로 보여주고, 직접 바꾸면 그 값이 우선한다(판정·엑셀에도 반영).
+            _inline_onoff = (level == "소재" and label != "TOTAL" and bool(recs)
+                             and len(recs) == len(body))
+            if _inline_onoff:
                 body = [_gc_inline_onoff_row(h, i, recs[i]) for i, h in enumerate(body)]
             table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
                      f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
@@ -18995,7 +19004,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
             if not _media_basis:
                 _gap_panel(label, tot_rev, tot_conv)
-            if level == "소재" and label in GFA_TABS and recs:
+            if _inline_onoff:
                 _gc_status_table(card, recs, label, min(14000, 288 + row_h * len(body)), ti)
             else:
                 st.components.v1.html(card, height=min(14000, 288 + row_h * len(body)), scrolling=False)
