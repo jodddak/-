@@ -18831,10 +18831,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # '판정' 머리글은 두 가지로 정렬한다 — 판정 글자 / ON·OFF 상태
             th = "".join(
                 (f'<th class="{"l" if i == 0 else ""}">'
-                 f'<span data-k="j">{h}<span class="fv4-ar">&#8645;</span></span>'
-                 f'<span data-k="o" title="ON/OFF 상태로 정렬" style="margin-left:10px;'
-                 f'padding:1px 6px;border:1px solid #D6D3CB;border-radius:6px;">'
-                 f'ON/OFF<span class="fv4-ar">&#8645;</span></span></th>')
+                 f'<span data-k="o" title="ON 먼저 ↔ OFF 먼저" style="white-space:nowrap;">{h}'
+                 f'<span style="display:inline-block;margin-left:22px;padding:1px 8px;'
+                 f'border:1px solid #D6D3CB;border-radius:6px;">ON/OFF'
+                 f'<span class="fv4-ar">&#8645;</span></span></span></th>')
                 if h == "판정" else
                 (f'<th class="{"l" if i == 0 else ""}">{h}'
                  f'<span class="fv4-ar">&#8645;</span></th>')
@@ -18872,21 +18872,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 (function(){
   var t=document.getElementById('__TID__'); if(!t) return;
   var ths=t.tHead.rows[0].cells, st={i:-1,k:'',asc:false};
+  function oo(c){var s=c.querySelector('select.gc-inline-onoff');
+    var t=s?(s.value||(s.options[0]?s.options[0].text:'')):'';
+    t=String(t).replace('?','').trim();
+    if(t==='ON') return 3; if(t==='일부 ON') return 2; if(t==='OFF') return 0;
+    var o=c.getAttribute('data-o'); return o!==null?parseFloat(o):1;}
   function v(row,i,k){var c=row.cells[i]; if(!c) return '';
-    if(k==='o'){var o=c.getAttribute('data-o'); return o!==null?parseFloat(o):1;}
-    if(k==='j'){var j=c.getAttribute('data-j'); return j!==null?j:c.innerText.trim();}
+    if(c.hasAttribute('data-o')||c.querySelector('select.gc-inline-onoff')) return oo(c);
     var d=c.getAttribute('data-v'); return d!==null?parseFloat(d):c.innerText.trim();}
+  function jv(row,i){var c=row.cells[i]; if(!c) return '';
+    var j=c.getAttribute('data-j'); return j!==null?j:'';}
   for(var i=0;i<ths.length;i++){(function(i){
     ths[i].style.cursor='pointer';
     ths[i].onclick=function(ev){
       var kel=ev&&ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null;
       var k=kel?kel.getAttribute('data-k'):'';
-      var asc=(st.i===i&&st.k===k)?!st.asc:false; st={i:i,k:k,asc:asc};
+      var asc=(st.i===i)?!st.asc:false; st={i:i,k:k,asc:asc};
       var tb=t.tBodies[0], all=Array.prototype.slice.call(tb.rows);
       var fixed=all.filter(function(r){return r.classList.contains('nosort');});
       var mov=all.filter(function(r){return !r.classList.contains('nosort');});
       mov.sort(function(a,b){var x=v(a,i,k),y=v(b,i,k);
-        if(typeof x==='number'&&typeof y==='number'){return asc?x-y:y-x;}
+        if(typeof x==='number'&&typeof y==='number'){
+          if(x!==y) return asc?x-y:y-x;
+          return String(jv(a,i)).localeCompare(String(jv(b,i)),'ko');}
         return asc?String(x).localeCompare(String(y),'ko')
                   :String(y).localeCompare(String(x),'ko');});
       fixed.concat(mov).forEach(function(r){tb.appendChild(r);});
