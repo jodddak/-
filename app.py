@@ -16019,6 +16019,14 @@ def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
         return out
     c = ad_creative.copy()
     c["report_date"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+    # '보고서에 없는 신규 소재 등록'(실적 0)은 등록한 날 하루짜리 행이라, 그날이 보는 기간
+    # 밖이면 소재가 통째로 사라졌다(9/28 등록 → 10/1~ 기간에서 안 보임). 등록일이 기간
+    # 끝 이전이면 기간 첫날로 당겨 넣는다 — 실적은 0이라 합계는 바뀌지 않는다.
+    if "source" in c.columns:
+        _inv = (c["source"].astype(str).eq("creative_inventory")
+                & c["report_date"].notna() & (c["report_date"] < start))
+        if _inv.any():
+            c.loc[_inv, "report_date"] = start
     c = c[(c["report_date"] >= start) & (c["report_date"] <= end)]
     if c.empty:
         return out
