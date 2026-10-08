@@ -17184,7 +17184,10 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
 def _gc_inline_onoff_row(row_html, index, record):
     import html
     status = str(record.get("ON/OFF") or "")
-    options = '<option value="">' + html.escape(status or "미확인") + '</option>'
+    # 선택지는 ON / OFF 두 개만. 상태를 모를 때만 '미확인' 자리표시를 둔다
+    # (예전엔 현재 상태를 맨 위에 한 번 더 적어 ON·ON·OFF처럼 중복돼 보였다).
+    options = ('' if status in ("ON", "OFF") else
+               '<option value="" selected>' + html.escape(status or "미확인") + '</option>')
     options += ''.join(f'<option value="{v}" {"selected" if status == v else ""}>{v}</option>'
                        for v in ("ON", "OFF"))
     control = (f'<select class="gc-inline-onoff" data-row="{index}" '
