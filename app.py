@@ -16009,6 +16009,47 @@ def _gc_alias(name: str, alias: dict) -> str:
     return alias.get(_creative_image_key(name), name)
 
 
+def _gc_add_zero_live_ads(ad_creative, start, end):
+    """매체 광고 목록(fetch_creative_status)에서 **켜진** 광고 중 이 기간 실적 행이 없는
+    것을 실적 0 행으로 붙인다. 합계는 안 바뀐다."""
+    try:
+        smap, _ = fetch_creative_status()
+    except Exception:
+        return ad_creative
+    ads = [a for k, v in (smap or {}).items() if k[0] == "__ads__" for a in v if a.get("on")]
+    if not ads:
+        return ad_creative
+    have = set()
+    if ad_creative is not None and not ad_creative.empty:
+        c = ad_creative.copy()
+        c["_d"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+        c = c[(c["_d"] >= start) & (c["_d"] <= end)]
+        for ch, cr, ad, cp in zip(c["channel"], c["creative"],
+                                  c["adset"] if "adset" in c.columns else [""] * len(c),
+                                  c["campaign"] if "campaign" in c.columns else [""] * len(c)):
+            have.add((str(ch), _creative_image_key(str(cr)), _gc_tgt_norm(_creative_adset_label(ad)),
+                      str(cp or "").strip()))
+    add = []
+    for a in ads:
+        k = _creative_image_key(a["name"])
+        if not k:
+            continue
+        if (a["ch"], k, _gc_tgt_norm(a.get("adset") or ""), a.get("campaign") or "") in have:
+            continue
+        have.add((a["ch"], k, _gc_tgt_norm(a.get("adset") or ""), a.get("campaign") or ""))
+        add.append(dict(report_date=str(end), channel=a["ch"], campaign=a.get("campaign") or "",
+                        adset=_campaign_adset_key(a.get("campaign") or "", a.get("adset") or ""),
+                        creative=a["name"], source="creative_inventory", impressions=0, clicks=0,
+                        cost_incl_vat=0, conversions=0, revenue=0))
+    if not add:
+        return ad_creative
+    extra = pd.DataFrame(add)
+    if ad_creative is None or ad_creative.empty:
+        return extra
+    return pd.concat([ad_creative, extra[[c for c in extra.columns if c in ad_creative.columns]]],
+                     ignore_index=True)
+
+
 def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
     """매체 API로 받은 소재 실적을 {(매체, 소재명): 지표}로 접는다.
 
@@ -16241,7 +16282,7 @@ def fetch_creative_status() -> tuple:
         tab = _gc_channel(ch)
         url = f"https://graph.facebook.com/{ver}/{acct}/ads"
         params = {
-            "fields": "name,effective_status,adset{name}",
+            "fields": "name,effective_status,adset{name},campaign{name}",
             "limit": 500,
             "access_token": cfg.get("access_token"),
             "effective_status": _json.dumps(
@@ -16265,6 +16306,10 @@ def fetch_creative_status() -> tuple:
                     on = stt in ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "PREAPPROVED")
                     grp = str((ad.get("adset") or {}).get("name") or "")
                     out.setdefault((tab, nm), []).append((grp, on))
+                    # 광고 목록 그대로(실적 0인 켜진 광고를 표에 넣을 때 쓴다)
+                    out.setdefault(("__ads__", tab), []).append(dict(
+                        ch=ch, name=str(ad.get("name") or "").strip(), adset=grp, on=on,
+                        campaign=str((ad.get("campaign") or {}).get("name") or "")))
                 nxt = (p.get("paging") or {}).get("next")
                 url, params = (nxt, None) if nxt else (None, None)
         except Exception as e:
@@ -17627,6 +17672,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 바로 잡히고 리포트는 주 단위라 일주일씩 밀린다. GFA는 네이버가 API를 안 열어줘서
     # 리포트만 있으므로 폴백이 반드시 필요하다.
     _report_map = _gc_media_by_key(creative_perf, start, end)     # 대행사 리포트
+    # 켜져 있는데 이 기간 실적이 0인 광고(메타)는 API 실적에 아예 안 내려와 표에서 빠졌다
+    # (260909_텐셀플루이드셔츠 — 광고 관리자엔 켜져 있는데 대시보드엔 없음).
+    # 광고 목록에서 켜진 광고를 찾아, 그 광고세트에 실적 행이 없으면 0으로 넣는다.
+    ad_creative = _gc_add_zero_live_ads(ad_creative, start, end)
     _api_map = _gc_api_by_key(ad_creative, start, end)            # 매체 API
     # Old rows cannot be split accurately after ingestion has lost campaign identity.
     if ad_creative is not None and not ad_creative.empty and "source" in ad_creative.columns:
@@ -18391,9 +18440,30 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     detail_target = _gc_choice("세부 타겟팅", _target_options,
                                                key=_detail_key, counts=_detail_counts)
                 if detail_target != "전체":
+                    # 매체 실적이 없는 GA 줄은 GA utm 앞부분만 보고 묶음을 정했다. 그래서 다른
+                    # 캠페인 옛 광고로 들어온 방문(260910_추석세일니트)이 광고 관리자엔 없는
+                    # 광고세트 밑에 끼었다. 광고 목록(API)이 있는 매체는 **그 광고세트에 실제로
+                    # 있는 광고**만 남긴다.
+                    _ads_tab = [a for a in (_status_map or {}).get(("__ads__", label), [])]
+                    _want = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", detail_target))
+
+                    def _in_group(r):
+                        if _gc_detail_target_label(r) != detail_target:
+                            return False
+                        m = r.get("_media")
+                        if not _ads_tab or (isinstance(m, dict) and any(
+                                float(m.get(f, 0) or 0) for f in ("impressions", "clicks", "cost"))):
+                            return True
+                        if isinstance(m, dict) and str(m.get("src") or "") == "creative_inventory":
+                            return True
+                        names = {_creative_image_key(str(n)) for n in
+                                 (r.get("cre_title"), r.get("cre_name"),
+                                  (m or {}).get("name") if isinstance(m, dict) else None) if n}
+                        return any(_creative_image_key(a["name"]) in names
+                                   and _want and _want in _gc_tgt_norm(a.get("adset"))
+                                   for a in _ads_tab)
                     if not rows.empty:
-                        rows = rows[rows.apply(
-                            lambda r: _gc_detail_target_label(r) == detail_target, axis=1)].copy()
+                        rows = rows[rows.apply(_in_group, axis=1)].copy()
                     _left_f = [(k, v) for k, v in _left_f
                                if _detail_left_label(v, k) == detail_target]
 
