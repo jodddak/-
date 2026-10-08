@@ -18453,14 +18453,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     sum(_gc_detail_target_label(r) == choice for _, r in rows.iterrows())
                     + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
                     for choice in _target_options[1:]}
-                _tc1, _tc2 = st.columns([0.09, 0.91])
-                _tc1.markdown('<div class="gc-flt-lbl">세부 타겟팅</div>', unsafe_allow_html=True)
-                with _tc2:
-                    _detail_key = f"gc_detail_target_{ti}"
-                    if st.session_state.get(_detail_key) not in _target_options:
-                        st.session_state.pop(_detail_key, None)
-                    detail_target = _gc_choice("세부 타겟팅", _target_options,
-                                               key=_detail_key, counts=_detail_counts)
+                # 지금 고른 타겟팅·품목 안에 실제로 있는 광고세트만 버튼으로 보여준다
+                # (A/B테스트를 고르면 그 캠페인의 광고세트 2개만 — 0개짜리는 숨긴다).
+                _target_options = ["전체"] + [c for c in _target_options[1:]
+                                              if _detail_counts.get(c)]
+                _detail_key = f"gc_detail_target_{ti}"
+                if st.session_state.get(_detail_key) not in _target_options:
+                    st.session_state.pop(_detail_key, None)
+                if len(_target_options) > 1:
+                    _tc1, _tc2 = st.columns([0.09, 0.91])
+                    _tc1.markdown('<div class="gc-flt-lbl">세부 타겟팅</div>', unsafe_allow_html=True)
+                    with _tc2:
+                        detail_target = _gc_choice("세부 타겟팅", _target_options,
+                                                   key=_detail_key, counts=_detail_counts)
                 if detail_target != "전체":
                     # 매체 실적이 없는 GA 줄은 GA utm 앞부분만 보고 묶음을 정했다. 그래서 다른
                     # 캠페인 옛 광고로 들어온 방문(260910_추석세일니트)이 광고 관리자엔 없는
