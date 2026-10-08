@@ -15689,8 +15689,14 @@ def _gc_filter_rows(rows: pd.DataFrame, seg, item) -> pd.DataFrame:
 def _gc_detail_target_label(row):
     target = str(row.get("target") or "").strip()
     media = row.get("_media")
-    if target in ("", "(미설정)", "(규칙 외)", "(타겟팅 없음)"):
-        target = str((media or {}).get("_adset") or "").strip() if isinstance(media, dict) else ""
+    # 매체가 붙은 줄은 **광고 관리자의 광고세트 이름**(의류관심타겟_261001)을 먼저 쓴다.
+    # GA utm 앞부분(의류관심타겟)으로 묶으면 같은 광고세트가 '의류관심타겟'과
+    # '의류관심타겟_261001' 두 버튼으로 쪼개져 숫자가 광고 관리자와 안 맞았다.
+    _mad = str((media or {}).get("_adset") or "").strip() if isinstance(media, dict) else ""
+    if _mad and "," not in _mad:
+        target = _mad
+    elif target in ("", "(미설정)", "(규칙 외)", "(타겟팅 없음)"):
+        target = _mad
     if not target:
         return "그룹 미확인"
     norm = _gc_tgt_norm(target)
@@ -18429,6 +18435,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _n = _cnt(seg, _it)
                 if _n:
                     _item_cnt[_it] = _n
+            # A/B테스트 캠페인이 매체에 있으면(막 켜서 이 기간 실적이 아직 없어도) 버튼은 둔다
+            # — 구글 PMax_온라인팀_AB테스트처럼 학습 중인 캠페인도 바로 골라볼 수 있게.
+            if GC_ITEM_AB not in _item_cnt:
+                _sm_here = _status_map or {}
+                _ab_live = any(_gc_is_ab(a.get("campaign"))
+                               for a in _sm_here.get(("__ads__", label), [])) or any(
+                    _gc_is_ab(e[0]) for k, v in _sm_here.items()
+                    if k[0] == label and isinstance(v, list)
+                    for e in v if isinstance(e, tuple) and e)
+                if _ab_live:
+                    _item_cnt[GC_ITEM_AB] = 0
             if len(_item_cnt) >= 2:    # 품목이 하나뿐이면 고를 게 없다
                 _ic1, _ic2 = st.columns([0.09, 0.91])
                 _ic1.markdown('<div class="gc-flt-lbl">품목</div>', unsafe_allow_html=True)
@@ -18442,18 +18459,37 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 rows = _gc_filter_rows(rows, seg, item)
             _left_f = _gc_filter_left(_left_all, seg, item, _left_row)
 
+            # 매체가 안 붙은 GA 줄(utm 앞부분 '의류관심타겟')은 광고 목록에서 그 소재가 실제로
+            # 들어 있는 광고세트(의류관심타겟_261001)로 이름을 맞춘다 — 버튼이 둘로 쪼개지지 않게.
+            _ads_lbl = (_status_map or {}).get(("__ads__", label), [])
+
+            def _row_label(r):
+                m = r.get("_media")
+                _mad = str((m or {}).get("_adset") or "").strip() if isinstance(m, dict) else ""
+                if not (_mad and "," not in _mad) and _ads_lbl:
+                    _t = _gc_tgt_norm(r.get("target"))
+                    _nm = {_creative_image_key(str(n)) for n in
+                           (r.get("cre_title"), r.get("cre_name")) if n}
+                    _cand = {a.get("adset") for a in _ads_lbl
+                             if _creative_image_key(a.get("name") or "") in _nm
+                             and _t and _t in _gc_tgt_norm(a.get("adset"))}
+                    if len(_cand) == 1:
+                        return _gc_detail_target_label(dict(
+                            target=next(iter(_cand)), campaign=r.get("campaign") or ""))
+                return _gc_detail_target_label(r)
+
             # Show actual ad-group choices for every media tab, including Meta.
             detail_target = "전체"
             def _detail_left_label(v, k):
                 return _gc_detail_target_label(dict(
                     target=v.get("_adset") or "", campaign=v.get("campaign") or ""))
-            _groups = {_gc_detail_target_label(r) for _, r in _detail_pool_rows.iterrows()}
+            _groups = {_row_label(r) for _, r in _detail_pool_rows.iterrows()}
             _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
                 _target_options = ["전체"] + sorted(_groups,
                     key=lambda x: ("리타겟팅" in x, x == "그룹 미확인", x))
                 _detail_counts = {choice: (
-                    sum(_gc_detail_target_label(r) == choice for _, r in rows.iterrows())
+                    sum(_row_label(r) == choice for _, r in rows.iterrows())
                     + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
                     for choice in _target_options[1:]}
                 # 지금 고른 타겟팅·품목 안에 실제로 있는 광고세트만 버튼으로 보여준다
@@ -18478,7 +18514,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _want = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", detail_target))
 
                     def _in_group(r):
-                        if _gc_detail_target_label(r) != detail_target:
+                        if _row_label(r) != detail_target:
                             return False
                         m = r.get("_media")
                         if not _ads_tab or (isinstance(m, dict) and any(
