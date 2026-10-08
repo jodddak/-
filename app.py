@@ -15579,6 +15579,8 @@ def _gc_item_of_campaign(c):
     low = str(c or "").lower()
     if not low.strip():
         return None
+    if _gc_is_ab(low):
+        return GC_ITEM_AB
     hits = {it for it, ws in _GC_ITEM_WORDS if any(w in low for w in ws)}
     # '수트자켓'처럼 수트 안에 자켓이 들어간 이름은 수트로 본다
     if GC_ITEM_SUIT in hits and GC_ITEM_OUTER in hits and "수트" in low and not any(
@@ -15729,7 +15731,15 @@ def _gc_filter_left(left, seg, item, row_of):
 # 순서가 중요하다: '수트'를 먼저 봐야 '수트자켓'이 아우터로 안 빠진다.
 GC_ITEM_ALL = "전체"
 GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER = "수트", "아우터", "이너(셔츠 등)"
-GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER]
+GC_ITEM_AB = "A/B테스트"
+GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_AB]
+
+
+def _gc_is_ab(text) -> bool:
+    """캠페인 이름이 A/B 테스트용인가 (STCO_A/B테스트_전환, STCO_자사몰_A/B테스트_전환_PC 등).
+    A/B 테스트 캠페인은 소재가 수트든 셔츠든 **캠페인 기준으로** 따로 묶는다."""
+    t = re.sub(r"[\s_\-]+", "", str(text or "").lower())
+    return any(w in t for w in ("a/b테스트", "ab테스트", "a/btest", "abtest"))
 _GC_ITEM_WORDS = [
     (GC_ITEM_SUIT, ("수트", "슈트", "셋업", "정장", "suit")),
     (GC_ITEM_OUTER, ("자켓", "재킷", "블레이저", "점퍼", "코트", "아우터", "패딩", "블루종",
@@ -15766,7 +15776,15 @@ def _gc_item_of_text(text) -> str | None:
 
 
 def _gc_item_group(row) -> str:
-    """이 소재가 어느 품목인지. 소재명 → 캠페인 순으로 보고, 못 가리면 '기타'."""
+    """이 소재가 어느 품목인지. 소재명 → 캠페인 순으로 보고, 못 가리면 '기타'.
+    단, A/B 테스트 캠페인 소재는 소재명과 상관없이 'A/B테스트'."""
+    _cl = row.get("camp_list") if hasattr(row, "get") else None
+    _cl = list(_cl) if isinstance(_cl, (list, tuple, set)) else []
+    _m = row.get("_media") if hasattr(row, "get") else None
+    _mc = [(_m or {}).get("campaign")] if isinstance(_m, dict) else []
+    _cs = [c for c in [row.get("campaign")] + _cl + _mc if str(c or "").strip()]
+    if _cs and all(_gc_is_ab(c) for c in _cs):
+        return GC_ITEM_AB
     for k in ("creative", "cre_title", "campaign"):
         it = _gc_item_of_text(row.get(k))
         if it:
@@ -16487,7 +16505,8 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
             return "ON", True, "매체 API 상태"
         if n_on == 0:
             return "OFF", False, "매체 API 상태"
-        return "일부 ON", True, f"광고 {len(sel)}개 중 {n_on}개 켜짐"
+        # 하나라도 켜져 있으면 집행 중이니 ON으로 본다('일부 ON'은 헷갈려서 안 쓴다)
+        return "ON", True, f"광고 {len(sel)}개 중 {n_on}개 켜짐"
     last = next((last_map[k] for k in keys if k in last_map), None)
     newest = ch_max.get(tab)
     if last and newest:
@@ -18291,8 +18310,6 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     for ti, label in enumerate(tab_labels):
         with tabs[ti]:
             _render_gfa_inventory_form(label, start, end, key=f"gc_inventory_{ti}")
-            _render_meta_refetch_button(
-                label, start, end, ad_creative, key=f"gc_meta_refetch_top_{ti}")
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
             keep = [label]
@@ -18502,6 +18519,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         st.caption(
                             "외부몰은 스마트스토어로 보내서 자사몰 GA4에 방문·매출이 안 잡히므로, "
                             "채워지면 구매·매출은 매체가 신고한 값으로 보여드립니다.")
+                    _render_meta_refetch_button(label, start, end, ad_creative,
+                                                key=f"gc_meta_refetch_top_{ti}")
                     continue
                 if label in _ext_placeholders:
                     _s = spend_row_by_ch.get(_EXT_SPEND_CH, {})
@@ -18548,6 +18567,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         )
                 else:
                     st.info("이 매체는 선택한 기간에 데이터가 없습니다.")
+                _render_meta_refetch_button(label, start, end, ad_creative,
+                                            key=f"gc_meta_refetch_top_{ti}")
                 continue
             # ── 안내문은 표 아래로 ──
             # 설명이 표 위에 쌓여 있어서 정작 성과를 보려면 한참 스크롤해야 했다.
@@ -19020,35 +19041,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # ── 매체 관리자와 숫자가 다를 때 ── 이 소재로 저장된 원본을 날짜·캠페인별로 그대로 보여준다.
             # '같은 기간인데 왜 다르지'의 답은 거의 항상 ①VAT(대시보드는 +10%) ②같은 이름이 다른
             # 캠페인에도 있음 ③기간 끝의 날짜가 한쪽에만 들어감 — 셋 중 하나라 원본을 보면 바로 갈린다.
+            if level == "소재" and label in (META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB) and not (
+                    ad_creative is not None and not ad_creative.empty and recs):
+                _render_meta_refetch_button(label, start, end, ad_creative,
+                                            key=f"gc_meta_refetch_top_{ti}")
             if level == "소재" and ad_creative is not None and not ad_creative.empty and recs:
                 with st.expander("🔍 매체 관리자와 숫자가 다를 때 — 소재 원본(날짜·캠페인별) 보기"):
+                    # 메타 '소재 다시 받기'는 여기 하나만 둔다(탭 맨 위에 같은 버튼이 또 있었다)
+                    _render_meta_refetch_button(label, start, end, ad_creative,
+                                                key=f"gc_meta_refetch_top_{ti}")
                     _names = sorted({str(x.get("이름") or "") for x in recs
                                      if x.get("이름") and float(x.get("광고비(VAT+)") or 0) > 0})
                     if not _names:
                         st.caption("광고비가 붙은 소재가 없습니다.")
                     else:
-                        if label in (META_OWN_TAB, META_EXT_TAB, META_ZERO_TAB):
-                            # 메타는 같은 광고를 여러 광고세트(타겟팅)에 올려서, 광고세트별로
-                            # 받아야 관리자 화면과 숫자가 맞는다. 예전에 합쳐 받은 기간은 여기서 다시 받는다.
-                            _has_adset = "adset" in ad_creative.columns
-                            if not _has_adset:
-                                st.warning(
-                                    "광고세트별 저장이 아직 꺼져 있습니다 — Supabase SQL Editor에서 "
-                                    "`ad_creative_adset.sql`을 한 번 실행한 뒤 아래 버튼을 눌러주세요.")
-                            if st.button(f"🔁 {start}~{end} 메타 소재 다시 받기 (광고세트별·새 기준)",
-                                         key=f"gc_meta_adset_{ti}", disabled=not _has_adset):
-                                with st.status("메타 소재 다시 받는 중...", expanded=True) as _s6:
-                                    _n6, _sv6, _er6 = sync_ad_creative(
-                                        ad_creative, only=["메타"], unlimited=True,
-                                        progress=st.write, start=start,
-                                        end=min(end, kst_today() - timedelta(days=1)))
-                                    _s6.update(label=f"완료 — {_n6:,}행", state="complete")
-                                for _k6, _v6 in (_er6 or {}).items():
-                                    st.error(f"**{_k6}** 실패 — {_v6}")
-                                if not _er6:
-                                    st.cache_data.clear()
-                                    st.rerun()
-                        elif label in {_gc_channel("구글"): 1, _gc_channel("크리테오"): 1}:
+                        if label in {_gc_channel("구글"): 1, _gc_channel("크리테오"): 1}:
                             _fl = "구글" if label == _gc_channel("구글") else "크리테오"
                             # 계산 기준이 바뀐 뒤(크리테오 VAT·한국 시간 등) 예전 기간을 새 기준으로
                             # 다시 받는다. 자동 동기화는 최근 8일만 다시 받기 때문.
