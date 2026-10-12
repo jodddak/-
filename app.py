@@ -16084,6 +16084,12 @@ def _gc_add_zero_live_ads(ad_creative, start, end):
                       str(cp or "").strip()))
     add = []
     for a in ads:
+        created = pd.to_datetime(a.get("created_time"), errors="coerce", utc=True)
+        if pd.isna(created):
+            continue  # Unknown creation dates cannot establish historical membership.
+        created_date = created.tz_convert("Asia/Seoul").date()
+        if created_date > end:
+            continue
         k = _creative_image_key(a["name"])
         if not k:
             continue
@@ -16335,7 +16341,7 @@ def fetch_creative_status() -> tuple:
         tab = _gc_channel(ch)
         url = f"https://graph.facebook.com/{ver}/{acct}/ads"
         params = {
-            "fields": "name,effective_status,adset{name},campaign{name}",
+            "fields": "name,effective_status,created_time,adset{name},campaign{name}",
             "limit": 500,
             "access_token": cfg.get("access_token"),
             "effective_status": _json.dumps(
@@ -16362,7 +16368,8 @@ def fetch_creative_status() -> tuple:
                     # 광고 목록 그대로(실적 0인 켜진 광고를 표에 넣을 때 쓴다)
                     out.setdefault(("__ads__", tab), []).append(dict(
                         ch=ch, name=str(ad.get("name") or "").strip(), adset=grp, on=on,
-                        campaign=str((ad.get("campaign") or {}).get("name") or "")))
+                        campaign=str((ad.get("campaign") or {}).get("name") or ""),
+                        created_time=ad.get("created_time")))
                 nxt = (p.get("paging") or {}).get("next")
                 url, params = (nxt, None) if nxt else (None, None)
         except Exception as e:
@@ -16474,6 +16481,22 @@ def fetch_creative_status() -> tuple:
     return out, errs
 
 
+def _gc_status_campaign(row, media=None):
+    media = media if isinstance(media, dict) else {}
+    campaigns = [str(c).strip() for c in (media.get("campaigns") or []) if str(c or "").strip()]
+    if len(campaigns) == 1:
+        return campaigns[0]
+    if len(campaigns) > 1:
+        return ""  # Aggregated campaigns cannot share a manual state.
+    return str(row.get("campaign") or media.get("campaign") or "").strip()
+
+
+def _gc_manual_target_key(campaign, target):
+    import json
+    return "campaign_target:" + json.dumps([str(campaign or "").strip(),
+                                            str(target or "").strip()], ensure_ascii=False)
+
+
 def load_manual_status() -> dict:
     """대시보드에서 직접 체크한 ON/OFF {(매체탭, 소재키, 타겟팅): (상태, 체크한 날)}.
     GFA처럼 상태 API가 없는 매체용. 표가 아직 없으면 빈 값."""
@@ -16517,7 +16540,10 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
         tgt0 = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
         _today = kst_today().isoformat()
         for k in keys:
-            hit = manual.get(k + (tgt0,)) or manual.get(k + ("",))
+            campaign = _gc_status_campaign(r, m)
+            hit = manual.get(k + (_gc_manual_target_key(campaign, tgt0),)) if campaign else None
+            if not campaign and not (m.get("campaigns") or []):
+                hit = manual.get(k + (tgt0,)) or manual.get(k + ("",))
             # API로 상태를 받는 매체(메타·구글 등)는 직접 바꾼 값을 **그날만** 쓴다.
             # 다음 날부터는 매체에서 긁어온 실제 상태가 다시 기준이 된다.
             if hit and ent and str(hit[1] or "")[:10] < _today:
@@ -16981,6 +17007,7 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         "구매": conv, "매출": rev, "객단가": aov,
         "ROAS(%)": roas, "판정": label, "사유": _why, "경과일": _age,
         "ON/OFF": (((media or {}).get("_onoff") or ("",))[0] if not is_total else ""),
+        "_status_campaign": _gc_status_campaign(r, media) if not is_total else "",
         # 구매·매출이 어디서 온 값인지. 외부몰만 매체 기준이라 섞어 더하면 안 된다.
         "기준": "매체(GFA)" if _basis else "GA4",
     }
@@ -17240,10 +17267,10 @@ def _gc_inline_onoff_row(row_html, index, record):
 
 
 def _gc_status_table_body(card, recs, label, height, ti):
-    """GFA 소재 표 + 소재 옆 ON/OFF. 바꾼 줄 하나만 저장하고 **화면 전체를 다시 그리지 않는다.**
-    예전엔 저장 뒤 캐시를 통째로 비우고 전체를 다시 그려서, 버튼 하나 바꾸는 데 한참 걸렸다."""
+    """소재 옆 ON/OFF를 캠페인별로 저장하고 판정·요약·내보내기를 다시 계산한다."""
     event = _gc_status_component()(
-        html=card, identities=[[str(r.get("이름") or ""), str(r.get("타겟팅") or "")] for r in recs],
+        html=card, identities=[[str(r.get("이름") or ""), str(r.get("타겟팅") or ""),
+                     str(r.get("_status_campaign") or "")] for r in recs],
         height=height, key=f"gc_inline_status_{ti}", default=None)
     if not (isinstance(event, dict) and event.get("nonce") != st.session_state.get(f"gc_status_event_{ti}")):
         return
@@ -17251,18 +17278,26 @@ def _gc_status_table_body(card, recs, label, height, ti):
     index, status = event.get("row"), event.get("status")
     if not (isinstance(index, int) and 0 <= index < len(recs) and status in ("ON", "OFF")
             and event.get("identity") == [str(recs[index].get("이름") or ""),
-                                          str(recs[index].get("타겟팅") or "")]):
+                                          str(recs[index].get("타겟팅") or ""),
+                                          str(recs[index].get("_status_campaign") or "")]):
         return
     record = recs[index]
+    campaign = str(record.get("_status_campaign") or "")
+    if not campaign:
+        st.warning("캠페인이 합쳐졌거나 미확인인 행입니다. 캠페인별 행에서 상태를 선택해주세요.")
+        return
+    target_key = _gc_manual_target_key(campaign, record.get("타겟팅") or "")
     _now = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
     frame = pd.DataFrame([dict(channel=label, creative=record.get("이름"),
-                               target=record.get("타겟팅") or "", status=status, updated_at=_now)])
+                               target=target_key, status=status, updated_at=_now)])
     if save_table("creative_status_manual", frame, "channel,creative,target", "소재 옆 ON/OFF 선택"):
         _ov = dict(st.session_state.get("gc_manual_overlay") or {})
         _ov[(label, _creative_image_key(str(record.get("이름") or "")),
-             str(record.get("타겟팅") or ""))] = (status, _now[:10])
+             target_key)] = (status, _now[:10])
         st.session_state["gc_manual_overlay"] = _ov
         st.toast(f"{record.get('이름')} → {status} 저장")
+        _load_table_raw.clear()
+        st.rerun(scope="app")
     else:
         st.error("ON/OFF 저장에 실패했습니다. 저장소 연결과 creative_status_manual 테이블을 확인해주세요.")
 
@@ -17280,18 +17315,12 @@ def _gc_status_component():
     page = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><div id="root"></div>
 <script>
 function send(type, data){parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
-var ov={};
 window.addEventListener('message',function(event){
  if(event.data.type!=='streamlit:render')return;
  var args=event.data.args, root=document.getElementById('root');root.innerHTML=args.html;
  root.querySelectorAll('script').forEach(function(old){var sc=document.createElement('script');sc.textContent=old.textContent;old.replaceWith(sc);});
- root.querySelectorAll('.gc-inline-onoff').forEach(function(el){
-  var r=JSON.stringify(args.identities[Number(el.dataset.row)]||[]);
-  if(ov[r]){el.value=ov[r];el.style.background=(ov[r]==='ON'?'#E4F6DC':'#EFEEE8');
-   var td=el.closest('td'); if(td){var k=ov[r]==='ON'?'3':'0';td.setAttribute('data-o',k);td.setAttribute('data-v',k);}}
- });
  root.querySelectorAll('.gc-inline-onoff').forEach(function(el){el.addEventListener('change',function(){
-  if(!el.value)return; ov[JSON.stringify(args.identities[Number(el.dataset.row)]||[])]=el.value;
+  if(!el.value)return;
   el.style.background=(el.value==='ON'?'#E4F6DC':'#EFEEE8');
   var td=el.closest('td'); if(td){var k=el.value==='ON'?'3':'0';td.setAttribute('data-o',k);td.setAttribute('data-v',k);}
   send('streamlit:setComponentValue',{value:{row:Number(el.dataset.row),identity:args.identities[Number(el.dataset.row)],status:el.value,nonce:Date.now()+'-'+Math.random()},dataType:'json'});
@@ -18545,18 +18574,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     def _in_group(r):
                         if _row_label(r) != detail_target:
                             return False
-                        m = r.get("_media")
-                        if not _ads_tab or (isinstance(m, dict) and any(
-                                float(m.get(f, 0) or 0) for f in ("impressions", "clicks", "cost"))):
-                            return True
-                        if isinstance(m, dict) and str(m.get("src") or "") == "creative_inventory":
-                            return True
-                        names = {_creative_image_key(str(n)) for n in
-                                 (r.get("cre_title"), r.get("cre_name"),
-                                  (m or {}).get("name") if isinstance(m, dict) else None) if n}
-                        return any(_creative_image_key(a["name"]) in names
-                                   and _want and _want in _gc_tgt_norm(a.get("adset"))
-                                   for a in _ads_tab)
+                        return True
                     if not rows.empty:
                         rows = rows[rows.apply(_in_group, axis=1)].copy()
                     _left_f = [(k, v) for k, v in _left_f
