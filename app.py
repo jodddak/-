@@ -1337,10 +1337,28 @@ def _load_query(client, table_name, name=None, since=None, count=None):
     return q
 
 
+class _IncompleteLoad(Exception):
+    """표를 끝까지 못 받았다 — 받은 만큼(rows)을 들고 나온다. 캐시에 안 남기려고 예외로 올린다."""
+    def __init__(self, rows, total):
+        super().__init__(f"{len(rows)}/{total}")
+        self.rows, self.total = rows, total
+
+
 def _load_page(client, table_name, page, since=None, name=None):
+    # 한 페이지가 잠깐 실패하면(시간 초과 등) 두 번 더 받아본다. 예전엔 한 번 실패하면 거기서
+    # 끊고 '받은 데까지만' 1시간 캐시에 남겨서, GA 소재 데이터가 9/19에서 멈춘 것처럼 보였다.
+    import time as _t
     lo = page * LOAD_PAGE_SIZE
-    resp = _load_query(client, table_name, name, since).range(lo, lo + LOAD_PAGE_SIZE - 1).execute()
-    return page, (resp.data or [])
+    last = None
+    for _try in range(3):
+        try:
+            resp = _load_query(client, table_name, name, since).range(
+                lo, lo + LOAD_PAGE_SIZE - 1).execute()
+            return page, (resp.data or [])
+        except Exception as e:
+            last = e
+            _t.sleep(1 + _try)
+    raise last
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1415,7 +1433,9 @@ def _load_table_raw(name: str) -> pd.DataFrame:
                 ex.shutdown(wait=False)
             for pg in range(1, n_pages):
                 rows.extend(got.get(pg, []))
-            return pd.DataFrame(rows)
+            if len(rows) >= int(total):
+                return pd.DataFrame(rows)
+            rows = list(first.data or [])   # 모자라면 아래 순차 방식으로 다시
         except Exception:
             rows = list(first.data or [])   # 병렬이 막히면 아래 순차 방식으로 다시
 
@@ -1424,7 +1444,8 @@ def _load_table_raw(name: str) -> pd.DataFrame:
         try:
             _, chunk = _load_page(client, table_name, page, since, name)
         except Exception:
-            break
+            # 끝까지 못 받았다 — 이 상태를 캐시에 남기지 않는다(다음에 열 때 다시 받는다)
+            raise _IncompleteLoad(rows, total or "?")
         rows.extend(chunk)
         if len(chunk) < LOAD_PAGE_SIZE:
             break
@@ -1466,7 +1487,15 @@ def load_table(name: str) -> pd.DataFrame:
     메일까지 여러 곳이라, 화면마다 따로 걸면 어디 하나는 반드시 빠진다.
     (실제로 캠페인 이름으로만 거르던 때 소재별 표에 '모션프리수트 140,074원'이 남았다.)
     """
-    df = _load_table_raw(name)
+    try:
+        df = _load_table_raw(name)
+    except _IncompleteLoad as e:
+        df = pd.DataFrame(e.rows)
+        try:
+            st.warning(f"'{name}' 표를 끝까지 못 받았습니다({len(e.rows):,}/{e.total}행) — 최근 날짜가 "
+                       "빠져 보일 수 있습니다. 사이드바 🔄 새로고침을 눌러주세요.")
+        except Exception:
+            pass
     if (name in ("ga_channel_daily", "ga_creative_daily")
             and df is not None and not df.empty and "source_medium" in df.columns):
         keep = ~df["source_medium"].map(_ga_sm_excluded).astype(bool)
@@ -3925,9 +3954,9 @@ def period_filter(min_d: date, max_d: date, key: str, default_preset: str = "이
         _raw = _preset_raw_range(preset)
         if _raw and (_raw[1] < min_d or _raw[0] > max_d):
             st.warning(
-                f"**{preset}**({_raw[0]:%Y-%m-%d}~{_raw[1]:%Y-%m-%d})에는 저장된 데이터가 "
-                f"없습니다. 지금 데이터는 **{min_d:%Y-%m-%d} ~ {max_d:%Y-%m-%d}**까지라, "
-                f"아래 표는 {start:%Y-%m-%d}~{end:%Y-%m-%d} 기준입니다. "
+                f"**{preset}**({_raw[0]:%Y-%m-%d} \\~ {_raw[1]:%Y-%m-%d})에는 저장된 데이터가 "
+                f"없습니다. 지금 데이터는 **{min_d:%Y-%m-%d} \\~ {max_d:%Y-%m-%d}**까지라, "
+                f"아래 표는 {start:%Y-%m-%d} \\~ {end:%Y-%m-%d} 기준입니다. "
                 "최신 데이터를 받으려면 동기화를 눌러주세요."
             )
 
