@@ -15887,10 +15887,22 @@ def _gc_pick_version_part(parts, original):
     cdate = raw[-6:] if len(raw) >= 6 else ""
     tgt = _gc_tgt_norm(original.get("target"))
     info = [ver(p.get("adset")) for p in parts]
-    bases = {b for b, _ in info}
     idx = list(range(len(parts)))
+    # 같은 소재가 다른 캠페인에도 올라가 있으면(소프트데님셔츠: 아우터_전환·셔츠_전환) GA 링크의
+    # 캠페인(셔츠_전환_PC)과 같은 캠페인 쪽만 남긴다.
+    gcamp = _gc_tgt_norm(original.get("ga_campaign") or original.get("campaign"))
+    camps = {_gc_tgt_norm(p.get("campaign")) for p in parts}
+    if gcamp and len(camps) > 1:
+        same = [i for i in idx if _gc_tgt_norm(parts[i].get("campaign")) == gcamp
+                or _gc_tgt_norm(parts[i].get("campaign")).endswith("_" + gcamp)
+                or gcamp.endswith("_" + _gc_tgt_norm(parts[i].get("campaign")))]
+        if same:
+            idx = same
+    bases = {info[i][0] for i in idx}
     if len(bases) > 1:                      # 기본 이름이 다르면 GA 타겟과 같은 쪽만
         idx = [i for i in idx if info[i][0] == tgt] or [i for i in idx if tgt and tgt in info[i][0]]
+        if len({info[i][0] for i in idx}) > 1:
+            return None
         if not idx:
             return None
     if len(idx) == 1:
@@ -16857,6 +16869,33 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
                 continue
             if hit:
                 return hit[0], hit[0] == "ON", f"직접 체크 {hit[1]}"
+    # ② 지금 매체 상태(API) — **이 줄의 캠페인(·광고세트)** 것만 본다.
+    #    같은 소재가 수트_260929·수트_리타겟팅처럼 여러 캠페인에 있어서, 소재 이름만으로 보면
+    #    다른 캠페인 광고가 켜져 있다는 이유로 꺼진 줄도 ON으로 나왔다.
+    _camp = _gc_status_campaign(r, m)
+
+    def _ceq(a, b):
+        a, b = _gc_tgt_norm(a), _gc_tgt_norm(b)
+        return bool(a and b) and (a == b or a.endswith("_" + b) or b.endswith("_" + a))
+    if ent and _camp and tab == _gc_channel("구글"):
+        _sel = [e for e in ent if _ceq(e[0], _camp)]
+        if _sel:
+            return (("ON", True, "매체 API 상태") if any(e[1] for e in _sel)
+                    else ("OFF", False, "매체 API 상태"))
+        return "OFF", False, "이 캠페인에 지금 없음(매체 API)"
+    _ads_all = (status_map or {}).get(("__ads__", tab)) or []
+    _row_ads = {_gc_tgt_norm(a) for a in str(m.get("_adset") or "").split(",") if a.strip()}
+    if _ads_all and _camp and _row_ads:
+        _nk = {k[1] for k in keys}
+        _hits = [a for a in _ads_all if _creative_image_key(str(a.get("name") or "")) in _nk
+                 and _ceq(a.get("campaign"), _camp)
+                 and _gc_tgt_norm(a.get("adset")) in _row_ads]
+        if _hits:
+            return (("ON", True, "매체 API 상태") if any(a.get("on") for a in _hits)
+                    else ("OFF", False, "매체 API 상태"))
+        if any(_creative_image_key(str(a.get("name") or "")) in _nk and _ceq(a.get("campaign"), _camp)
+               for a in _ads_all):
+            return "OFF", False, "이 광고세트에 지금 없음(매체 API)"
     if ent:
         tgt = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
         # ① 이 줄에 실제로 붙인 광고세트 이름(정확히 같은 것) → ② 타겟팅과 이름이 같은 것
