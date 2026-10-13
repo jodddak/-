@@ -15799,12 +15799,17 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     if source is not None and not source.empty and "campaign" in source.columns:
         _gm = source["channel"].map(_gc_channel).eq("구글")
         _sets = {}
-        for cr, cp in zip(source.loc[_gm, "creative"], source.loc[_gm, "campaign"]):
+        for cr, cp in set(zip(source.loc[_gm, "creative"].astype(str), source.loc[_gm, "campaign"].astype(str))):
             it = _gc_item_of_campaign(cp)
             if it in (GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER):
-                _sets.setdefault(_creative_image_key(str(cr)), set()).add(it)
+                _d = _sets.setdefault(_creative_image_key(str(cr)), {})
+                _d[it] = _d.get(it, 0) + 1
         _w = {GC_ITEM_SUIT: "수트", GC_ITEM_OUTER: "아우터", GC_ITEM_INNER: "셔츠"}
-        _cre_word = {k: _w[next(iter(v))] for k, v in _sets.items() if len(v) == 1}
+        # 같은 소재를 여러 품목 캠페인에 올린 경우(해리스트위드: 아우터 3곳·셔츠 2곳) 가장 많은 품목
+        for k, v in _sets.items():
+            top = sorted(v.items(), key=lambda x: -x[1])
+            if len(top) == 1 or top[0][1] > top[1][1]:
+                _cre_word[k] = _w[top[0][0]]
 
     # 그 소재가 **지금 들어 있는 캠페인**이 있으면 그쪽이 정답이다(해리스트위드 → 아우터_이전).
     _cre_camps = {}
@@ -15826,6 +15831,15 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
         ks = [k for k in _cre_camps if k and _ck and (k == _ck or k in _ck or _ck in k)]
         cands = {c for k in ks for c in _cre_camps[k]
                  if any(w in c.lower() for w in _GC_RT_WORDS) == rt and not _gc_is_ab(c)}
+        _wd = _cre_text(cr)
+        _wd = next((w for w in ("수트", "아우터", "셔츠") if w in _wd), None) if _wd else None
+        if _wd and len(cands) > 1:
+            cands = {c for c in cands if f"_{_wd}_" in c} or cands
+        if len(cands) > 1 and not rt:
+            # 옛 신규 캠페인은 개편 때 날짜 붙은 첫 버전으로 이름이 바뀌었다(신규_수트 → 수트_260929)
+            dated = sorted(c for c in cands if re.search(r"_\d{6}$", c))
+            if dated:
+                cands = {dated[0]}
         if len(cands) == 1:
             return next(iter(cands))
         return _gc_google_split_old_campaign(o, _cre_text(cr), _cur)
