@@ -18579,9 +18579,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 거라, 매체를 섞은 합계는 판단에 안 쓰인다. 게다가 맨즈탭·외부몰은 기준이 달라
     # 애초에 빠져 있어서, TOTAL이 '전부'도 아니면서 전부인 척해 오해만 키웠다.
     # 매체별 합계는 각 표 맨 윗줄(TOTAL 행)에 그대로 있다.
-    # TOTAL 탭(2026-10 다시 추가) — 자주 같이 보는 매체(외부몰·맨즈탭 제외)를 한 표로.
+    # TOTAL 탭(2026-10 다시 추가) — 자사몰 구글·GFA·메타·크리테오만 한 표로.
     # 필터는 타겟팅·품목까지만 둔다(캠페인·세부 타겟팅은 매체마다 달라 섞으면 헷갈린다).
-    _total_keep = [c for c in order if c not in sep]
+    # 2026-10-13: TOTAL은 자사몰의 구글·GFA·메타·크리테오만 합친다
+    # (외부몰·제로라운지·맨즈탭·애드부스트 등은 제외).
+    def _total_in(c):
+        s = str(c)
+        if c in sep or any(w in s for w in ("외부몰", "제로", "맨즈", "애드부스트")):
+            return False
+        return (s.startswith("구글") or s in (GFA_PC_OWN, GFA_MO_OWN, "네이버 GFA")
+                or (s.startswith("메타") and "자사몰" in s) or s == "메타"
+                or "크리테오" in s)
+    _total_keep = [c for c in order if _total_in(c)]
     tab_labels = (["TOTAL"] if len(_total_keep) >= 2 else []) + list(order)
     # 엑셀 버튼은 표보다 위에 있어야 찾기 쉬운데, 담을 내용은 탭을 다 그려봐야 안다.
     # 자리만 먼저 잡아두고 맨 아래에서 채운다.
