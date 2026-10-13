@@ -16044,14 +16044,15 @@ def _gc_detail_target_label(row):
     pretty = {"패션관심타겟": "패션 관심타겟", "쇼핑관심타겟": "쇼핑 관심타겟",
               "방문자180일": "방문자 180일"}.get(norm, target)
     seg = _gc_target_group(dict(target=target, campaign=row.get("campaign") or ""))
-    suffix = "리타겟팅" if seg == GC_SEG_RT else ("신규" if seg == GC_SEG_NEW else "구분 미확인")
+    suffix = "리타겟팅" if seg == GC_SEG_RT else ("신규" if seg == GC_SEG_NEW else "")
     # The unversioned fashion group is a historical fifth group in the supplied
     # own-store GFA report; dated and Previous cohorts remain current groups.
     campaign = str(row.get("campaign") or "")
     historical = row.get("_current_group") is False or (
         norm == "패션관심타겟" and "STCO_자사몰_" in campaign
         and not _gc_is_ab(campaign))
-    return f"{pretty} ({suffix})" + (" (현재X)" if historical else "")
+    # 신규/리타겟팅을 못 가르는 그룹(외부몰 N배송상품·일반상품 등)은 '구분 미확인'을 달지 않는다
+    return pretty + (f" ({suffix})" if suffix else "") + (" (현재X)" if historical else "")
 
 
 def _gc_gfa_target_matches(target, choice):
