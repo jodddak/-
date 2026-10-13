@@ -17840,6 +17840,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         d["campaign"] = "(미설정)"
     d["_gc_ch"] = [(_gc_ga_channel(ch, cp) if pd.notna(ch) and str(ch).strip() else None)
                    for ch, cp in zip(d["channel"], d["campaign"])]
+    # Google GA scope: session campaign must belong to the online-team PMax family.
+    _google_rows = d["_gc_ch"].eq("구글")
+    _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
+    d = d[~_google_rows | _online_pmax].copy()
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
     # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
