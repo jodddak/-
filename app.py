@@ -16640,6 +16640,14 @@ def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
     return first, last, ch_max
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _gc_status_auto() -> tuple:
+    """(상태 맵, 오류, 조회 시각 'MM/DD HH:MM') — 페이지 열 때 자동 조회용(15분 캐시)."""
+    fetch_creative_status.clear()
+    ss, se = fetch_creative_status()
+    return ss, se, (datetime.utcnow() + timedelta(hours=9)).strftime("%m/%d %H:%M")
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_creative_status() -> tuple:
     """매체 API에서 소재의 **지금 ON/OFF**를 받는다. ({(매체탭, 소재키): [(묶음이름, 켜짐?)]}, 오류목록)
@@ -18049,20 +18057,26 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     elif _l1 is None or _l1 < _yday or _stale:
         st.info("저장된 소재 성과를 먼저 표시합니다. 최신 날짜가 늦은 데이터는 위 '소재 데이터 동기화'로 갱신해주세요.")
 
-    if st.button("🔄 광고 상태·신규 소재 확인", key="gc_refresh_status"):
-        with st.spinner("현재 광고 상태와 등록 소재를 확인하는 중..."):
-            fetch_creative_status.clear()
-            try:
-                _ss, _se = fetch_creative_status()
-                st.session_state["gc_status_snapshot"] = (_ss, _se)
-                st.session_state["gc_status_snapshot_at"] = (datetime.utcnow() + timedelta(hours=9)).strftime("%m/%d %H:%M")
-            except Exception as _e:
-                st.warning(f"광고 상태 조회 실패 — {str(_e)[:160]}")
+    # 광고 ON/OFF는 매체 API에서 **자동으로** 받아온다(15분 캐시). 예전엔 버튼을 눌러야만
+    # 받아와서, 안 누르면 '최근 집행일 추정'으로 꺼진 캠페인 소재도 ON으로 보였다.
+    _force = st.button("🔄 광고 상태·신규 소재 다시 확인", key="gc_refresh_status")
+    if _force:
+        fetch_creative_status.clear()
+        _gc_status_auto.clear()
+    try:
+        with st.spinner("매체에서 현재 광고 ON/OFF를 받아오는 중..."):
+            _ss, _se, _sat = _gc_status_auto()
+        st.session_state["gc_status_snapshot"] = (_ss, _se)
+        st.session_state["gc_status_snapshot_at"] = _sat
+    except Exception as _e:
+        st.warning(f"광고 상태 조회 실패 — {str(_e)[:160]}")
     _status_map, _status_errs = st.session_state.get("gc_status_snapshot", ({}, []))
     if st.session_state.get("gc_status_snapshot_at"):
-        st.caption("광고 상태·신규 소재 확인: " + st.session_state["gc_status_snapshot_at"])
+        st.caption("광고 ON/OFF 기준: 매체 API " + st.session_state["gc_status_snapshot_at"]
+                   + " 조회 (15분마다 자동 갱신)"
+                   + (" · 일부 매체 조회 실패: " + "; ".join(map(str, _status_errs))[:200] if _status_errs else ""))
     else:
-        st.caption("광고 상태는 저장된 수동값·최근 집행일 기준입니다. 현재 ON/OFF와 미집행 신규 소재는 '광고 상태·신규 소재 확인'을 눌러 확인하세요.")
+        st.caption("광고 상태를 매체에서 못 받아 최근 집행일로 추정합니다.")
 
     with st.expander("🖼️ 소재 이미지 갱신"):
         st.caption("이미지 수집·변환·저장은 성과 데이터 조회와 별도로 실행합니다.")
