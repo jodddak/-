@@ -15822,7 +15822,8 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
         if not (low.startswith("pmax_온라인팀_신규_") or low == "pmax_온라인팀_리타겟"):
             return None
         rt = low == "pmax_온라인팀_리타겟"
-        ks = [k for k in _cre_camps if k and (k == _creative_image_key(str(cr)) or k in _creative_image_key(str(cr)))]
+        _ck = _creative_image_key(str(cr))
+        ks = [k for k in _cre_camps if k and _ck and (k == _ck or k in _ck or _ck in k)]
         cands = {c for k in ks for c in _cre_camps[k]
                  if any(w in c.lower() for w in _GC_RT_WORDS) == rt and not _gc_is_ab(c)}
         if len(cands) == 1:
@@ -15831,7 +15832,11 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
 
     def _cre_text(cr):
         cr = str(cr or "")
-        return cr if _gc_item_of_text(cr) else _cre_word.get(_creative_image_key(cr), cr)
+        if _gc_item_of_text(cr):
+            return cr
+        _ck = _creative_image_key(cr)
+        ws = {w for k, w in _cre_word.items() if k and _ck and (k == _ck or k in _ck or _ck in k)}
+        return next(iter(ws)) if len(ws) == 1 else cr
     if source is not None and not source.empty and "campaign" in source.columns:
         _gm = source["channel"].map(_gc_channel).eq("구글")
         for idx in source.index[_gm]:
