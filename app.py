@@ -15759,10 +15759,50 @@ def _gc_latest_gfa_snapshots(frame):
     return out.drop(index=stale)
 
 
+def _gc_unify_non_google_campaign_names(ad_creative, ga_rows):
+    """Align known short campaign aliases within their own media/store/device."""
+    source = ad_creative.copy() if ad_creative is not None else None
+    ga = ga_rows.copy() if ga_rows is not None else None
+    candidates = {}
+    if source is not None and not source.empty:
+        for _, row in source.iterrows():
+            tab = _gc_channel(row.get("channel"))
+            candidates.setdefault(tab, set()).add(str(row.get("campaign") or "").strip())
+
+    def canonical(tab, name):
+        name = str(name or "").strip()
+        available = candidates.get(tab, set())
+        if tab == META_OWN_TAB:
+            for product in ("수트", "아우터", "셔츠"):
+                full = f"STCO_{product}_전환"
+                if full in available and name in (product, f"STCO_{product}", f"{product}_전환"):
+                    return full
+        if "GFA" in tab:
+            # A device/store-specific prefix may be absent in an older export or UTM.
+            hits = {c for c in available if c.startswith("STCO_") and
+                    (c.removeprefix("STCO_자사몰_") == name or
+                     c.removeprefix("STCO_외부몰_") == name)}
+            if len(hits) == 1:
+                return next(iter(hits))
+        return name
+
+    if source is not None and not source.empty and "campaign" in source.columns:
+        source["campaign"] = [canonical(_gc_channel(ch), cp)
+                              for ch, cp in zip(source["channel"], source["campaign"])]
+    if ga is not None and not ga.empty and "campaign" in ga.columns:
+        ga["campaign"] = [canonical(tab, cp) for tab, cp in zip(ga["_gc_ch"], ga["campaign"])]
+    return source, ga
+
+
 def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     # Confirmed by the user: the former acquisition suit campaign was renamed.
     # Apply on every view, including cached data before any live status refresh.
-    confirmed = {"PMax_온라인팀_신규_수트": "PMax_온라인팀_수트_260929"}
+    confirmed = {
+        "PMax_온라인팀_신규_수트": "PMax_온라인팀_수트_260929",
+        "PMax_온라인팀_신규_아우터/이너": "PMax_온라인팀_아우터_260930",
+        "PMax_온라인팀_신규_아우터": "PMax_온라인팀_아우터_260930",
+        "PMax_온라인팀_신규_셔츠": "PMax_온라인팀_셔츠_261006",
+    }
     names = (status_snapshot or {}).get(("__campaign_names__", "구글"), {})
     source = ad_creative.copy() if ad_creative is not None else None
     aliases = {}
@@ -18026,6 +18066,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _google_rows = d["_gc_ch"].eq("구글")
     _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
     d = d[~_google_rows | _online_pmax].copy()
+    ad_creative, d = _gc_unify_non_google_campaign_names(ad_creative, d)
     ad_creative = _gc_latest_gfa_snapshots(ad_creative)
     ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
@@ -18776,26 +18817,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _left_f = _gc_filter_left(_left_all, seg, item, _left_row)
 
             manager_campaign = "전체"
-            if label != "구글":
-                def _campaign_of_left(v, k):
-                    return _gc_actual_campaign_label(dict(_media=v, campaign=v.get("campaign")))
-                _campaign_choices = {_gc_actual_campaign_label(r) for _, r in rows.iterrows()}
-                _campaign_choices.update(_campaign_of_left(v, k) for k, v in _left_f)
-                if _campaign_choices:
-                    _cc1, _cc2 = st.columns([0.09, 0.91])
-                    _cc1.markdown('<div class="gc-flt-lbl">캠페인</div>', unsafe_allow_html=True)
-                    _campaign_options = ["전체"] + sorted(_campaign_choices)
-                    _campaign_key = f"gc_manager_campaign_{ti}"
-                    if st.session_state.get(_campaign_key) not in _campaign_options:
-                        st.session_state.pop(_campaign_key, None)
-                    with _cc2:
-                        manager_campaign = _gc_choice("캠페인", _campaign_options, key=_campaign_key)
-                    if manager_campaign != "전체":
-                        if not rows.empty:
-                            rows = rows[rows.apply(lambda r: _gc_actual_campaign_label(r) == manager_campaign, axis=1)].copy()
-                        _left_f = [(k, v) for k, v in _left_f if _campaign_of_left(v, k) == manager_campaign]
-                        _detail_pool_rows = rows.copy()
-                        _left_all = list(_left_f)
+            # GFA/Meta use targeting -> product -> detailed ad group filters.
+            # Preserve campaign identities internally without an extra campaign selector.
 
             # 매체가 안 붙은 GA 줄(utm 앞부분 '의류관심타겟')은 광고 목록에서 그 소재가 실제로
             # 들어 있는 광고세트(의류관심타겟_261001)로 이름을 맞춘다 — 버튼이 둘로 쪼개지지 않게.
