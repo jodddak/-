@@ -19689,11 +19689,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                    if view_lbl else '')
                 + '</div>'
                 f'<div class="fv4-card-sub">{_card_sub}</div>'
-                # 판정으로 걸러 보기 — 유지 / 증액 / OFF 권장 (다시 누르면 전체)
+                # 걸러 보기 — ON/OFF 한 줄 + 판정(유지·증액·OFF 권장) 한 줄. 판정은 지금 ON인 소재만 센다.
                 + ('<style>'
-                   '.gc-jf{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:16px 0 18px;'
-                   'padding:12px 14px;background:#FAF8F2;border:1px solid #ECE7DA;border-radius:14px}'
-                   '.gc-jf-l{font-size:13px;font-weight:800;color:#6B6656;margin-right:4px;letter-spacing:-.2px}'
+                   '.gc-jfbox{margin:16px 0 18px;padding:12px 16px;background:#FAF8F2;'
+                   'border:1px solid #ECE7DA;border-radius:14px;display:flex;flex-direction:column;gap:10px}'
+                   '.gc-jf{display:flex;align-items:center;flex-wrap:wrap;gap:10px}'
+                   '.gc-jf-l{width:92px;flex:none;font-size:13px;font-weight:800;color:#6B6656;letter-spacing:-.2px}'
+                   '.gc-jf-l small{display:block;font-size:11px;font-weight:600;color:#9A9480;margin-top:2px}'
                    '.gc-jf button{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 18px;'
                    'border:1.5px solid #E1DCCD;border-radius:999px;background:#fff;color:#2A2A22;'
                    'font-size:14.5px;font-weight:800;letter-spacing:-.2px;cursor:pointer;'
@@ -19707,56 +19709,82 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                    'box-shadow:0 4px 12px rgba(20,24,31,.16)}'
                    '.gc-jf button.on i{background:#fff}'
                    '.gc-jf button.on b{background:rgba(255,255,255,.22);color:#fff}'
+                   '.gc-jf-sep{height:1px;background:#ECE7DA}'
                    '</style>'
-                   '<div class="gc-jf"><span class="gc-jf-l">판정별 보기</span>'
-                   + "".join(f'<button type="button" data-jf="{k}" style="--c:{c}">'
+                   '<div class="gc-jfbox">'
+                   '<div class="gc-jf"><span class="gc-jf-l">ON/OFF</span>'
+                   + "".join(f'<button type="button" data-of="{k}" style="--c:{c}">'
                              + ('' if k == "" else '<i></i>')
+                             + f'{t}<b data-ofn="{k}">-</b></button>'
+                             for k, t, c in (("", "전체", "#14181F"), ("on", "ON", "#2C7A3C"),
+                                             ("off", "OFF", "#8A8A7C"), ("unk", "상태 미확인", "#C9A227")))
+                   + '</div><div class="gc-jf-sep"></div>'
+                   '<div class="gc-jf"><span class="gc-jf-l">판정별 보기<small>지금 ON인 소재</small></span>'
+                   + "".join(f'<button type="button" data-jf="{k}" style="--c:{c}">'
+                             + ('' if k == "all" else '<i></i>')
                              + f'{t}<b data-jfn="{k}">-</b></button>'
-                             for k, t, c in (("", "전체", "#14181F"), ("keep", "유지", "#2C5AA0"),
+                             for k, t, c in (("all", "전체", "#14181F"), ("keep", "유지", "#2C5AA0"),
                                              ("up", "증액", "#2C7A3C"), ("off", "OFF 권장", "#C0273A")))
-                   + '</div>' if level == "소재" else '')
+                   + '</div></div>' if level == "소재" else '')
                 + '<div class="gc-table-scroll">' + table + '</div>' + '</div></div>'
                 + """
 <script>
 (function(){
   var t=document.getElementById('__TID__'); if(!t) return;
-  // ── 판정 필터(유지·증액·OFF 권장) ── 보이는 줄로 TOTAL을 다시 더한다
+  // ── 걸러 보기: ON/OFF × 판정(유지·증액·OFF 권장) ── 보이는 줄로 TOTAL을 다시 더한다
+  //  판정은 '지금 ON인 소재' 안에서만 센다. 세 판정은 겹치지 않아 전체 = 유지+증액+OFF 권장.
   (function(){
-    // 판정 이름에 그 말이 들어가면 전부 포함(유지·증액·OFF 관련 판정 모두)
-    var JR={keep:/유지/, up:/증액|확장/, off:/OFF|감액|교체|효율 미달/};
-    var JF={keep:{indexOf:function(j){return j&&JR.keep.test(j)?0:-1;}},
-            up:{indexOf:function(j){return j&&JR.up.test(j)?0:-1;}},
-            off:{indexOf:function(j){return j&&JR.off.test(j)?0:-1;}}};
-    var F='', tb=t.tBodies[0], sumr=tb.querySelector('tr.fv4-sum-row');
-    var btns=document.querySelectorAll('.gc-jf button');
+    var tb=t.tBodies[0], sumr=tb.querySelector('tr.fv4-sum-row');
+    var OF='', JFk='';
+    var jbtn=document.querySelectorAll('.gc-jf [data-jf]'), obtn=document.querySelectorAll('.gc-jf [data-of]');
+    function jcat(j){j=j||'';
+      if(/유지/.test(j)) return 'keep';                 // 유지 · 유지(증액 보류)
+      if(/증액|확장/.test(j)) return 'up';              // 증액 검토 · 확장 테스트
+      if(/OFF|감액|교체|효율 미달/.test(j)) return 'off'; // OFF 권장 · 감액·교체 검토
+      return '';}
+    function rows(){return Array.prototype.slice.call(tb.rows).filter(function(r){return !r.classList.contains('nosort');});}
+    function jOf(r){var c=r.cells[r.cells.length-1]; return c?(c.getAttribute('data-j')||''):'';}
+    function onOf(r){var c=r.cells[r.cells.length-2]; if(!c) return '';
+      var s=c.querySelector('select.gc-inline-onoff'), x='';
+      if(s) x=s.value||(s.options[0]?s.options[0].text:'');
+      else {var sp=c.querySelector('.gc-onoff'); x=sp?sp.innerText:c.innerText;}
+      x=String(x).replace('?','').trim();
+      if(x==='ON'||x==='일부 ON') return 'on'; if(x==='OFF') return 'off';
+      var o=c.getAttribute('data-o'); if(o==='3'||o==='2') return 'on'; if(o==='0') return 'off'; return 'unk';}
     function cE(r,n){var c=r.cells; return c[c.length-n];}
     function num(r,n){var c=cE(r,n); if(!c) return 0; var d=parseFloat(c.getAttribute('data-v')); return isNaN(d)?0:d;}
     function fmt(x){return Math.round(x).toLocaleString('ko-KR');}
     if(sumr){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&!cq.hasAttribute('data-orig')) cq.setAttribute('data-orig',cq.innerHTML);}}
+    function counts(){
+      var all=rows(), n={'':all.length,on:0,off:0,unk:0}, m={all:0,keep:0,up:0,off:0};
+      all.forEach(function(r){var o=onOf(r); if(o) n[o]++;
+        if(o==='on'){var k=jcat(jOf(r)); if(k){m[k]++; m.all++;}}});
+      Array.prototype.forEach.call(document.querySelectorAll('[data-ofn]'),function(e){var k=e.getAttribute('data-ofn'); e.textContent=n[k];
+        if(k==='unk') e.parentNode.style.display=n.unk?'':'none';});
+      Array.prototype.forEach.call(document.querySelectorAll('[data-jfn]'),function(e){e.textContent=m[e.getAttribute('data-jfn')];});}
     function apply(){
-      var rows=Array.prototype.slice.call(tb.rows).filter(function(r){return !r.classList.contains('nosort');});
-      var im=0,ck=0,co=0,cv=0,rv=0;
-      rows.forEach(function(r){var c=r.cells[r.cells.length-1]; var j=c?(c.getAttribute('data-j')||''):'';
-        var show=!F||JF[F].indexOf(j)>=0; r.style.display=show?'':'none';
+      var im=0,ck=0,co=0,cv=0,rv=0, filt=!!(OF||JFk);
+      rows().forEach(function(r){var o=onOf(r), k=jcat(jOf(r));
+        var show=(!OF||o===OF) && (!JFk||(JFk==='all'?!!k:k===JFk));
+        r.style.display=show?'':'none';
         if(show){im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
       if(sumr){
-        if(!F){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&cq.hasAttribute('data-orig')) cq.innerHTML=cq.getAttribute('data-orig');}}
+        if(!filt){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&cq.hasAttribute('data-orig')) cq.innerHTML=cq.getAttribute('data-orig');}}
         else{var set=function(n,x){var c=cE(sumr,n); if(c) c.innerHTML=x;};
           set(11,im?fmt(im):'-'); set(10,ck?fmt(ck):'-'); set(9,im?(ck/im*100).toFixed(2)+'%':'-');
           set(8,ck&&co?fmt(co/ck)+'원':'-'); set(7,co?fmt(co)+'원':'-'); set(6,fmt(cv));
           set(5,rv?fmt(rv)+'원':'0원'); set(4,cv&&rv?fmt(rv/cv)+'원':'-');
           set(3,co?fmt(rv/co*100)+'%':'-'); set(2,''); set(1,'');}}
-      Array.prototype.forEach.call(btns,function(b){b.classList.toggle('on',b.getAttribute('data-jf')===F);});
+      Array.prototype.forEach.call(obtn,function(b){b.classList.toggle('on',b.getAttribute('data-of')===OF);});
+      Array.prototype.forEach.call(jbtn,function(b){b.classList.toggle('on',b.getAttribute('data-jf')===JFk);});
     }
-    // 버튼마다 해당 소재 개수
-    (function(){var all=Array.prototype.slice.call(tb.rows).filter(function(r){return !r.classList.contains('nosort');});
-      var n={'':all.length,keep:0,up:0,off:0};
-      all.forEach(function(r){var c=r.cells[r.cells.length-1]; var j=c?(c.getAttribute('data-j')||''):'';
-        for(var k in JF){if(JF[k].indexOf(j)>=0)n[k]++;}});
-      Array.prototype.forEach.call(document.querySelectorAll('[data-jfn]'),function(e){e.textContent=n[e.getAttribute('data-jfn')];});})();
-    Array.prototype.forEach.call(btns,function(b){b.addEventListener('click',function(){
-      var k=b.getAttribute('data-jf'); F=(F===k)?'':k; apply();});});
-    apply();
+    Array.prototype.forEach.call(obtn,function(b){b.onclick=function(){
+      OF=b.getAttribute('data-of'); if(OF!=='on') JFk=''; apply();};});
+    Array.prototype.forEach.call(jbtn,function(b){b.onclick=function(){
+      var k=b.getAttribute('data-jf'); JFk=(JFk===k)?'':k; if(JFk) OF='on'; apply();};});
+    // 표 안에서 ON/OFF를 바꾸면 개수·필터를 다시 맞춘다
+    t.onchange=function(e){if(e.target&&e.target.classList&&e.target.classList.contains('gc-inline-onoff')){setTimeout(function(){counts();apply();},0);}};
+    counts(); apply();
   })();
   var ths=t.tHead.rows[0].cells, st={i:-1,k:'',asc:false};
   function oo(c){var s=c.querySelector('select.gc-inline-onoff');
