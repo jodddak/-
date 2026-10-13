@@ -16926,6 +16926,10 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
             return "OFF", False, "매체 API 상태"
         # 하나라도 켜져 있으면 집행 중이니 ON으로 본다('일부 ON'은 헷갈려서 안 쓴다)
         return "ON", True, f"광고 {len(sel)}개 중 {n_on}개 켜짐"
+    # 매체 API가 등록 소재를 통째로 준 매체(구글·메타)인데 이 소재가 아예 없으면 삭제·종료된 것 → OFF
+    if not ent and keys and ((status_map or {}).get(("__campaign_names__", tab))
+                             or (status_map or {}).get(("__ads__", tab))):
+        return "OFF", False, "매체에 지금 없음(삭제·종료, 매체 API)"
     last = next((last_map[k] for k in keys if k in last_map), None)
     newest = ch_max.get(tab)
     if last and newest:
