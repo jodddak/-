@@ -19722,7 +19722,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
   var t=document.getElementById('__TID__'); if(!t) return;
   // ── 판정 필터(유지·증액·OFF 권장) ── 보이는 줄로 TOTAL을 다시 더한다
   (function(){
-    var JF={keep:['유지','유지(증액 보류)'], up:['증액 검토','확장 테스트'], off:['OFF 권장']};
+    // 판정 이름에 그 말이 들어가면 전부 포함(유지·증액·OFF 관련 판정 모두)
+    var JR={keep:/유지/, up:/증액|확장/, off:/OFF|감액|교체|효율 미달/};
+    var JF={keep:{indexOf:function(j){return j&&JR.keep.test(j)?0:-1;}},
+            up:{indexOf:function(j){return j&&JR.up.test(j)?0:-1;}},
+            off:{indexOf:function(j){return j&&JR.off.test(j)?0:-1;}}};
     var F='', tb=t.tBodies[0], sumr=tb.querySelector('tr.fv4-sum-row');
     var btns=document.querySelectorAll('.gc-jf button');
     function cE(r,n){var c=r.cells; return c[c.length-n];}
