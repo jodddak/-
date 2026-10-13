@@ -15770,6 +15770,7 @@ def _gc_unify_non_google_campaign_names(ad_creative, ga_rows):
             candidates.setdefault(tab, set()).add(str(row.get("campaign") or "").strip())
 
     def canonical(tab, name):
+        tab = str(tab or "")
         name = str(name or "").strip()
         available = candidates.get(tab, set())
         if tab == META_OWN_TAB:
