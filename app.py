@@ -17787,14 +17787,14 @@ def _gc_status_component():
     import tempfile
     from pathlib import Path
     folder = Path(tempfile.mkdtemp(prefix="stco_onoff_"))
-    page = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;overflow-y:auto;height:100vh"><div id="root" style="display:flow-root"></div>
+    page = """<!doctype html><html style="overflow:hidden"><head><meta charset="utf-8"></head><body style="margin:0"><div id="sc" style="height:100vh;overflow-y:auto"><div id="root" style="display:flow-root"></div></div>
 <script>
 function send(type, data){parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
 var lastHtml=null,lastHeight=null;
 function setHeight(height){if(lastHeight!==height){lastHeight=height;send('streamlit:setFrameHeight',{height:height});}}
 // 내용 실제 높이에 맞춰 틀 높이를 늘리고 줄인다(필터·안내문으로 길어져도 아래가 잘리지 않게).
-// 상한(14000px)을 넘으면 오른쪽 세로 스크롤바로 본다.
-var CAP=14000,fitTimer=null;
+// 상한(150000px)을 넘을 때만 안쪽 세로 스크롤바로 본다.
+var CAP=150000,fitTimer=null;
 function fit(){var r=document.getElementById('root');if(!r)return;var h=Math.ceil(r.getBoundingClientRect().height)+12;if(h>40)setHeight(Math.min(CAP,h));}
 function fitSoon(){clearTimeout(fitTimer);fitTimer=setTimeout(fit,30);}
 if(window.ResizeObserver){new ResizeObserver(fitSoon).observe(document.getElementById('root')||document.body);}
@@ -19781,7 +19781,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if _inline_onoff:
                 _gc_status_table(card, recs, label, min(14000, 288 + row_h * len(body)), ti)
             else:
-                st.components.v1.html(card, height=min(14000, 360 + row_h * len(body)), scrolling=True)
+                # TOTAL 등 ON/OFF 칸이 없는 표도 같은 틀로 그려 높이를 내용에 맞춘다(아래 잘림 방지).
+                _gc_status_component()(html=card, identities=[],
+                                       height=min(14000, 360 + row_h * len(body)),
+                                       key=f"gc_card_{ti}", default=None)
 
             # ── 표 아래 ── 경고·안내 → 읽는 법
             for _kind, _txt in notes:
