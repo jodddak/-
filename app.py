@@ -15731,7 +15731,9 @@ def _gc_has_performance(row=None, media=None):
     values += [row.get(k, 0) for k in ("conv", "rev")]
     for value in values:
         try:
-            if pd.notna(value) and float(value or 0) != 0:
+            # Group residual subtraction can leave 1e-11 rather than zero.
+            # Match the integer precision displayed in the performance table.
+            if pd.notna(value) and abs(float(value or 0)) >= 0.5:
                 return True
         except (TypeError, ValueError):
             pass
