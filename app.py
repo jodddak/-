@@ -15734,6 +15734,25 @@ def _gc_has_performance(row=None, media=None):
     return False
 
 
+def _gc_latest_gfa_snapshots(frame):
+    """Use one uploaded daily campaign snapshot; retain older dates and other campaigns."""
+    if frame is None or frame.empty or not {"uploaded_at", "source", "campaign", "channel", "report_date"}.issubset(frame.columns):
+        return frame
+    out = frame.copy()
+    mask = out["source"].eq("media_report") & out["channel"].astype(str).str.contains("GFA", case=False, na=False)
+    if not mask.any():
+        return frame
+    sub = out.loc[mask].copy()
+    sub["_snapshot_time"] = pd.to_datetime(sub["uploaded_at"], errors="coerce", utc=True)
+    sub["_snapshot_day"] = pd.to_datetime(sub["report_date"], errors="coerce").dt.date
+    # Empty campaign identities cannot establish that two uploads replace each other.
+    valid = sub["_snapshot_time"].notna() & sub["campaign"].fillna("").astype(str).str.strip().ne("")
+    scoped = sub.loc[valid]
+    latest = scoped.groupby(["channel", "source", "campaign", "_snapshot_day"])["_snapshot_time"].transform("max")
+    stale = scoped.index[scoped["_snapshot_time"].lt(latest)]
+    return out.drop(index=stale)
+
+
 def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     names = (status_snapshot or {}).get(("__campaign_names__", "구글"), {})
     if not names or ad_creative is None or ad_creative.empty or "adset" not in ad_creative.columns:
@@ -17981,6 +18000,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _google_rows = d["_gc_ch"].eq("구글")
     _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
     d = d[~_google_rows | _online_pmax].copy()
+    ad_creative = _gc_latest_gfa_snapshots(ad_creative)
     ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
