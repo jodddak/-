@@ -16919,7 +16919,10 @@ def _gc_expand_actual_groups(rows):
                                                      **{f:0.0 for f in _GC_MF}))
             for field in _GC_MF:
                 dest[field] += float(part.get(field, 0) or 0)
-        parts = [part for part in grouped.values() if any(float(part.get(f, 0) or 0) for f in _GC_MF)]
+        # Residual subtraction can produce an otherwise empty second group.
+        # Remove it before deciding whether GA attribution is ambiguous.
+        parts = [part for part in grouped.values()
+                 if _gc_has_performance(media=dict(part, channel=original.get("channel")))]
         if not parts:
             expanded.append(original.copy())
             continue
