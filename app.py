@@ -15562,6 +15562,9 @@ GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT = "TOTAL", "신규타겟팅", "리타겟팅"
 
 def _gc_target_group(row) -> str:
     """이 줄이 신규 발굴인지 리타겟팅인지. 못 가리면 '기타'(TOTAL에서만 보인다)."""
+    campaign = str(row.get("campaign") or "").strip()
+    if campaign.casefold().startswith("pmax_온라인팀"):
+        return _gc_seg_of_campaign(campaign)
     blob = " ".join(str(row.get(k) or "") for k in ("target", "campaign", "creative")).lower()
     if any(w in blob for w in _GC_RT_WORDS):
         return GC_SEG_RT
@@ -15595,6 +15598,8 @@ def _gc_seg_of_campaign(c):
     s = str(c or "").lower()
     if not s.strip():
         return None
+    if s.strip().startswith("pmax_온라인팀"):
+        return GC_SEG_RT if any(w in s for w in _GC_RT_WORDS) else GC_SEG_NEW
     rt = any(w in s for w in _GC_RT_WORDS)
     nw = any(w in s for w in _GC_NEW_WORDS)
     if rt and not nw:
@@ -15729,6 +15734,32 @@ def _gc_has_performance(row=None, media=None):
     return False
 
 
+def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
+    names = (status_snapshot or {}).get(("__campaign_names__", "구글"), {})
+    if not names or ad_creative is None or ad_creative.empty or "adset" not in ad_creative.columns:
+        return ad_creative, ga_rows
+    source = ad_creative.copy()
+    aliases = {}
+    for index, record in source.iterrows():
+        key = str(record.get("adset") or "")
+        if not key.startswith(GOOGLE_ASSET_KEY_PREFIX):
+            continue
+        campaign_id = key[len(GOOGLE_ASSET_KEY_PREFIX):].split(":", 1)[0]
+        current = names.get(campaign_id)
+        if not current:
+            continue
+        old = str(record.get("campaign") or "").strip()
+        if old:
+            aliases.setdefault(old, set()).add(current)
+        source.at[index, "campaign"] = current
+    mapping = {old:next(iter(values)) for old, values in aliases.items() if len(values) == 1}
+    if ga_rows is not None and not ga_rows.empty and mapping:
+        ga_rows = ga_rows.copy()
+        mask = ga_rows["_gc_ch"].eq("구글")
+        ga_rows.loc[mask, "campaign"] = ga_rows.loc[mask, "campaign"].map(lambda name: mapping.get(str(name), name))
+    return source, ga_rows
+
+
 def _gc_google_detail_label(row, campaign_names):
     """Google has campaign identity, not the GA UTM target token."""
     media = row.get("_media")
@@ -15773,7 +15804,13 @@ def _gc_detail_target_label(row):
               "방문자180일": "방문자 180일"}.get(norm, target)
     seg = _gc_target_group(dict(target=target, campaign=row.get("campaign") or ""))
     suffix = "리타겟팅" if seg == GC_SEG_RT else ("신규" if seg == GC_SEG_NEW else "구분 미확인")
-    return f"{pretty} ({suffix})"
+    # The unversioned fashion group is a historical fifth group in the supplied
+    # own-store GFA report; dated and Previous cohorts remain current groups.
+    campaign = str(row.get("campaign") or "")
+    historical = row.get("_current_group") is False or (
+        norm == "패션관심타겟" and "STCO_자사몰_" in campaign
+        and not _gc_is_ab(campaign))
+    return f"{pretty} ({suffix})" + (" (현재X)" if historical else "")
 
 
 def _gc_gfa_target_matches(target, choice):
@@ -15851,19 +15888,18 @@ def _gc_item_of_text(text) -> str | None:
 
 
 def _gc_item_group(row) -> str:
-    """이 소재가 어느 품목인지. 소재명 → 캠페인 순으로 보고, 못 가리면 '기타'.
-    단, A/B 테스트 캠페인 소재는 소재명과 상관없이 'A/B테스트'."""
-    _cl = row.get("camp_list") if hasattr(row, "get") else None
-    _cl = list(_cl) if isinstance(_cl, (list, tuple, set)) else []
-    _m = row.get("_media") if hasattr(row, "get") else None
-    _mc = [(_m or {}).get("campaign")] if isinstance(_m, dict) else []
-    _cs = [c for c in [row.get("campaign")] + _cl + _mc if str(c or "").strip()]
-    if _cs and all(_gc_is_ab(c) for c in _cs):
-        return GC_ITEM_AB
-    for k in ("creative", "cre_title", "campaign"):
-        it = _gc_item_of_text(row.get(k))
-        if it:
-            return it
+    media = row.get("_media") if hasattr(row, "get") else None
+    media = media if isinstance(media, dict) else {}
+    actual = [c for c in (media.get("campaigns") or []) if str(c or "").strip()]
+    campaigns = actual or (row.get("camp_list") or [row.get("campaign")])
+    campaigns = [c for c in campaigns if str(c or "").strip()]
+    items = {_gc_item_of_campaign(c) for c in campaigns} - {None}
+    if len(items) == 1:
+        return next(iter(items))
+    for key in ("creative", "cre_title"):
+        item = _gc_item_of_text(row.get(key))
+        if item:
+            return item
     return "기타"
 
 
@@ -16434,7 +16470,7 @@ def fetch_creative_status() -> tuple:
                        "Content-Type": "application/json"}
             if g.get("login_customer_id"):
                 headers["login-customer-id"] = str(g["login_customer_id"]).replace("-", "").strip()
-            query = ("SELECT asset_group.name, asset_group.status, campaign.name, campaign.status "
+            query = ("SELECT asset_group.name, asset_group.status, campaign.id, campaign.name, campaign.status "
                      "FROM asset_group WHERE asset_group.status != 'REMOVED' "
                      "AND campaign.status != 'REMOVED'")
             vers = ([str(g["api_version"]).strip()] if g.get("api_version") else []) + [
@@ -16454,6 +16490,8 @@ def fetch_creative_status() -> tuple:
                         camp = res.get("campaign") or {}
                         if _google_campaign_excluded(camp.get("name")):
                             continue
+                        if camp.get("id") and camp.get("name"):
+                            out.setdefault(("__campaign_names__", tab), {})[str(camp["id"])] = str(camp["name"])
                         ag = res.get("assetGroup") or {}
                         nm = _creative_image_key(str(ag.get("name") or "").strip())
                         if not nm:
@@ -16684,8 +16722,9 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 cm = [i for i in idxs if _gc_tgt_match(tgts[i], bt[a].get("adset", a))]
                 if not cm:
                     return []
-                best = min(abs(len(_nt[i]) - len(an)) for i in cm)
-                return [i for i in cm if abs(len(_nt[i]) - len(an)) == best]
+                # A UTM prefix cannot identify a date cohort or Previous group.
+                # Keep all compatible rows rather than choosing by string length.
+                return cm
 
             # 줄 번호 → {광고세트 키: 비중}. 보통 비중 1(통째로), 캠페인으로도 못 가르면
             # 후보 줄들에 GA 방문 비중으로 나눈다(한 줄에 몰거나 '방문 없음' 줄로 빼지 않게).
@@ -16764,6 +16803,16 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                         _gc_add_parts(_pbc, _rest_bc, w)
                     else:
                         d = {f: collapsed[f] * w_all for f in _F}
+                    _group_parts = []
+                    _group_weights = wts.get(i, {}) if i in assigned else (
+                        {a: w for a in bt if a not in used} if i in free else {})
+                    for a, weight in _group_weights.items():
+                        values = {f: float(bt[a].get(f, 0) or 0) * weight for f in _F}
+                        _group_parts.append(dict(values, campaign=bt[a].get("campaign") or "",
+                                                 adset=bt[a].get("adset") or ""))
+                    _collapsed_part = {f: collapsed[f] * w_all for f in _F}
+                    if any(_collapsed_part.values()):
+                        _group_parts.append(dict(_collapsed_part, campaign="", adset="그룹 미확인"))
                     _assigned_cps = {bt[a].get("campaign", "") for a in assigned.get(i, [])}
                     _cps = sorted(c for c, values in _pbc.items()
                                   if c and (c in _assigned_cps or
@@ -16778,7 +16827,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                                   campaigns=_cps,
                                   campaign=((_cps or [None])[0] if i in assigned else None)
                                   or "",
-                                  _by_campaign=_pbc)
+                                  _by_campaign=_pbc, _group_parts=_group_parts)
                 # GA 줄이 없는 광고세트의 돈은 버리지 않고, 메타 관리자 화면처럼
                 # **광고세트 하나에 한 줄씩** 'GA 방문 없음' 줄로 세운다(합계가 관리자와 맞게).
                 if not free:
@@ -16817,6 +16866,94 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 "_full_cost": float(base.get("cost", 0) or 0),
             }
     return out
+
+
+def _gc_expand_actual_groups(rows):
+    """One manager campaign/ad group per row; ambiguous GA attribution stays separate."""
+    if rows is None or rows.empty:
+        return rows
+    expanded = []
+    for _, original in rows.iterrows():
+        media = original.get("_media")
+        parts = (media or {}).get("_group_parts") if isinstance(media, dict) else None
+        grouped = {}
+        for part in parts or []:
+            identity = (str(part.get("campaign") or ""), str(part.get("adset") or ""))
+            dest = grouped.setdefault(identity, dict(campaign=identity[0], adset=identity[1],
+                                                     **{f:0.0 for f in _GC_MF}))
+            for field in _GC_MF:
+                dest[field] += float(part.get(field, 0) or 0)
+        parts = [part for part in grouped.values() if any(float(part.get(f, 0) or 0) for f in _GC_MF)]
+        if not parts:
+            expanded.append(original.copy())
+            continue
+        unresolved = len(parts) > 1
+        for part in parts:
+            row = original.copy()
+            row["ga_campaign"] = original.get("campaign")
+            campaign = str(part.get("campaign") or "").strip()
+            target = str(part.get("adset") or "").strip()
+            values = {f: float(part.get(f, 0) or 0) for f in _GC_MF}
+            row["_media"] = dict(media, **values, _adset=target,
+                campaign=campaign, campaigns=[campaign] if campaign else [],
+                _by_campaign={campaign:values} if campaign else {}, _group_parts=None,
+                _full_cost=values["cost"])
+            row["target"] = target or "(타겟팅 없음)"
+            if campaign:
+                row["campaign"] = campaign
+                row["camp_list"] = [campaign]
+            if unresolved:
+                for field in _GC_GA_COLS:
+                    if field in row:
+                        row[field] = 0.0
+            expanded.append(row)
+        if unresolved and any(float(original.get(f, 0) or 0) for f in _GC_GA_COLS):
+            row = original.copy()
+            campaigns = {str(p.get("campaign") or "").strip() for p in parts} - {""}
+            if len(campaigns) == 1:
+                row["campaign"] = next(iter(campaigns))
+                row["camp_list"] = [row["campaign"]]
+            row["target"] = "GA 그룹 미확인"
+            row["_media"] = None
+            row["_ga_group_unresolved"] = True
+            expanded.append(row)
+    # Multiple UTM aliases may refer to the same manager creative/group.
+    # Merge those rows after attribution so the manager identity appears once.
+    merged = {}
+    for row in expanded:
+        media = row.get("_media")
+        name = str((media or {}).get("name") or row.get("cre_title") or row.get("creative") or row.get("cre_name") or "")
+        identity = (str(row.get("channel") or ""), _creative_image_key(name),
+                    str(row.get("campaign") or ""), str(row.get("target") or ""),
+                    bool(row.get("_ga_group_unresolved", False)))
+        if identity not in merged:
+            merged[identity] = row.copy()
+            if isinstance(media, dict):
+                merged[identity]["_media"] = dict(media)
+            continue
+        dest = merged[identity]
+        for field in _GC_GA_COLS:
+            if field in dest:
+                dest[field] = float(dest.get(field, 0) or 0) + float(row.get(field, 0) or 0)
+        if isinstance(media, dict):
+            current = dest.get("_media") or {}
+            values = {field:float(current.get(field, 0) or 0)+float(media.get(field, 0) or 0)
+                      for field in _GC_MF}
+            campaign = identity[2]
+            dest["_media"] = dict(current, **values, _full_cost=values["cost"],
+                                  _by_campaign={campaign:dict(values)} if campaign else {})
+    return pd.DataFrame(list(merged.values())).reset_index(drop=True)
+
+
+def _gc_actual_campaign_label(row):
+    media = row.get("_media")
+    campaigns = (media or {}).get("campaigns") if isinstance(media, dict) else None
+    campaigns = [str(c).strip() for c in (campaigns or []) if str(c or "").strip()]
+    if len(campaigns) == 1:
+        return campaigns[0]
+    if len(campaigns) > 1:
+        return "여러 캠페인 · 매칭 확인"
+    return str(row.get("campaign") or "").strip() or "캠페인 미확인"
 
 
 def _gc_lookup_media(row, media_map: dict):
@@ -16877,7 +17014,7 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
 def _adset_short(a) -> str:
     """화면 표시용 광고세트 이름 — GA 줄(utm_content 앞부분)과 같은 꼴로 앞부분만.
     '리타겟팅_방문자180일' → '리타겟팅'. 매칭·상태 판정은 원래 이름(_adset)을 그대로 쓴다."""
-    return str(a or "").split("_")[0].strip()
+    return str(a or "").strip()
 
 
 def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
@@ -17508,7 +17645,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     ROAS는 방문 비중으로 나눈 '추정치'다 — 순위 판단용이지 정산용이 아니다.
     """
     st.markdown(FUNNEL_V4_CSS, unsafe_allow_html=True)
-    st.caption("소재 화면 버전: 2026-10-13 · 이미지 안정화 / 캠페인 필터 수정")
+    st.caption("소재 화면 버전: 2026-10-13 · 캠페인·그룹 정합성 / 현재X 분리")
     st.markdown(
         '<div class="fv4-wrap"><div class="fv4-eyebrow">CREATIVE · GA4</div>'
         '<div class="fv4-h2">GA 소재별 성과</div></div>', unsafe_allow_html=True)
@@ -17844,6 +17981,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _google_rows = d["_gc_ch"].eq("구글")
     _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
     d = d[~_google_rows | _online_pmax].copy()
+    ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
     # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
@@ -18486,6 +18624,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _matched = set()
             if not rows.empty:
                 rows["_media"] = _gc_attach_media(rows, media_map, _matched)
+                rows = _gc_expand_actual_groups(rows)
             else:
                 rows["_media"] = pd.Series([], dtype=object)
 
@@ -18590,6 +18729,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 rows = _gc_filter_rows(rows, seg, item)
             _left_f = _gc_filter_left(_left_all, seg, item, _left_row)
 
+            manager_campaign = "전체"
+            if label != "구글":
+                def _campaign_of_left(v, k):
+                    return _gc_actual_campaign_label(dict(_media=v, campaign=v.get("campaign")))
+                _campaign_choices = {_gc_actual_campaign_label(r) for _, r in rows.iterrows()}
+                _campaign_choices.update(_campaign_of_left(v, k) for k, v in _left_f)
+                if _campaign_choices:
+                    _cc1, _cc2 = st.columns([0.09, 0.91])
+                    _cc1.markdown('<div class="gc-flt-lbl">캠페인</div>', unsafe_allow_html=True)
+                    _campaign_options = ["전체"] + sorted(_campaign_choices)
+                    _campaign_key = f"gc_manager_campaign_{ti}"
+                    if st.session_state.get(_campaign_key) not in _campaign_options:
+                        st.session_state.pop(_campaign_key, None)
+                    with _cc2:
+                        manager_campaign = _gc_choice("캠페인", _campaign_options, key=_campaign_key)
+                    if manager_campaign != "전체":
+                        if not rows.empty:
+                            rows = rows[rows.apply(lambda r: _gc_actual_campaign_label(r) == manager_campaign, axis=1)].copy()
+                        _left_f = [(k, v) for k, v in _left_f if _campaign_of_left(v, k) == manager_campaign]
+                        _detail_pool_rows = rows.copy()
+                        _left_all = list(_left_f)
+
             # 매체가 안 붙은 GA 줄(utm 앞부분 '의류관심타겟')은 광고 목록에서 그 소재가 실제로
             # 들어 있는 광고세트(의류관심타겟_261001)로 이름을 맞춘다 — 버튼이 둘로 쪼개지지 않게.
             _ads_lbl = (_status_map or {}).get(("__ads__", label), [])
@@ -18604,6 +18765,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _google_campaign_names.update(str(c).strip() for c in _ga_cp["campaign"].dropna()
                                                   if str(c).strip())
 
+            _active_groups = {str(a.get("adset") or "").strip() for a in _ads_lbl if a.get("on")}
+            def _with_current_group_state(row):
+                row = dict(row)
+                media = row.get("_media")
+                target = str((media or {}).get("_adset") or row.get("target") or "").strip() if isinstance(media, dict) else str(row.get("target") or "").strip()
+                if _active_groups and target and target not in ("GA 그룹 미확인", "(타겟팅 없음)"):
+                    row["_current_group"] = target in _active_groups
+                return row
+
             def _row_label(r):
                 if label == "구글":
                     return _gc_google_detail_label(r, _google_campaign_names)
@@ -18617,9 +18787,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                              if _creative_image_key(a.get("name") or "") in _nm
                              and _t and _t in _gc_tgt_norm(a.get("adset"))}
                     if len(_cand) == 1:
-                        return _gc_detail_target_label(dict(
-                            target=next(iter(_cand)), campaign=r.get("campaign") or ""))
-                return _gc_detail_target_label(r)
+                        return _gc_detail_target_label(_with_current_group_state(dict(
+                            target=next(iter(_cand)), campaign=r.get("campaign") or "")))
+                return _gc_detail_target_label(_with_current_group_state(r))
 
             # Show actual ad-group choices for every media tab, including Meta.
             detail_target = "전체"
@@ -18627,8 +18797,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 if label == "구글":
                     return _gc_google_detail_label(dict(_media=v, campaign=v.get("campaign")),
                                                    _google_campaign_names)
-                return _gc_detail_target_label(dict(
-                    target=v.get("_adset") or "", campaign=v.get("campaign") or ""))
+                return _gc_detail_target_label(_with_current_group_state(dict(
+                    target=v.get("_adset") or "", campaign=v.get("campaign") or "")))
             if label == "구글":
                 # Explicitly exclude unresolved campaigns from this performance view.
                 if not rows.empty:
@@ -18684,6 +18854,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 지금 보고 있는 조건 — 배지·제목·엑셀 시트에 그대로 쓴다
             _view_bits = [b for b in (seg if seg != GC_SEG_ALL else "",
                                       item if item != GC_ITEM_ALL else "",
+                                      manager_campaign if manager_campaign != "전체" else "",
                                       detail_target if detail_target != "전체" else "") if b]
             view_lbl = " · ".join(_view_bits)
             if _view_bits and rows.empty and not _left_f:
@@ -19082,7 +19253,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 f'{str(m.get("campaign") or "").strip() or ch_k}</span>'),
                         # 광고세트 이름은 GA 줄과 같은 꼴로 앞부분만 보여준다
                         # ('리타겟팅_방문자180일' → '리타겟팅')
-                        "target": str(m.get("_adset") or "").split("_")[0].strip(),
+                        "target": str(m.get("_adset") or "").strip(),
                         "sessions": 0.0, "conv": 0.0, "rev": 0.0,
                         "cre_name": _nm, "cre_label": _nm, "cre_date": "", "creative": _nm,
                     })
@@ -19215,6 +19386,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 표 위에 둔다. 기준 설명·차이 안내만 표 아래로 내렸다.
             # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
             # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
+            if not rows.empty and "_ga_group_unresolved" in rows.columns and rows["_ga_group_unresolved"].fillna(False).any():
+                st.caption("GA 그룹 미확인: UTM에 그룹 날짜·이전 구분이 없어 구매·매출을 특정 광고 그룹에 확정할 수 없는 행입니다. 총합에는 포함하고 임의 배분하지 않습니다.")
             if cmt:
                 st.markdown(cmt, unsafe_allow_html=True)
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
