@@ -17799,6 +17799,8 @@ function fit(){var r=document.getElementById('root');if(!r)return;var h=Math.cei
 function fitSoon(){clearTimeout(fitTimer);fitTimer=setTimeout(fit,30);}
 if(window.ResizeObserver){new ResizeObserver(fitSoon).observe(document.getElementById('root')||document.body);}
 window.addEventListener('load',fitSoon);
+document.addEventListener('click',function(){setTimeout(fit,60);setTimeout(fit,400);},true);
+setInterval(fit,1000);
 function patchNode(oldNode,newNode){
  if(oldNode.nodeType!==newNode.nodeType || oldNode.nodeName!==newNode.nodeName){oldNode.replaceWith(newNode.cloneNode(true));return;}
  if(oldNode.nodeType===3 || oldNode.nodeType===8){if(oldNode.nodeValue!==newNode.nodeValue)oldNode.nodeValue=newNode.nodeValue;return;}
