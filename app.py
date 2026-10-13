@@ -18571,7 +18571,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 거라, 매체를 섞은 합계는 판단에 안 쓰인다. 게다가 맨즈탭·외부몰은 기준이 달라
     # 애초에 빠져 있어서, TOTAL이 '전부'도 아니면서 전부인 척해 오해만 키웠다.
     # 매체별 합계는 각 표 맨 윗줄(TOTAL 행)에 그대로 있다.
-    tab_labels = list(order)
+    # TOTAL 탭(2026-10 다시 추가) — 자주 같이 보는 매체(외부몰·맨즈탭 제외)를 한 표로.
+    # 필터는 타겟팅·품목까지만 둔다(캠페인·세부 타겟팅은 매체마다 달라 섞으면 헷갈린다).
+    _total_keep = [c for c in order if c not in sep]
+    tab_labels = (["TOTAL"] if len(_total_keep) >= 2 else []) + list(order)
     # 엑셀 버튼은 표보다 위에 있어야 찾기 쉬운데, 담을 내용은 탭을 다 그려봐야 안다.
     # 자리만 먼저 잡아두고 맨 아래에서 채운다.
     export_slot = st.container()
@@ -18880,9 +18883,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _render_gfa_inventory_form(label, start, end, key=f"gc_inventory_{ti}")
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
-            keep = [label]
+            keep = list(_total_keep) if label == "TOTAL" else [label]
             ch_keep = keep
             rows = rows_all[rows_all["channel"].isin(keep)].copy()
+
+            def _tab_of(r=None, m=None):
+                """TOTAL 탭에서는 줄마다 원래 매체 탭으로 ON/OFF 상태를 찾는다."""
+                if label != "TOTAL":
+                    return label
+                ch = (r.get("channel") if r is not None and hasattr(r, "get") else None)
+                if ch:
+                    return ch
+                return _gc_channel((m or {}).get("channel")) if isinstance(m, dict) else label
 
             # 메타 계정(자사몰·외부몰·제로라운지) 탭인데 매체 실적이 한 줄도 없으면
             # 그 자리에서 바로 다시 받게 한다 — 새 계정을 붙인 직후나 토큰 권한을 고친 직후.
@@ -19109,8 +19121,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         lambda r: _row_label(r) != "캠페인 미확인", axis=1)].copy()
                 _left_all = [(k, v) for k, v in _left_all if _detail_left_label(v, k) != "캠페인 미확인"]
                 _left_f = [(k, v) for k, v in _left_f if _detail_left_label(v, k) != "캠페인 미확인"]
-            _groups = {_row_label(r) for _, r in _detail_pool_rows.iterrows()}
-            _groups.update(_detail_left_label(v, k) for k, v in _left_all)
+            _groups = {_row_label(r) for _, r in _detail_pool_rows.iterrows()} if label != "TOTAL" else set()
+            if label != "TOTAL":
+                _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
                 _target_options = ["전체"] + sorted(_groups,
                     key=lambda x: ("(현재X)" in x, "리타겟팅" in x, x == "그룹 미확인", x))
@@ -19443,7 +19456,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _new_media = []
                 for _, r in rows.iterrows():
                     _m = dict(r["_media"] or {})
-                    _m["_onoff"] = cr_safe_onoff(label, r, _m, _status_map, _last_map, _ch_max,
+                    _m["_onoff"] = cr_safe_onoff(_tab_of(r, _m), r, _m, _status_map, _last_map, _ch_max,
                                                  _manual_status)
                     _m["_rule"] = cr_apply_onoff(cr_safe_rule(r, _m, _avg_sp), _m["_onoff"])
                     _new_media.append(_m)
@@ -19504,7 +19517,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                          "cre_label": _nm, "cre_date": "", "creative": _nm})
                         _summary_media = dict(m, _unmatched=True)
                         _summary_onoff = cr_safe_onoff(
-                            label, _lr, _summary_media, _status_map, _last_map,
+                            _tab_of(None, m), _lr, _summary_media, _status_map, _last_map,
                             _ch_max, _manual_status)
                         _rl = cr_apply_onoff(
                             cr_safe_rule(_lr, _summary_media, _avg_sp), _summary_onoff)
@@ -19540,6 +19553,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             body = []
             recs = []          # 엑셀용 — 화면 표와 같은 값을 같은 순서로 쌓는다
             for _, r in rows.iterrows():
+                if label == "TOTAL":     # TOTAL에서는 어느 매체 소재인지 아랫줄 앞에 적는다
+                    r = r.copy()
+                    r["key"] = str(r.get("key") or "").replace(
+                        '<span class="gc-sub">', f'<span class="gc-sub">{r.get("channel")} · ', 1)
                 # 이미지는 화면 토글과 무관하게 찾아둔다(엑셀에는 넣을 수 있어야 하므로).
                 url = _gc_pick_image(r, img_map, store_idx)
                 body.append(_gc_row_html(r, r["_media"],
@@ -19563,7 +19580,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         # 소재명 아래 설명은 캠페인만 — 'GA 방문 없음' 같은 꼬리는 판정 칸
                         # (유입 없음 / UTM 없음)에 이미 나와서 중복이라 뺐다.
                         "key": (f'{_nm}<span class="gc-sub">'
-                                f'{str(m.get("campaign") or "").strip() or ch_k}</span>'),
+                                + (f"{ch_k} · " if label == "TOTAL" else "")
+                                + f'{str(m.get("campaign") or "").strip() or ch_k}</span>'),
                         # 광고세트 이름은 GA 줄과 같은 꼴로 앞부분만 보여준다
                         # ('리타겟팅_방문자180일' → '리타겟팅')
                         "target": str(m.get("_adset") or "").strip(),
@@ -19573,7 +19591,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _url = _gc_pick_image(_row, img_map, store_idx)
                     _m_un = dict(m, _unmatched=True)
                     if level == "소재":
-                        _m_un["_onoff"] = cr_safe_onoff(label, _row, _m_un, _status_map,
+                        _m_un["_onoff"] = cr_safe_onoff(_tab_of(None, m), _row, _m_un, _status_map,
                                                         _last_map, _ch_max, _manual_status)
                         _m_un["_rule"] = cr_apply_onoff(cr_safe_rule(_row, _m_un, _avg_sp),
                                                         _m_un["_onoff"])
@@ -19652,11 +19670,48 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                    if view_lbl else '')
                 + '</div>'
                 f'<div class="fv4-card-sub">{_card_sub}</div>'
+                # 판정으로 걸러 보기 — 유지 / 증액 / OFF 권장 (다시 누르면 전체)
+                + ('<div class="gc-jf" style="display:flex;justify-content:flex-end;gap:6px;'
+                   'margin:-34px 0 10px;">'
+                   + "".join(f'<button type="button" data-jf="{k}" style="min-width:86px;'
+                             f'padding:5px 14px;border:1px solid #2F5BB7;border-radius:4px;'
+                             f'background:#4472C4;color:#fff;font-size:13px;font-weight:700;'
+                             f'cursor:pointer;">{t}</button>'
+                             for k, t in (("keep", "유지"), ("up", "증액"), ("off", "OFF 권장")))
+                   + '</div>' if level == "소재" else '')
                 + '<div class="gc-table-scroll">' + table + '</div>' + '</div></div>'
                 + """
 <script>
 (function(){
   var t=document.getElementById('__TID__'); if(!t) return;
+  // ── 판정 필터(유지·증액·OFF 권장) ── 보이는 줄로 TOTAL을 다시 더한다
+  (function(){
+    var JF={keep:['유지','유지(증액 보류)'], up:['증액 검토','확장 테스트'], off:['OFF 권장']};
+    var F='', tb=t.tBodies[0], sumr=tb.querySelector('tr.fv4-sum-row');
+    var btns=document.querySelectorAll('.gc-jf button');
+    function cE(r,n){var c=r.cells; return c[c.length-n];}
+    function num(r,n){var c=cE(r,n); if(!c) return 0; var d=parseFloat(c.getAttribute('data-v')); return isNaN(d)?0:d;}
+    function fmt(x){return Math.round(x).toLocaleString('ko-KR');}
+    if(sumr){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&!cq.hasAttribute('data-orig')) cq.setAttribute('data-orig',cq.innerHTML);}}
+    function apply(){
+      var rows=Array.prototype.slice.call(tb.rows).filter(function(r){return !r.classList.contains('nosort');});
+      var im=0,ck=0,co=0,cv=0,rv=0;
+      rows.forEach(function(r){var c=r.cells[r.cells.length-1]; var j=c?(c.getAttribute('data-j')||''):'';
+        var show=!F||JF[F].indexOf(j)>=0; r.style.display=show?'':'none';
+        if(show){im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
+      if(sumr){
+        if(!F){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&cq.hasAttribute('data-orig')) cq.innerHTML=cq.getAttribute('data-orig');}}
+        else{var set=function(n,x){var c=cE(sumr,n); if(c) c.innerHTML=x;};
+          set(11,im?fmt(im):'-'); set(10,ck?fmt(ck):'-'); set(9,im?(ck/im*100).toFixed(2)+'%':'-');
+          set(8,ck&&co?fmt(co/ck)+'원':'-'); set(7,co?fmt(co)+'원':'-'); set(6,fmt(cv));
+          set(5,rv?fmt(rv)+'원':'0원'); set(4,cv&&rv?fmt(rv/cv)+'원':'-');
+          set(3,co?fmt(rv/co*100)+'%':'-'); set(2,''); set(1,'');}}
+      Array.prototype.forEach.call(btns,function(b){var on=b.getAttribute('data-jf')===F;
+        b.style.background=on?'#14181F':'#4472C4'; b.style.borderColor=on?'#14181F':'#2F5BB7';});
+    }
+    Array.prototype.forEach.call(btns,function(b){b.addEventListener('click',function(){
+      var k=b.getAttribute('data-jf'); F=(F===k)?'':k; apply();});});
+  })();
   var ths=t.tHead.rows[0].cells, st={i:-1,k:'',asc:false};
   function oo(c){var s=c.querySelector('select.gc-inline-onoff');
     var t=s?(s.value||(s.options[0]?s.options[0].text:'')):'';
@@ -19704,7 +19759,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if cmt:
                 st.markdown(cmt, unsafe_allow_html=True)
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
-            if not _media_basis:
+            if not _media_basis and label != "TOTAL":
                 _gap_panel(label, tot_rev, tot_conv)
             if _inline_onoff:
                 _gc_status_table(card, recs, label, min(14000, 288 + row_h * len(body)), ti)
@@ -19726,7 +19781,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     ad_creative is not None and not ad_creative.empty and recs):
                 _render_meta_refetch_button(label, start, end, ad_creative,
                                             key=f"gc_meta_refetch_top_{ti}")
-            if level == "소재" and ad_creative is not None and not ad_creative.empty and recs:
+            if level == "소재" and label != "TOTAL" and ad_creative is not None and not ad_creative.empty and recs:
                 with st.expander("🔍 매체 관리자와 숫자가 다를 때 — 소재 원본(날짜·캠페인별) 보기"):
                     # 메타 '소재 다시 받기'는 여기 하나만 둔다(탭 맨 위에 같은 버튼이 또 있었다)
                     _render_meta_refetch_button(label, start, end, ad_creative,
