@@ -15870,6 +15870,53 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     return source, ga_rows
 
 
+def _gc_pick_version_part(parts, original):
+    """광고그룹 버전만 다른 후보들 중 이 GA 줄(소재)의 그룹 하나를 고른다. 못 고르면 None."""
+    def ver(adset):
+        n = _gc_tgt_norm(adset)
+        if "_" not in n:
+            return n, ""
+        head, tail = n.rsplit("_", 1)
+        if tail == "이전" or re.fullmatch(r"\d{4}|\d{6}|\d{8}", tail):
+            return head, tail
+        return n, ""
+    raw = str(original.get("cre_date") or "").replace("-", "")
+    if not raw:
+        m = re.search(r"(?:^|_)(\d{6})_", str(original.get("creative") or ""))
+        raw = m.group(1) if m else ""
+    cdate = raw[-6:] if len(raw) >= 6 else ""
+    tgt = _gc_tgt_norm(original.get("target"))
+    info = [ver(p.get("adset")) for p in parts]
+    bases = {b for b, _ in info}
+    idx = list(range(len(parts)))
+    if len(bases) > 1:                      # 기본 이름이 다르면 GA 타겟과 같은 쪽만
+        idx = [i for i in idx if info[i][0] == tgt] or [i for i in idx if tgt and tgt in info[i][0]]
+        if not idx:
+            return None
+    if len(idx) == 1:
+        return idx[0]
+    def vdate(v):
+        if re.fullmatch(r"\d{8}", v):
+            return v[2:]
+        if re.fullmatch(r"\d{6}", v):
+            return v
+        if re.fullmatch(r"\d{4}", v) and cdate:
+            return cdate[:2] + v
+        return ""
+    dated = [(vdate(info[i][1]), i) for i in idx if vdate(info[i][1])]
+    if cdate:
+        exact = [i for d, i in dated if d == cdate]
+        if len(exact) == 1:
+            return exact[0]
+        older = sorted([(d, i) for d, i in dated if d <= cdate])
+        if older:
+            return older[-1][1]
+    prev = [i for i in idx if info[i][1] == "이전"]
+    if len(prev) == 1:
+        return prev[0]
+    return None
+
+
 def _gc_merge_renamed_adsets(ad_creative):
     """메타·GFA 광고세트 개편(2026-10) — 옛 이름(의류관심타겟·방문자180일·쇼핑관심타겟)은
     이름만 바뀌어 '…_이전'이 됐다. 같은 매체·같은 캠페인에 '옛이름_이전'이 있으면 옛 이름으로
@@ -16894,10 +16941,13 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 token = str(_dates[i] or "").replace("-", "")
                 if len(token) == 8:
                     token = token[2:]
-                candidate = _nt[i] + "_" + token
-                if token and any(candidate == _gc_tgt_norm(v.get("adset", a))
-                                 and _camp_ok(i, a) for a, v in bt.items()):
-                    _nt[i] = candidate
+                # 메타는 '_260929'(YYMMDD), GFA는 '_0929'(MMDD)로 광고그룹 버전을 단다 — 둘 다 본다.
+                for _tk in ([token, token[2:]] if len(token) == 6 else [token]):
+                    candidate = _nt[i] + "_" + _tk
+                    if _tk and any(candidate == _gc_tgt_norm(v.get("adset", a))
+                                   and _camp_ok(i, a) for a, v in bt.items()):
+                        _nt[i] = candidate
+                        break
 
             def _rows_for(a):
                 an = _gc_tgt_norm(bt[a].get("adset", a))
@@ -17081,7 +17131,13 @@ def _gc_expand_actual_groups(rows):
             expanded.append(original.copy())
             continue
         unresolved = len(parts) > 1
-        for part in parts:
+        # 여러 광고그룹에 걸친 GA 줄 — 소재 날짜로 버전을 골라 **한 그룹에 확정**한다.
+        #   방문자180일_260929_울터치블레이저 → 방문자180일_0929(GFA) / _260929(메타)
+        #   날짜 버전이 없으면 소재 날짜 이전의 가장 가까운 버전, 그것도 없으면 '_이전'.
+        _best = _gc_pick_version_part(parts, original) if unresolved else None
+        if _best is not None:
+            unresolved = False
+        for _pi, part in enumerate(parts):
             row = original.copy()
             row["ga_campaign"] = original.get("campaign")
             campaign = str(part.get("campaign") or "").strip()
@@ -17095,7 +17151,7 @@ def _gc_expand_actual_groups(rows):
             if campaign:
                 row["campaign"] = campaign
                 row["camp_list"] = [campaign]
-            if unresolved:
+            if unresolved or (_best is not None and _pi != _best):
                 for field in _GC_GA_COLS:
                     if field in row:
                         row[field] = 0.0
