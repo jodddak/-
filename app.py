@@ -19234,11 +19234,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             tid = f"gctbl{ti}"
             # '판정' 머리글은 두 가지로 정렬한다 — 판정 글자 / ON·OFF 상태
             th = "".join(
-                (f'<th class="{"l" if i == 0 else ""}">'
-                 f'<span data-k="o" title="ON 먼저 ↔ OFF 먼저" style="white-space:nowrap;">'
-                 f'<span style="display:inline-block;margin-right:22px;padding:1px 8px;'
-                 f'border:1px solid #D6D3CB;border-radius:6px;">ON/OFF'
-                 f'<span class="fv4-ar">&#8645;</span></span>{h}</span></th>')
+                # ON/OFF 보기 버튼(전체·ON·OFF) + '판정' 정렬. 보기 버튼은 화면에서 바로 거르고
+                # TOTAL도 보이는 줄로 다시 더한다(페이지를 다시 그리지 않는다).
+                (f'<th class="{"l" if i == 0 else ""}" style="white-space:nowrap;">'
+                 f'<span class="gc-oof" title="ON/OFF로 걸러 보기" style="display:inline-flex;'
+                 f'margin-right:16px;border:1px solid #D6D3CB;border-radius:6px;overflow:hidden;'
+                 f'vertical-align:middle;">'
+                 + "".join(f'<b data-f="{fv}" style="padding:1px 7px;font-weight:700;cursor:pointer;'
+                           f'{"border-left:1px solid #D6D3CB;" if fi else ""}">{fl}</b>'
+                           for fi, (fv, fl) in enumerate((("all", "전체"), ("on", "ON"),
+                                                          ("off", "OFF"))))
+                 + f'</span><span data-k="o" title="ON 먼저 ↔ OFF 먼저">{h}'
+                 f'<span class="fv4-ar">&#8645;</span></span></th>')
                 if h == "판정" else
                 (f'<th class="{"l" if i == 0 else ""}">{h}'
                  f'<span class="fv4-ar">&#8645;</span></th>')
@@ -19290,9 +19297,49 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     var d=c.getAttribute('data-v'); return d!==null?parseFloat(d):c.innerText.trim();}
   function jv(row,i){var c=row.cells[i]; if(!c) return '';
     var j=c.getAttribute('data-j'); return j!==null?j:'';}
+  // ── ON/OFF 보기(전체·ON만·OFF만) ── 보이는 줄로 TOTAL을 다시 더한다
+  var FK='gcoof_'+'__TID__', F='all';
+  try{F=localStorage.getItem(FK)||'all';}catch(e){}
+  var tb0=t.tBodies[0], sumr=tb0.querySelector('tr.fv4-sum-row');
+  function cellsFromEnd(r,n){var c=r.cells; return c[c.length-n];}
+  function num(r,n){var c=cellsFromEnd(r,n); if(!c) return 0; var d=parseFloat(c.getAttribute('data-v')); return isNaN(d)?0:d;}
+  function fmt(x){return Math.round(x).toLocaleString('ko-KR');}
+  if(sumr){for(var q=1;q<=10;q++){var cq=cellsFromEnd(sumr,q); if(cq&&!cq.hasAttribute('data-orig')) cq.setAttribute('data-orig',cq.innerHTML);}}
+  function stOf(r){var c=r.cells[r.cells.length-1]; return c?oo(c):1;}
+  function applyF(){
+    var rows=Array.prototype.slice.call(tb0.rows).filter(function(r){return !r.classList.contains('nosort');});
+    var im=0,ck=0,co=0,cv=0,rv=0;
+    rows.forEach(function(r){var s=stOf(r);
+      var show=(F==='all')||(F==='on'&&s>=2)||(F==='off'&&s===0);
+      r.style.display=show?'':'none';
+      if(show){im+=num(r,10);ck+=num(r,9);co+=num(r,6);cv+=num(r,5);rv+=num(r,4);}});
+    if(sumr){
+      // TOTAL의 판정 배지는 전체 기준으로 계산한 값이라, 걸러 볼 때는 숨긴다
+      var lc=sumr.cells[sumr.cells.length-1]; if(lc) lc.style.visibility=(F==='all')?'':'hidden';
+      if(F==='all'){for(var q=2;q<=10;q++){var cq=cellsFromEnd(sumr,q); if(cq&&cq.hasAttribute('data-orig')) cq.innerHTML=cq.getAttribute('data-orig');}}
+      else{
+        var set=function(n,txt){var c=cellsFromEnd(sumr,n); if(c) c.innerHTML=txt;};
+        set(10,im?fmt(im):'-'); set(9,ck?fmt(ck):'-');
+        set(8,im?(ck/im*100).toFixed(2)+'%':'-'); set(7,ck&&co?fmt(co/ck)+'원':'-');
+        set(6,co?fmt(co)+'원':'-'); set(5,fmt(cv)); set(4,rv?fmt(rv)+'원':'0원');
+        set(3,cv&&rv?fmt(rv/cv)+'원':'-'); set(2,co?fmt(rv/co*100)+'%':'-');
+      }}
+    Array.prototype.forEach.call(t.querySelectorAll('.gc-oof b'),function(b){
+      var on=b.getAttribute('data-f')===F;
+      b.style.background=on?'#14181F':'transparent'; b.style.color=on?'#FFFFFF':'';});
+    setTimeout(function(){try{parent.postMessage({isStreamlitMessage:true,
+      type:'streamlit:setFrameHeight',height:document.documentElement.scrollHeight},'*');}catch(e){}},80);
+  }
+  Array.prototype.forEach.call(t.querySelectorAll('.gc-oof b'),function(b){
+    b.addEventListener('click',function(ev){ev.stopPropagation();
+      F=b.getAttribute('data-f'); try{localStorage.setItem(FK,F);}catch(e){} applyF();});});
+  t.addEventListener('change',function(ev){if(ev.target&&ev.target.classList&&
+    ev.target.classList.contains('gc-inline-onoff')) setTimeout(applyF,0);});
+  applyF();
   for(var i=0;i<ths.length;i++){(function(i){
     ths[i].style.cursor='pointer';
     ths[i].onclick=function(ev){
+      if(ev&&ev.target&&ev.target.closest&&ev.target.closest('.gc-oof')) return;
       var kel=ev&&ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null;
       var k=kel?kel.getAttribute('data-k'):'';
       var asc=(st.i===i)?!st.asc:false; st={i:i,k:k,asc:asc};
