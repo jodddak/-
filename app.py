@@ -15723,7 +15723,11 @@ def _gc_filter_rows(rows: pd.DataFrame, seg, item) -> pd.DataFrame:
 def _gc_has_performance(row=None, media=None):
     row = row if hasattr(row, "get") else {}
     media = media if isinstance(media, dict) else {}
-    values = [media.get(k, 0) for k in ("impressions", "clicks", "cost", "media_conv", "media_rev")]
+    # The own-store table shows GA purchases/revenue. Platform-only conversions
+    # must not keep an otherwise empty, unresolved group visible.
+    values = [media.get(k, 0) for k in ("impressions", "clicks", "cost")]
+    if "외부몰" in str(media.get("channel") or row.get("channel") or ""):
+        values += [media.get(k, 0) for k in ("media_conv", "media_rev")]
     values += [row.get(k, 0) for k in ("conv", "rev")]
     for value in values:
         try:
@@ -16727,6 +16731,17 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
             # 예전엔 위에서부터 줄마다 '포함되면 전부' 가져가서, 첫 줄이 남의 광고세트까지
             # 쓸어 담고 정작 맞는 줄은 0원이 되는 일이 있었다.
             _nt = {i: _gc_tgt_norm(tgts[i]) for i in idxs}
+            # UTM: 의류관심타겟_260929_울플란넬수트. The date is also part
+            # of the real ad-set name; preserve it when the manager confirms it.
+            _dates = rows["cre_date"].tolist() if "cre_date" in rows.columns else [""] * len(rows)
+            for i in idxs:
+                token = str(_dates[i] or "").replace("-", "")
+                if len(token) == 8:
+                    token = token[2:]
+                candidate = _nt[i] + "_" + token
+                if token and any(candidate == _gc_tgt_norm(v.get("adset", a))
+                                 and _camp_ok(i, a) for a, v in bt.items()):
+                    _nt[i] = candidate
 
             def _rows_for(a):
                 an = _gc_tgt_norm(bt[a].get("adset", a))
@@ -16738,7 +16753,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 ex = [i for i in idxs if _nt[i] and _nt[i] == an]
                 if ex:
                     return ex
-                cm = [i for i in idxs if _gc_tgt_match(tgts[i], bt[a].get("adset", a))]
+                cm = [i for i in idxs if _gc_tgt_match(_nt[i], bt[a].get("adset", a))]
                 if not cm:
                     return []
                 # A UTM prefix cannot identify a date cohort or Previous group.
@@ -18785,13 +18800,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _google_campaign_names.update(str(c).strip() for c in _ga_cp["campaign"].dropna()
                                                   if str(c).strip())
 
-            _active_groups = {str(a.get("adset") or "").strip() for a in _ads_lbl if a.get("on")}
+            _active_groups = {(str(a.get("campaign") or "").strip(), str(a.get("adset") or "").strip())
+                              for a in _ads_lbl if a.get("on")}
             def _with_current_group_state(row):
                 row = dict(row)
                 media = row.get("_media")
                 target = str((media or {}).get("_adset") or row.get("target") or "").strip() if isinstance(media, dict) else str(row.get("target") or "").strip()
-                if _active_groups and target and target not in ("GA 그룹 미확인", "(타겟팅 없음)"):
-                    row["_current_group"] = target in _active_groups
+                campaign = _gc_actual_campaign_label(row)
+                known_campaigns = {str(a.get("campaign") or "").strip() for a in _ads_lbl}
+                if _active_groups and campaign in known_campaigns and target and target not in ("GA 그룹 미확인", "그룹 미확인", "(타겟팅 없음)"):
+                    row["_current_group"] = (campaign, target) in _active_groups
+                elif label == META_OWN_TAB and campaign in ("STCO_수트_전환", "STCO_아우터_전환", "STCO_셔츠_전환") and _gc_tgt_norm(target) == "패션관심타겟":
+                    row["_current_group"] = False
                 return row
 
             def _row_label(r):
