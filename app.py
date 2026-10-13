@@ -15760,12 +15760,17 @@ def _gc_latest_gfa_snapshots(frame):
 
 
 def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
+    # Confirmed by the user: the former acquisition suit campaign was renamed.
+    # Apply on every view, including cached data before any live status refresh.
+    confirmed = {"PMax_온라인팀_신규_수트": "PMax_온라인팀_수트_260929"}
     names = (status_snapshot or {}).get(("__campaign_names__", "구글"), {})
-    if not names or ad_creative is None or ad_creative.empty or "adset" not in ad_creative.columns:
-        return ad_creative, ga_rows
-    source = ad_creative.copy()
+    source = ad_creative.copy() if ad_creative is not None else None
     aliases = {}
-    for index, record in source.iterrows():
+    for index, record in (source.iterrows() if source is not None and not source.empty else []):
+        if _gc_channel(record.get("channel")) != "구글":
+            continue
+        old = str(record.get("campaign") or "").strip()
+        source.at[index, "campaign"] = confirmed.get(old, old)
         key = str(record.get("adset") or "")
         if not key.startswith(GOOGLE_ASSET_KEY_PREFIX):
             continue
@@ -15773,11 +15778,12 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
         current = names.get(campaign_id)
         if not current:
             continue
-        old = str(record.get("campaign") or "").strip()
+        current = confirmed.get(str(current).strip(), current)
         if old:
             aliases.setdefault(old, set()).add(current)
         source.at[index, "campaign"] = current
     mapping = {old:next(iter(values)) for old, values in aliases.items() if len(values) == 1}
+    mapping.update(confirmed)
     if ga_rows is not None and not ga_rows.empty and mapping:
         ga_rows = ga_rows.copy()
         mask = ga_rows["_gc_ch"].eq("구글")
