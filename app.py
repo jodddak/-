@@ -18629,6 +18629,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                                    _google_campaign_names)
                 return _gc_detail_target_label(dict(
                     target=v.get("_adset") or "", campaign=v.get("campaign") or ""))
+            if label == "구글":
+                # Explicitly exclude unresolved campaigns from this performance view.
+                if not rows.empty:
+                    rows = rows[rows.apply(lambda r: _row_label(r) != "캠페인 미확인", axis=1)].copy()
+                if not _detail_pool_rows.empty:
+                    _detail_pool_rows = _detail_pool_rows[_detail_pool_rows.apply(
+                        lambda r: _row_label(r) != "캠페인 미확인", axis=1)].copy()
+                _left_all = [(k, v) for k, v in _left_all if _detail_left_label(v, k) != "캠페인 미확인"]
+                _left_f = [(k, v) for k, v in _left_f if _detail_left_label(v, k) != "캠페인 미확인"]
             _groups = {_row_label(r) for _, r in _detail_pool_rows.iterrows()}
             _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
@@ -18654,7 +18663,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                                    key=_detail_key, counts=_detail_counts)
                 if label == "구글":
                     st.caption("구글은 광고 관리자 캠페인명으로 구분합니다. 선택 기간에 집행된 과거 캠페인도 포함됩니다. "
-                               "연결이 확실하지 않은 UTM 값은 '캠페인 미확인'에 남깁니다.")
+                               "캠페인 연결이 미확인인 행은 이 표에서 제외합니다.")
                 if detail_target != "전체":
                     # 매체 실적이 없는 GA 줄은 GA utm 앞부분만 보고 묶음을 정했다. 그래서 다른
                     # 캠페인 옛 광고로 들어온 방문(260910_추석세일니트)이 광고 관리자엔 없는
