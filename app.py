@@ -19690,13 +19690,30 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 + '</div>'
                 f'<div class="fv4-card-sub">{_card_sub}</div>'
                 # 판정으로 걸러 보기 — 유지 / 증액 / OFF 권장 (다시 누르면 전체)
-                + ('<div class="gc-jf" style="display:flex;justify-content:flex-end;gap:6px;'
-                   'margin:-34px 0 10px;">'
-                   + "".join(f'<button type="button" data-jf="{k}" style="min-width:86px;'
-                             f'padding:5px 14px;border:1px solid #2F5BB7;border-radius:4px;'
-                             f'background:#4472C4;color:#fff;font-size:13px;font-weight:700;'
-                             f'cursor:pointer;">{t}</button>'
-                             for k, t in (("keep", "유지"), ("up", "증액"), ("off", "OFF 권장")))
+                + ('<style>'
+                   '.gc-jf{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:16px 0 18px;'
+                   'padding:12px 14px;background:#FAF8F2;border:1px solid #ECE7DA;border-radius:14px}'
+                   '.gc-jf-l{font-size:13px;font-weight:800;color:#6B6656;margin-right:4px;letter-spacing:-.2px}'
+                   '.gc-jf button{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 18px;'
+                   'border:1.5px solid #E1DCCD;border-radius:999px;background:#fff;color:#2A2A22;'
+                   'font-size:14.5px;font-weight:800;letter-spacing:-.2px;cursor:pointer;'
+                   'font-family:inherit;transition:all .12s ease;box-shadow:0 1px 2px rgba(20,24,31,.05)}'
+                   '.gc-jf button:hover{border-color:#B9B29E;transform:translateY(-1px);'
+                   'box-shadow:0 3px 8px rgba(20,24,31,.08)}'
+                   '.gc-jf i{width:9px;height:9px;border-radius:50%;flex:none;background:var(--c)}'
+                   '.gc-jf b{min-width:22px;padding:2px 8px;border-radius:999px;background:#F1EEE5;'
+                   'color:#6B6656;font-size:12.5px;font-weight:800;text-align:center}'
+                   '.gc-jf button.on{background:var(--c);border-color:var(--c);color:#fff;'
+                   'box-shadow:0 4px 12px rgba(20,24,31,.16)}'
+                   '.gc-jf button.on i{background:#fff}'
+                   '.gc-jf button.on b{background:rgba(255,255,255,.22);color:#fff}'
+                   '</style>'
+                   '<div class="gc-jf"><span class="gc-jf-l">판정별 보기</span>'
+                   + "".join(f'<button type="button" data-jf="{k}" style="--c:{c}">'
+                             + ('' if k == "" else '<i></i>')
+                             + f'{t}<b data-jfn="{k}">-</b></button>'
+                             for k, t, c in (("", "전체", "#14181F"), ("keep", "유지", "#2C5AA0"),
+                                             ("up", "증액", "#2C7A3C"), ("off", "OFF 권장", "#C0273A")))
                    + '</div>' if level == "소재" else '')
                 + '<div class="gc-table-scroll">' + table + '</div>' + '</div></div>'
                 + """
@@ -19725,11 +19742,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
           set(8,ck&&co?fmt(co/ck)+'원':'-'); set(7,co?fmt(co)+'원':'-'); set(6,fmt(cv));
           set(5,rv?fmt(rv)+'원':'0원'); set(4,cv&&rv?fmt(rv/cv)+'원':'-');
           set(3,co?fmt(rv/co*100)+'%':'-'); set(2,''); set(1,'');}}
-      Array.prototype.forEach.call(btns,function(b){var on=b.getAttribute('data-jf')===F;
-        b.style.background=on?'#14181F':'#4472C4'; b.style.borderColor=on?'#14181F':'#2F5BB7';});
+      Array.prototype.forEach.call(btns,function(b){b.classList.toggle('on',b.getAttribute('data-jf')===F);});
     }
+    // 버튼마다 해당 소재 개수
+    (function(){var all=Array.prototype.slice.call(tb.rows).filter(function(r){return !r.classList.contains('nosort');});
+      var n={'':all.length,keep:0,up:0,off:0};
+      all.forEach(function(r){var c=r.cells[r.cells.length-1]; var j=c?(c.getAttribute('data-j')||''):'';
+        for(var k in JF){if(JF[k].indexOf(j)>=0)n[k]++;}});
+      Array.prototype.forEach.call(document.querySelectorAll('[data-jfn]'),function(e){e.textContent=n[e.getAttribute('data-jfn')];});})();
     Array.prototype.forEach.call(btns,function(b){b.addEventListener('click',function(){
       var k=b.getAttribute('data-jf'); F=(F===k)?'':k; apply();});});
+    apply();
   })();
   var ths=t.tHead.rows[0].cells, st={i:-1,k:'',asc:false};
   function oo(c){var s=c.querySelector('select.gc-inline-onoff');
