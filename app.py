@@ -15558,6 +15558,8 @@ _GC_NO_CAMP = ("", "nan", "none", "(not set)", "(미설정)", "(캠페인 없음
 _GC_RT_WORDS = ("방문자", "리텐션", "리타겟", "retention", "retarget", "remarket", "_rt")
 _GC_NEW_WORDS = ("관심", "유사", "신규", "lookalike", "prospect", "broad", "인구")
 GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT = "TOTAL", "신규타겟팅", "리타겟팅"
+# 세부 타겟팅 — GA utm_content에 타겟(광고세트) 표시가 없어 어느 광고세트인지 모르는 방문
+GC_GROUP_UNKNOWN = "UTM 타겟 표기 없음"
 
 
 def _gc_target_group(row) -> str:
@@ -15566,6 +15568,8 @@ def _gc_target_group(row) -> str:
     if any(w in blob for w in _GC_RT_WORDS):
         return GC_SEG_RT
     if any(w in blob for w in _GC_NEW_WORDS):
+        return GC_SEG_NEW
+    if "pmax" in blob:          # 구글 P-MAX 개편 캠페인(리타겟팅 아니면 신규) — _gc_seg_of_campaign과 같은 규칙
         return GC_SEG_NEW
     return "기타"
 
@@ -15601,6 +15605,10 @@ def _gc_seg_of_campaign(c):
         return GC_SEG_RT
     if nw and not rt:
         return GC_SEG_NEW
+    # 구글 P-MAX 개편(2026-10) 캠페인은 '신규'를 안 붙인다 — PMax_온라인팀_수트_이전 /
+    # _수트_260929는 신규, _수트_리타겟팅만 리타겟팅이다.
+    if "pmax" in s and not rt:
+        return GC_SEG_NEW
     return None
 
 
@@ -15610,6 +15618,10 @@ def _gc_item_of_campaign(c):
         return None
     if _gc_is_ab(low):
         return GC_ITEM_AB
+    # 구글 리타겟팅 캠페인은 이름이 '수트_리타겟팅'이어도 수트·아우터·셔츠 소재를 한 캠페인에
+    # 함께 돌린다(2026-10 개편안). 캠페인 이름으로 품목을 정하지 않고 소재 이름을 따른다.
+    if "pmax" in low and any(w in low for w in _GC_RT_WORDS):
+        return None
     hits = {it for it, ws in _GC_ITEM_WORDS if any(w in low for w in ws)}
     # '수트자켓'처럼 수트 안에 자켓이 들어간 이름은 수트로 본다
     if GC_ITEM_SUIT in hits and GC_ITEM_OUTER in hits and "수트" in low and not any(
@@ -15727,13 +15739,16 @@ def _gc_detail_target_label(row):
     elif target in ("", "(미설정)", "(규칙 외)", "(타겟팅 없음)"):
         target = _mad
     if not target:
-        return "그룹 미확인"
+        return GC_GROUP_UNKNOWN
     norm = _gc_tgt_norm(target)
     pretty = {"패션관심타겟": "패션 관심타겟", "쇼핑관심타겟": "쇼핑 관심타겟",
               "방문자180일": "방문자 180일"}.get(norm, target)
     seg = _gc_target_group(dict(target=target, campaign=row.get("campaign") or ""))
-    suffix = "리타겟팅" if seg == GC_SEG_RT else ("신규" if seg == GC_SEG_NEW else "구분 미확인")
-    return f"{pretty} ({suffix})"
+    suffix = "리타겟팅" if seg == GC_SEG_RT else ("신규" if seg == GC_SEG_NEW else "")
+    # 버튼에 개수가 '(3)'으로 붙으므로 구분은 괄호 대신 '·'로 단다 — '(신규) (3)'처럼 겹쳐 보였다
+    if not suffix or suffix in pretty:      # '리타겟팅_261001'에 '· 리타겟팅'을 또 달지 않는다
+        return pretty
+    return f"{pretty} · {suffix}"
 
 
 def _gc_gfa_target_matches(target, choice):
@@ -15754,7 +15769,8 @@ def _gc_filter_left(left, seg, item, row_of):
     out = []
     for k, v in left:
         lr = row_of(v, k)
-        mf, _ = _gc_filter_media(v, _gc_target_group(lr), _gc_item_group(lr), seg, item)
+        mf, _ = _gc_filter_media(v, _gc_target_group(lr), lr.get("_item") or _gc_item_group(lr),
+                                 seg, item)
         if mf is not None:
             out.append((k, mf))
     return out
@@ -16060,6 +16076,51 @@ def _gc_alias(name: str, alias: dict) -> str:
     if not alias or not name:
         return name
     return alias.get(_creative_image_key(name), name)
+
+
+def _gc_heal_renamed_adsets(ad_creative):
+    """광고세트 이름을 바꾼 뒤(2026-10 개편: '의류관심타겟' → '의류관심타겟_이전') 예전에 받아둔
+    날짜는 **옛 이름**으로 저장돼 있어 같은 광고세트가 세부 타겟팅 버튼 두 개로 갈라졌다.
+    지금 광고 목록(API)에 그 소재가 들어 있는 광고세트 중 옛 이름을 품은 것이 **딱 하나**면
+    지금 이름으로 맞춰서 보여준다(저장된 값은 그대로 — 다시 받기를 하면 저장값도 바뀐다)."""
+    if ad_creative is None or ad_creative.empty or "adset" not in ad_creative.columns:
+        return ad_creative
+    try:
+        smap, _ = fetch_creative_status()
+    except Exception:
+        return ad_creative
+    cur = {}
+    for k, v in (smap or {}).items():
+        if k[0] != "__ads__":
+            continue
+        for a in v:
+            key = (a.get("ch"), _creative_image_key(a.get("name") or ""),
+                   str(a.get("campaign") or "").strip())
+            if a.get("adset"):
+                cur.setdefault(key, set()).add(str(a["adset"]))
+    if not cur:
+        return ad_creative
+    c = ad_creative.copy()
+    camps = (c["campaign"].fillna("").astype(str).str.strip() if "campaign" in c.columns
+             else pd.Series("", index=c.index))
+    new_ad = c["adset"].copy()
+    _memo = {}
+    for idx, ch, cr, cp, ad in zip(c.index, c["channel"], c["creative"], camps, c["adset"]):
+        mk = (ch, cr, cp, ad)
+        if mk not in _memo:
+            _memo[mk] = None
+            names = cur.get((ch, _creative_image_key(str(cr)), cp))
+            lbl = _creative_adset_label(ad)
+            if (names and lbl and lbl not in names
+                    and str(ad).startswith(CAMPAIGN_ADSET_KEY_PREFIX)):
+                ln = _gc_tgt_norm(lbl)
+                hit = [n for n in names if ln and ln in _gc_tgt_norm(n)]
+                if len(hit) == 1:
+                    _memo[mk] = _campaign_adset_key(cp, hit[0])
+        if _memo[mk]:
+            new_ad.at[idx] = _memo[mk]
+    c["adset"] = new_ad
+    return c
 
 
 def _gc_add_zero_live_ads(ad_creative, start, end):
@@ -16673,6 +16734,81 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                     for i in cands:
                         wts.setdefault(i, {})[a] = (ses[i] / _s) if _s > 0 else 1.0 / len(cands)
                 used.add(a)
+            # GA 줄 하나에 '의류관심타겟_이전'과 '의류관심타겟_260929'처럼 **버전만 다른 광고세트**가
+            # 여럿 붙으면, 그 줄이 어느 묶음인지 알 수 없어 세부 타겟팅이 '의류관심타겟'으로
+            # 따로 빠졌다. 소재 날짜와 같은 버전 → 이름이 똑같은 것 → _이전 순으로 하나만 붙이고,
+            # 나머지 광고세트는 아래에서 광고세트별 'GA 방문 없음' 줄로 세운다(합계는 그대로).
+            _m8 = re.match(r"\s*(?:20)?(\d{6})(?!\d)", str(base.get("name") or ""))
+            _cdate = _m8.group(1) if _m8 else ""
+
+            def _ver_split(a):
+                """광고세트 이름 → (버전 뺀 기본 이름, 버전). 버전 = 날짜(YYMMDD) 또는 '이전'."""
+                an = _gc_tgt_norm(bt[a].get("adset", a))
+                if "_" in an:
+                    head, tail = an.rsplit("_", 1)
+                    m = re.fullmatch(r"(?:20)?(\d{6})\d?", tail)
+                    if m:
+                        return head, m.group(1)
+                    if tail == "이전":
+                        return head, "이전"
+                return an, ""
+
+            def _ver_rank(a, base_ver_dates):
+                _, v = _ver_split(a)
+                # ① 소재 날짜 이하 중 가장 최근 버전(260930 소재 → _260929 묶음)
+                if v and v != "이전" and _cdate and v <= _cdate and v == max(
+                        [d for d in base_ver_dates if d <= _cdate] or [""]):
+                    return 0
+                if not v:
+                    return 1           # 버전 없는 옛 이름(이름 바꾸기 전 저장분)
+                if v == "이전":
+                    return 2
+                return 3
+            # 버전만 다른 광고세트끼리(기본 이름이 같은 것끼리)만 하나로 줄인다.
+            # '방문자180일'과 '방문자180일_구매제외'처럼 진짜 다른 광고세트는 건드리지 않는다.
+            _drop = set()
+            for i in list(wts):
+                if len(wts[i]) < 2:
+                    continue
+                _by_base = {}
+                for a in wts[i]:
+                    _by_base.setdefault(_ver_split(a)[0], []).append(a)
+                for _bb, _as in _by_base.items():
+                    if len(_as) < 2 or not any(_ver_split(a)[1] for a in _as):
+                        continue
+                    _dates = [_ver_split(a)[1] for a in _as if _ver_split(a)[1] not in ("", "이전")]
+                    _best = min(_ver_rank(a, _dates) for a in _as)
+                    for a in _as:
+                        if _ver_rank(a, _dates) != _best:
+                            _drop.add((i, a))
+            # 기본 이름이 다른 광고세트가 한 줄에 같이 붙었으면('방문자180일' 줄에 '방문자180일_구매제외'),
+            # GA 타겟 이름과 기본 이름이 똑같은 쪽만 남기고 나머지는 광고세트별 줄로 뺀다.
+            for i in list(wts):
+                _bases = {_ver_split(a)[0] for a in wts[i]}
+                if len(_bases) > 1 and _nt.get(i) in _bases:
+                    for a in wts[i]:
+                        if _ver_split(a)[0] != _nt[i]:
+                            _drop.add((i, a))
+            for i, a in _drop:
+                wts[i].pop(a, None)
+            # 한 광고세트를 여러 줄에 나눠 붙였는데 일부 줄에서만 뺐다면, 남은 줄의 비중을 다시
+            # 1로 맞춘다(안 그러면 뺀 몫의 광고비가 어디에도 안 잡혀 합계가 줄어든다).
+            if _drop:
+                # 비중 0으로만 남은 광고세트는 빼서(→ 광고세트별 줄로) 광고비가 사라지지 않게 한다
+                for i in list(wts):
+                    for a in [a for a, x in wts[i].items() if not x]:
+                        del wts[i][a]
+                _tot_w = {}
+                for i, w in wts.items():
+                    for a, x in w.items():
+                        _tot_w[a] = _tot_w.get(a, 0.0) + x
+                for i, w in wts.items():
+                    for a in list(w):
+                        if _tot_w.get(a, 0) > 0:
+                            w[a] = w[a] / _tot_w[a]
+                for i in [i for i, w in wts.items() if not w]:
+                    del wts[i]
+            used = {a for w in wts.values() for a in w}
             assigned = {i: list(w) for i, w in wts.items()}
             # 어느 줄과도 짝이 안 맞아도 같은 규칙을 쓴다(타겟팅 모르는 줄 → 거기에,
             # 없으면 광고세트별 줄). 예전엔 이때 소재 전체 실적을 한 줄에 통째로 붙였다.
@@ -16702,10 +16838,14 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 # 짝 없는 광고세트의 돈은 **타겟팅을 모르는 줄**((미설정)·규칙 외)에만 나눈다.
                 # 예전엔 아무 남는 줄에나 넣어서, 유사타겟(신규) 광고비가 방문자180일(리타) 줄에
                 # 붙는 일이 있었다. 그런 줄이 없으면 광고세트별 'GA 방문 없음' 줄로 세운다.
+                # 2026-10: 짝 없는 광고세트는 **광고세트별 줄**로 세운다. 타겟 표기 없는 GA 줄에
+                # 얹으면 세부 타겟팅에서 그 광고세트 버튼이 사라지고 'UTM 타겟 표기 없음'에 섞였다.
+                # 단, 그 소재의 GA 줄이 **전부** 타겟 표기가 없으면(UTM 템플릿 누락) 예전처럼
+                # 그 줄들에 얹는다 — 안 그러면 방문·구매는 있는데 광고비 0인 줄만 남는다.
+                _unk = ("", "(미설정)", "(규칙외)", "(타겟팅없음)")
                 _camp_only = all(not str(v.get("adset") or "").strip() for v in bt.values())
-                free = [] if _camp_only else [
-                    i for i in idxs if i not in assigned
-                    and _nt[i] in ("", "(미설정)", "(규칙외)", "(타겟팅없음)")]
+                free = [] if (_camp_only or any(_nt[j] not in _unk for j in idxs)) else [
+                    i for i in idxs if i not in assigned and _nt[i] in _unk]
                 for i in idxs:
                     w_all = (ses[i] / _all) if _all > 0 else (1.0 / len(idxs))
                     _pbc = _gc_scale_parts(_res_bc, w_all)
@@ -16834,7 +16974,15 @@ def _gc_media_by_key(creative_perf: pd.DataFrame, start: date, end: date) -> dic
 def _adset_short(a) -> str:
     """화면 표시용 광고세트 이름 — GA 줄(utm_content 앞부분)과 같은 꼴로 앞부분만.
     '리타겟팅_방문자180일' → '리타겟팅'. 매칭·상태 판정은 원래 이름(_adset)을 그대로 쓴다."""
-    return str(a or "").split("_")[0].strip()
+    parts = [p.strip() for p in str(a or "").split("_") if p.strip()]
+    if not parts:
+        return ""
+    # 2026-10 광고세트 개편 — '의류관심타겟_260929', '방문자180일_이전'처럼 **버전(날짜·이전)**이
+    # 붙는다. 앞부분만 보이면 _이전과 _260929가 똑같아 보여서 버전은 남긴다.
+    tail = parts[-1]
+    if len(parts) > 1 and (re.fullmatch(r"\d{6,7}", tail) or tail == "이전"):
+        return f"{parts[0]}_{tail}"
+    return parts[0]
 
 
 def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
@@ -17766,6 +17914,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 켜져 있는데 이 기간 실적이 0인 광고(메타)는 API 실적에 아예 안 내려와 표에서 빠졌다
     # (260909_텐셀플루이드셔츠 — 광고 관리자엔 켜져 있는데 대시보드엔 없음).
     # 광고 목록에서 켜진 광고를 찾아, 그 광고세트에 실적 행이 없으면 0으로 넣는다.
+    ad_creative = _gc_heal_renamed_adsets(ad_creative)
     ad_creative = _gc_add_zero_live_ads(ad_creative, start, end)
     _api_map = _gc_api_by_key(ad_creative, start, end)            # 매체 API
     # Old rows cannot be split accurately after ingestion has lost campaign identity.
@@ -18459,13 +18608,43 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _left_all = [(k, v) for k, v in media_map.items()
                          if k[0] in ch_keep and id(v) not in _matched]
 
+            # 소재별 품목 = 그 소재가 올라간 **품목 캠페인**(수트_전환·PMax_온라인팀_수트_260929 등).
+            # 구글은 리타겟팅 캠페인 하나에 수트·아우터·셔츠 소재를 함께 넣어서, 그 캠페인 몫은
+            # 소재 이름으로 품목을 정해야 하는데 '260929_울터치블레이저'는 이름만 보면 아우터다.
+            # 같은 소재가 들어간 다른 품목 캠페인이 하나로 정해지면 그 품목을 쓴다.
+            _cre_item_sets = {}
+            for _k2, _v2 in media_map.items():
+                if _k2[0] not in ch_keep or not isinstance(_v2, dict):
+                    continue
+                _ck = _creative_image_key(str(_v2.get("name") or _k2[1].split("__")[0]))
+                _cs2 = list((_v2.get("_by_campaign") or {}).keys()) + list(_v2.get("campaigns") or [])
+                for _c2 in _cs2:
+                    _it2 = _gc_item_of_campaign(_c2)
+                    if _it2 and _it2 != GC_ITEM_AB:
+                        _cre_item_sets.setdefault(_ck, set()).add(_it2)
+            _cre_item = {k: next(iter(v)) for k, v in _cre_item_sets.items() if len(v) == 1}
+
+            def _row_item(r):
+                _m = r.get("_media")
+                _keys = ([_creative_image_key(str(_m.get("name") or ""))] if isinstance(_m, dict) else [])
+                try:
+                    _keys += [_creative_image_key(str(k)) for k in _gc_image_keys(r)]
+                except Exception:
+                    pass
+                for _ck in _keys:
+                    if _ck and _ck in _cre_item:
+                        return _cre_item[_ck]
+                return _gc_item_group(r)
+
             def _left_row(v, k):
+                _nm = v.get("name") or k[1]
                 return {"target": str(v.get("_adset") or ""), "campaign": v.get("campaign"),
-                        "creative": v.get("name") or k[1]}
+                        "creative": _nm,
+                        "_item": _cre_item.get(_creative_image_key(str(_nm)))}
 
             if not rows.empty:
                 rows["_seg"] = [_gc_target_group_m(r) for _, r in rows.iterrows()]
-                rows["_item"] = [_gc_item_group(r) for _, r in rows.iterrows()]
+                rows["_item"] = [_row_item(r) for _, r in rows.iterrows()]
 
             # 버튼 숫자 = 그 필터를 걸었을 때 남는 줄 수(매체 캠페인 몫이 있는 줄 + GA에 못 붙은 줄)
             def _cnt(sg, it):
@@ -18521,8 +18700,31 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 들어 있는 광고세트(의류관심타겟_261001)로 이름을 맞춘다 — 버튼이 둘로 쪼개지지 않게.
             _ads_lbl = (_status_map or {}).get(("__ads__", label), [])
 
+            _is_google = label == _gc_channel("구글")
+
+            def _google_label(camp):
+                # 구글 P-MAX는 광고세트가 없고 **캠페인**이 묶음이다
+                # (PMax_온라인팀_수트_이전 / _수트_260929 / _수트_리타겟팅).
+                camp = str(camp or "").strip()
+                if not camp or camp in _GC_NO_CAMP or camp.lower() in ("(not set)", "(none)"):
+                    return GC_GROUP_UNKNOWN
+                if camp == "__multi__":
+                    return "캠페인 여러 개"
+                _sg = _gc_seg_of_campaign(camp)
+                _sx = "리타겟팅" if _sg == GC_SEG_RT else ("신규" if _sg == GC_SEG_NEW else "")
+                return f"{camp} · {_sx}" if _sx else camp
+
             def _row_label(r):
                 m = r.get("_media")
+                if _is_google:
+                    _cs = [c for c in ((m or {}).get("campaigns") or []) if str(c or "").strip()] \
+                        if isinstance(m, dict) else []
+                    if len(_cs) > 1:
+                        return _google_label("__multi__")
+                    if _cs:
+                        return _google_label(_cs[0])
+                    return _google_label((m or {}).get("campaign") if isinstance(m, dict)
+                                         and (m or {}).get("campaign") else r.get("campaign"))
                 _mad = str((m or {}).get("_adset") or "").strip() if isinstance(m, dict) else ""
                 if not (_mad and "," not in _mad) and _ads_lbl:
                     _t = _gc_tgt_norm(r.get("target"))
@@ -18539,17 +18741,24 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # Show actual ad-group choices for every media tab, including Meta.
             detail_target = "전체"
             def _detail_left_label(v, k):
+                if _is_google:
+                    _cs = [c for c in (v.get("campaigns") or []) if str(c or "").strip()]
+                    if len(_cs) > 1:
+                        return _google_label("__multi__")
+                    return _google_label(_cs[0] if _cs else str(v.get("campaign") or "").split(" · ")[0])
                 return _gc_detail_target_label(dict(
                     target=v.get("_adset") or "", campaign=v.get("campaign") or ""))
-            _groups = {_row_label(r) for _, r in _detail_pool_rows.iterrows()}
-            _groups.update(_detail_left_label(v, k) for k, v in _left_all)
-            if _groups - {"그룹 미확인"}:
+            # 라벨은 **지금 걸린 타겟팅·품목 필터 뒤의 줄**로 한 번씩만 만든다
+            # (필터 전 줄로 만들면 캠페인이 여럿인 줄의 라벨이 필터 뒤와 달라져 고를 수 없었다).
+            _row_lbls = {idx: _row_label(r) for idx, r in rows.iterrows()} if not rows.empty else {}
+            _left_lbls = [_detail_left_label(v, k) for k, v in _left_f]
+            from collections import Counter as _Counter
+            _lbl_cnt = _Counter(list(_row_lbls.values()) + _left_lbls)
+            _groups = set(_lbl_cnt)
+            if _groups - {GC_GROUP_UNKNOWN}:
                 _target_options = ["전체"] + sorted(_groups,
-                    key=lambda x: ("리타겟팅" in x, x == "그룹 미확인", x))
-                _detail_counts = {choice: (
-                    sum(_row_label(r) == choice for _, r in rows.iterrows())
-                    + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
-                    for choice in _target_options[1:]}
+                    key=lambda x: ("리타겟팅" in x, x in (GC_GROUP_UNKNOWN, "캠페인 여러 개"), x))
+                _detail_counts = {choice: _lbl_cnt.get(choice, 0) for choice in _target_options[1:]}
                 # 지금 고른 타겟팅·품목 안에 실제로 있는 광고세트만 버튼으로 보여준다
                 # (A/B테스트를 고르면 그 캠페인의 광고세트 2개만 — 0개짜리는 숨긴다).
                 _target_options = ["전체"] + [c for c in _target_options[1:]
@@ -18572,7 +18781,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _want = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", detail_target))
 
                     def _in_group(r):
-                        if _row_label(r) != detail_target:
+                        if _row_lbls.get(r.name, None) != detail_target:
                             return False
                         return True
                     if not rows.empty:
