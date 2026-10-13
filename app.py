@@ -15793,18 +15793,59 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     if source is not None and not source.empty and "campaign" in source.columns:
         _gm = source["channel"].map(_gc_channel).eq("구글")
         _cur |= set(source.loc[_gm, "campaign"].dropna().astype(str).str.strip())
+    # 소재 이름에 품목 단어가 없는 소재(260929_해리스트위드·260930_울라이크트러커)는 그 소재가
+    # 들어 있는 **지금 품목 캠페인**(아우터_260930 등)으로 품목을 정한다.
+    _cre_word = {}
+    if source is not None and not source.empty and "campaign" in source.columns:
+        _gm = source["channel"].map(_gc_channel).eq("구글")
+        _sets = {}
+        for cr, cp in zip(source.loc[_gm, "creative"], source.loc[_gm, "campaign"]):
+            it = _gc_item_of_campaign(cp)
+            if it in (GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER):
+                _sets.setdefault(_creative_image_key(str(cr)), set()).add(it)
+        _w = {GC_ITEM_SUIT: "수트", GC_ITEM_OUTER: "아우터", GC_ITEM_INNER: "셔츠"}
+        _cre_word = {k: _w[next(iter(v))] for k, v in _sets.items() if len(v) == 1}
+
+    # 그 소재가 **지금 들어 있는 캠페인**이 있으면 그쪽이 정답이다(해리스트위드 → 아우터_이전).
+    _cre_camps = {}
+    if source is not None and not source.empty and "campaign" in source.columns:
+        _gm2 = source["channel"].map(_gc_channel).eq("구글")
+        for cr, cp in zip(source.loc[_gm2, "creative"], source.loc[_gm2, "campaign"]):
+            cp = str(cp or "").strip()
+            _lo = cp.replace(" ", "").lower()
+            if cp and cp in _cur and not (_lo.startswith("pmax_온라인팀_신규_") or _lo == "pmax_온라인팀_리타겟"):
+                _cre_camps.setdefault(_creative_image_key(str(cr)), set()).add(cp)
+
+    def _map_old(old, cr):
+        o = str(old or "").strip()
+        low = o.replace(" ", "").lower()
+        if not (low.startswith("pmax_온라인팀_신규_") or low == "pmax_온라인팀_리타겟"):
+            return None
+        rt = low == "pmax_온라인팀_리타겟"
+        ks = [k for k in _cre_camps if k and (k == _creative_image_key(str(cr)) or k in _creative_image_key(str(cr)))]
+        cands = {c for k in ks for c in _cre_camps[k]
+                 if any(w in c.lower() for w in _GC_RT_WORDS) == rt and not _gc_is_ab(c)}
+        if len(cands) == 1:
+            return next(iter(cands))
+        return _gc_google_split_old_campaign(o, _cre_text(cr), _cur)
+
+    def _cre_text(cr):
+        cr = str(cr or "")
+        return cr if _gc_item_of_text(cr) else _cre_word.get(_creative_image_key(cr), cr)
     if source is not None and not source.empty and "campaign" in source.columns:
         _gm = source["channel"].map(_gc_channel).eq("구글")
         for idx in source.index[_gm]:
-            new = _gc_google_split_old_campaign(source.at[idx, "campaign"], source.at[idx, "creative"], _cur)
+            new = _map_old(source.at[idx, "campaign"], source.at[idx, "creative"])
             if new:
                 source.at[idx, "campaign"] = new
     if ga_rows is not None and not ga_rows.empty and "_gc_ch" in ga_rows.columns:
         ga_rows = ga_rows.copy()
         for idx in ga_rows.index[ga_rows["_gc_ch"].eq("구글")]:
-            new = _gc_google_split_old_campaign(ga_rows.at[idx, "campaign"],
-                                                ga_rows.at[idx, "creative"] if "creative" in ga_rows.columns else "",
-                                                _cur)
+            _gcr = str(ga_rows.at[idx, "creative"] if "creative" in ga_rows.columns else "")
+            _gcr2 = next((_cre_word[k] for k in _cre_word if k and k in _creative_image_key(_gcr)), _gcr) \
+                if not _gc_item_of_text(_gcr) else _gcr
+            new = _map_old(ga_rows.at[idx, "campaign"], _gcr) or \
+                _gc_google_split_old_campaign(ga_rows.at[idx, "campaign"], _gcr2, _cur)
             if new:
                 ga_rows.at[idx, "campaign"] = new
     return source, ga_rows
@@ -18954,7 +18995,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
                 _target_options = ["전체"] + sorted(_groups,
-                    key=lambda x: ("리타겟팅" in x, x == "그룹 미확인", x))
+                    key=lambda x: ("(현재X)" in x, "리타겟팅" in x, x == "그룹 미확인", x))
                 _detail_counts = {choice: (
                     sum(_row_label(r) == choice for _, r in rows.iterrows())
                     + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
@@ -18973,6 +19014,18 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     with _tc2:
                         detail_target = _gc_choice("세부 타겟팅", _target_options,
                                                    key=_detail_key, counts=_detail_counts)
+                # 지금 운영 안 하는 묶음(현재X)은 맨 끝 + 회색으로 — 버튼은 Streamlit 부품이라
+                # 글자로 골라 칠하는 작은 스크립트를 한 번 붙인다(화면이 바뀌어도 다시 칠한다).
+                if any("(현재X)" in o_ for o_ in _target_options):
+                    st.components.v1.html("""<script>
+(function(){var d=window.parent.document;
+ function paint(){d.querySelectorAll('[data-testid="stButtonGroup"] button').forEach(function(b){
+  var off=b.innerText.indexOf('(현재X)')>=0;
+  if(off){b.style.background='#ECEBE7';b.style.color='#9A968C';b.style.borderStyle='dashed';}
+  else if(b.style.borderStyle==='dashed'){b.style.background='';b.style.color='';b.style.borderStyle='';}
+ });}
+ paint(); new MutationObserver(function(){paint();}).observe(d.body,{childList:true,subtree:true,characterData:true});
+})();</script>""", height=0)
                 if label == "구글":
                     st.caption("구글은 광고 관리자 캠페인명으로 구분합니다. 선택 기간에 집행된 과거 캠페인도 포함됩니다. "
                                "캠페인 연결이 미확인인 행은 이 표에서 제외합니다.")
