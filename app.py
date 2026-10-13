@@ -15901,10 +15901,9 @@ def _gc_pick_version_part(parts, original):
     bases = {info[i][0] for i in idx}
     if len(bases) > 1:                      # 기본 이름이 다르면 GA 타겟과 같은 쪽만
         idx = [i for i in idx if info[i][0] == tgt] or [i for i in idx if tgt and tgt in info[i][0]]
-        if len({info[i][0] for i in idx}) > 1:
-            return None
+        pass
         if not idx:
-            return None
+            idx = list(range(len(parts)))
     if len(idx) == 1:
         return idx[0]
     def vdate(v):
@@ -15926,7 +15925,11 @@ def _gc_pick_version_part(parts, original):
     prev = [i for i in idx if info[i][1] == "이전"]
     if len(prev) == 1:
         return prev[0]
-    return None
+    # 그래도 못 고르면(같은 광고그룹 이름이 여러 캠페인에 있고 GA 링크도 양쪽에서 들어온 경우)
+    # 광고비가 가장 많이 나간 그룹에 붙인다 — '미확인'으로 따로 빼지 않는다.
+    real = [i for i in idx if str(parts[i].get("adset") or "") not in ("", "그룹 미확인")] or idx
+    return max(real, key=lambda i: (float(parts[i].get("cost", 0) or 0),
+                                    float(parts[i].get("impressions", 0) or 0)))
 
 
 def _gc_merge_renamed_adsets(ad_creative):
