@@ -17909,6 +17909,13 @@ window.addEventListener('message',function(event){
  for(var i=0;i<next.length;i++){if(root.childNodes[i])patchNode(root.childNodes[i],next[i]);else root.appendChild(next[i].cloneNode(true));}
  while(root.childNodes.length>next.length)root.removeChild(root.lastChild);
  lastHtml=args.html;
+ // 줄을 재사용해 고치는 방식이라, 사람이 한 번 바꾼 select는 새 HTML의 selected를 무시하고
+ // 예전 값을 그대로 보여줬다(정렬로 줄 순서가 바뀌면 다른 소재 줄에 ON이 남음).
+ // 새 HTML 기준으로 값을 다시 맞춘다.
+ root.querySelectorAll('select').forEach(function(s){var o=s.querySelector('option[selected]');
+  if(o&&s.value!==o.value){s.value=o.value;}
+  if(s.classList.contains('gc-inline-onoff')){s.style.background=(s.value==='ON'?'#E4F6DC':'#EFEEE8');}});
+ root.querySelectorAll('input[type=checkbox]').forEach(function(c){c.checked=c.hasAttribute('checked');});
  root.querySelectorAll('script').forEach(function(old){var sc=document.createElement('script');sc.textContent=old.textContent;old.replaceWith(sc);});
  root.querySelectorAll('.gc-inline-onoff').forEach(function(el){
  el.onclick=function(e){e.stopPropagation();};
