@@ -17807,8 +17807,10 @@ def _gc_status_table_body(card, recs, label, height, ti):
              target_key)] = (status, _now[:10])
         st.session_state["gc_manual_overlay"] = _ov
         st.toast(f"{record.get('이름')} → {status} 저장")
-        _load_table_raw.clear()
-        st.rerun(scope="app")
+        # 화면 전체를 다시 그리지 않는다(예전엔 저장소 캐시를 통째로 비우고 앱 전체를
+        # 재실행해서 한 번 바꿀 때마다 수십 초 걸렸다). 표 안 ON/OFF·필터 개수는 브라우저에서
+        # 바로 바뀌고, 판정·요약·엑셀은 다음에 화면이 새로 그려질 때(필터·탭 변경 등)
+        # 이번 세션 값(gc_manual_overlay)으로 반영된다.
     else:
         st.error("ON/OFF 저장에 실패했습니다. 저장소 연결과 creative_status_manual 테이블을 확인해주세요.")
 
