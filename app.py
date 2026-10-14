@@ -17230,6 +17230,17 @@ def _gc_expand_actual_groups(rows):
         _best = _gc_pick_version_part(parts, original) if unresolved else None
         if _best is not None:
             unresolved = False
+        try:
+            _dbg = str(st.query_params.get("gcdbg") or "")
+            if _dbg and _dbg in str(original.get("creative") or original.get("key") or ""):
+                st.session_state.setdefault("_gcdbg", []).append(dict(
+                    creative=str(original.get("creative")), target=str(original.get("target")),
+                    campaign=str(original.get("campaign")), ga_campaign=str(original.get("ga_campaign")),
+                    camp_list=str(original.get("camp_list")), conv=float(original.get("conv", 0) or 0),
+                    best=_best, parts=[(p.get("campaign"), p.get("adset"), round(float(p.get("cost", 0) or 0)))
+                                       for p in parts]))
+        except Exception:
+            pass
         for _pi, part in enumerate(parts):
             row = original.copy()
             row["ga_campaign"] = original.get("campaign")
@@ -19048,6 +19059,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if not rows.empty:
                 rows["_media"] = _gc_attach_media(rows, media_map, _matched)
                 rows = _gc_expand_actual_groups(rows)
+                if st.session_state.get("_gcdbg"):
+                    with st.expander("디버그"):
+                        st.json(st.session_state.pop("_gcdbg"))
             else:
                 rows["_media"] = pd.Series([], dtype=object)
 
