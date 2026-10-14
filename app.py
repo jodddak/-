@@ -19899,13 +19899,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         bar.style.display='flex';
         var a=anchor&&anchor.checked?anchor:s[s.length-1], td=a.closest('td'), tr=a.closest('tr');
         var br=box.getBoundingClientRect(), cr=td.getBoundingClientRect(), rr=tr.getBoundingClientRect();
-        bar.style.top=(rr.bottom-br.top+box.scrollTop-8)+'px';
+        // 막대는 항상 표 맨 위(TOTAL 줄) ON/OFF 칸 자리에 띄운다
+        var top=t.tBodies[0].querySelector('tr.fv4-sum-row')||(t.tHead&&t.tHead.rows[0]);
+        var tr2=top?top.getBoundingClientRect():rr;
+        bar.style.top=(tr2.top-br.top+box.scrollTop+Math.max(0,(tr2.height-(bar.offsetHeight||50))/2))+'px';
         var w=bar.offsetWidth||330, L=cr.left-br.left+box.scrollLeft, maxL=box.scrollWidth-w-8;
         bar.style.left=Math.max(0,Math.min(L,maxL))+'px';}
       chks().forEach(function(c){c.onclick=function(e){e.stopPropagation();}; c.onchange=function(){place(c);};});
       if(all){all.onclick=function(e){e.stopPropagation();};
         all.onchange=function(){chks().forEach(function(c){if(c.closest('tr').style.display!=='none')c.checked=all.checked;});
-          place(null); if(all.checked){bar.style.top='4px';}};}
+          place(null);};}
       bar.querySelectorAll('[data-bulk]').forEach(function(b){b.onclick=function(){
         var v=b.getAttribute('data-bulk'), s=sel();
         if(v&&s.length){var rows=[];
