@@ -19784,7 +19784,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         # (유입 없음 / UTM 없음)에 이미 나와서 중복이라 뺐다.
                         "key": (f'{_nm}<span class="gc-sub">'
                                 + (f"{ch_k} · " if label == "TOTAL" else "")
-                                + f'{str(m.get("campaign") or "").strip() or ch_k}</span>'),
+                                + f'{str(m.get("campaign") or "").strip() or ch_k}'
+                                + (f' · {str(m.get("_adset") or "").strip()}'
+                                   if str(m.get("_adset") or "").strip() and "," not in str(m.get("_adset"))
+                                   else "")
+                                + '</span>'),
                         # 광고세트 이름은 GA 줄과 같은 꼴로 앞부분만 보여준다
                         # ('리타겟팅_방문자180일' → '리타겟팅')
                         "target": str(m.get("_adset") or "").strip(),
