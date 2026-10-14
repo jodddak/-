@@ -15906,16 +15906,22 @@ def _gc_pick_version_part(parts, original):
     idx = list(range(len(parts)))
     # 같은 소재가 다른 캠페인에도 올라가 있으면(소프트데님셔츠: 아우터_전환·셔츠_전환) GA 링크의
     # 캠페인(셔츠_전환_PC)과 같은 캠페인 쪽만 남긴다.
-    gcamp = _gc_tgt_norm(original.get("ga_campaign") or original.get("campaign"))
+    # GA 줄은 같은 소재·타겟의 여러 utm_campaign(데일리_전환_PC + 셔츠_전환_PC)을 합친 줄이라
+    # campaign 한 칸만 보면 '데일리_전환_PC'만 남아 매체 캠페인과 하나도 안 맞았다
+    # (소프트데님셔츠 패션관심타겟 구매 2건이 'GA 그룹 미확인'으로 빠진 원인). 전부 본다.
+    _cl = original.get("camp_list")
+    gcamps = {_gc_tgt_norm(c) for c in ((list(_cl) if isinstance(_cl, (list, tuple, set)) else [])
+                                        + [original.get("ga_campaign"), original.get("campaign")])
+              if str(c or "").strip() and str(c) != "None"}
     camps = {_gc_tgt_norm(p.get("campaign")) for p in parts}
-    if gcamp and len(camps) > 1:
-        same = [i for i in idx if _gc_tgt_norm(parts[i].get("campaign")) == gcamp
-                or _gc_tgt_norm(parts[i].get("campaign")).endswith("_" + gcamp)
-                or gcamp.endswith("_" + _gc_tgt_norm(parts[i].get("campaign")))]
+
+    def _cmatch(pc):
+        pc = _gc_tgt_norm(pc)
+        return any(pc == g or pc.endswith("_" + g) or g.endswith("_" + pc) for g in gcamps)
+    if gcamps and len(camps) > 1:
+        same = [i for i in idx if _cmatch(parts[i].get("campaign"))]
         if same:
             idx = same
-        else:
-            return None
     exact_target = [i for i in idx if _gc_tgt_norm(parts[i].get("adset")) == tgt and tgt]
     if len(exact_target) == 1:
         return exact_target[0]
@@ -15939,8 +15945,11 @@ def _gc_pick_version_part(parts, original):
         exact = [i for d, i in dated if d == cdate]
         if len(exact) == 1:
             return exact[0]
-    # Spend, nearest date and a Previous label do not identify a GA group.
-    return None
+    # 버전(_261006 / _이전)만 다른 그룹에 같은 UTM이 붙어 있으면 GA만으로는 못 가른다.
+    # 미확인으로 빼두면 그 소재 성과가 표에서 사라지므로, 이 기간 **클릭이 가장 많은 그룹**
+    # (GA 방문이 실제로 가장 많이 나왔을 그룹)에 붙인다. 클릭이 같으면 광고비가 큰 쪽.
+    return max(idx, key=lambda i: (float(parts[i].get("clicks", 0) or 0),
+                                   float(parts[i].get("cost", 0) or 0)))
 
 
 def _gc_merge_renamed_adsets(ad_creative):
@@ -17230,17 +17239,6 @@ def _gc_expand_actual_groups(rows):
         _best = _gc_pick_version_part(parts, original) if unresolved else None
         if _best is not None:
             unresolved = False
-        try:
-            _dbg = str(st.query_params.get("gcdbg") or "")
-            if _dbg and _dbg in str(original.get("creative") or original.get("key") or ""):
-                st.session_state.setdefault("_gcdbg", []).append(dict(
-                    creative=str(original.get("creative")), target=str(original.get("target")),
-                    campaign=str(original.get("campaign")), ga_campaign=str(original.get("ga_campaign")),
-                    camp_list=str(original.get("camp_list")), conv=float(original.get("conv", 0) or 0),
-                    best=_best, parts=[(p.get("campaign"), p.get("adset"), round(float(p.get("cost", 0) or 0)))
-                                       for p in parts]))
-        except Exception:
-            pass
         for _pi, part in enumerate(parts):
             row = original.copy()
             row["ga_campaign"] = original.get("campaign")
@@ -19059,9 +19057,6 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if not rows.empty:
                 rows["_media"] = _gc_attach_media(rows, media_map, _matched)
                 rows = _gc_expand_actual_groups(rows)
-                if st.session_state.get("_gcdbg"):
-                    with st.expander("디버그"):
-                        st.json(st.session_state.pop("_gcdbg"))
             else:
                 rows["_media"] = pd.Series([], dtype=object)
 
