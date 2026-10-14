@@ -16063,8 +16063,11 @@ def _gc_detail_target_label(row):
     # The unversioned fashion group is a historical fifth group in the supplied
     # own-store GFA report; dated and Previous cohorts remain current groups.
     campaign = str(row.get("campaign") or "")
+    # 버전 없는 '패션관심타겟'은 지금 안 쓰는 그룹이다. 매체 실적이 없는 GA 줄은 캠페인 이름이
+    # 비어 있거나 GA 표기라 예전 조건(STCO_자사몰_)에 안 걸려 '패션 관심타겟 (신규)' 버튼이
+    # OFF 버튼과 따로 하나 더 생겼다 → 외부몰·A/B만 빼고 모두 OFF 그룹으로 합친다.
     historical = row.get("_current_group") is False or (
-        norm == "패션관심타겟" and "STCO_자사몰_" in campaign
+        norm == "패션관심타겟" and "외부몰" not in campaign
         and not _gc_is_ab(campaign))
     # 담당자가 끈 그룹(2026-10-14): GFA PC·MO·메타 수트 캠페인의 쇼핑관심타겟_이전·방문자180일_이전
     if (not historical and "수트" in campaign and "외부몰" not in campaign
@@ -19609,6 +19612,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             # 채널 성과와의 차이는 코멘트 바로 밑에서 따로 그린다(_gap_panel).
             cmt = None
+            _nu_list = []      # 코멘트의 'UTM 없음' 소재 목록(어느 소재인지 바로 찾게)
             if level == "소재":
                 # UTM 없음 줄도 코멘트에 넣는다(돈은 나갔으니까)
                 for (ch_k, name_k), m in leftovers:
@@ -19632,9 +19636,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                           (_mr / _c * 100) if _c > 0 else 0.0,
                                           float(m.get("media_conv", 0) or 0)))
                     else:
-                        _cr_items.append((str(m.get("name") or name_k),
-                                          _cr_unmatched_label(m)[0], "",
+                        _ul = _cr_unmatched_label(m)[0]
+                        _cr_items.append((str(m.get("name") or name_k), _ul, "",
                                           float(m.get("cost", 0) or 0), 0.0, 0.0))
+                        if _ul == "UTM 없음" and float(m.get("cost", 0) or 0) > 0:
+                            _nu_list.append((ch_k, str(m.get("name") or name_k),
+                                             str(m.get("campaign") or ""), str(m.get("_adset") or ""),
+                                             float(m.get("impressions", 0) or 0),
+                                             float(m.get("clicks", 0) or 0),
+                                             float(m.get("cost", 0) or 0)))
                 if _media_basis:
                     # GA에 못 붙은 줄(외부몰은 대부분)의 매체 신고 매출도 더한다 — 빼면 '매출 0원'으로 나왔다
                     _rv = (sum(float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"])
@@ -19647,6 +19657,27 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 cmt = ('<div class="gc-cmt">'
                        + "".join(f"<div>{i}. {t}</div>" for i, t in enumerate(_lines, 1))
                        + "</div>")
+                if _nu_list:
+                    import html as _h
+                    _nu_list.sort(key=lambda x: -x[6])
+                    cmt += ('<details class="gc-nu" style="margin:6px 0 10px;font-size:12.5px">'
+                            f'<summary style="cursor:pointer;font-weight:700;color:#6B5E3C">'
+                            f'UTM 없음 소재 {len(_nu_list)}개 목록 보기 (광고비 많은 순)</summary>'
+                            '<table style="border-collapse:collapse;margin-top:6px;width:100%">'
+                            '<tr style="background:#F4F1E8"><th style="text-align:left;padding:4px 8px">매체</th>'
+                            '<th style="text-align:left;padding:4px 8px">소재명</th>'
+                            '<th style="text-align:left;padding:4px 8px">캠페인</th>'
+                            '<th style="text-align:left;padding:4px 8px">광고세트</th>'
+                            '<th style="text-align:right;padding:4px 8px">노출</th>'
+                            '<th style="text-align:right;padding:4px 8px">클릭</th>'
+                            '<th style="text-align:right;padding:4px 8px">광고비</th></tr>'
+                            + "".join(
+                                '<tr class="gc-nu-row" style="border-top:1px solid #EEE9DC">'
+                                + "".join(f'<td style="padding:3px 8px">{_h.escape(v)}</td>' for v in x[:4])
+                                + "".join(f'<td style="padding:3px 8px;text-align:right">{v:,.0f}</td>'
+                                          for v in x[4:]) + '</tr>'
+                                for x in _nu_list)
+                            + '</table></details>')
             elif not rows.empty:
                 # GA 줄이 하나도 없는 탭(외부몰)은 코멘트를 안 쓴다 — 매출이 0으로 보일 뿐
                 # 실제로는 '알 수 없음'이라 '부진'이라고 단정하면 틀린 판단이 된다.
