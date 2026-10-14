@@ -13526,7 +13526,8 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
     names = ["신규", "리타겟"]
     rest_conv = max(0.0, p_conv - sum(ga[n][0] for n in names))
     rest_rev = max(0.0, p_rev - sum(ga[n][1] for n in names))
-    if (share and share.get("cost_incl_vat", {}).get("기타", 0) > 0) or rest_rev > 0 or rest_conv > 0:
+    _etc_media = sum((share.get(c) or {}).get("기타", 0.0) for c in ("impressions", "clicks", "cost_incl_vat"))
+    if _etc_media >= 1 or rest_rev >= 1 or rest_conv >= 0.5:
         names.append("기타")
         ga["기타"] = [rest_conv, rest_rev]
     out = []
