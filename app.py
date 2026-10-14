@@ -18121,6 +18121,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                       for _c in _sub_missing.values())
             + (f"  ⚠️ {', '.join(_stale)} 늦음" if _stale else "  ✅ 모두 어제까지")
         )
+        # GFA·맨즈탭은 API가 없어 '업로드한 리포트'까지만 들어온다 — 어디까지 올렸는지 보이게
+        _up = sorted((k, v) for k, v in _media_last.items()
+                     if any(w in str(k) for w in ("GFA", "맨즈", "애드부스트")))
+        if _up:
+            _up_late = [k for k, v in _up if v < _yday]
+            st.caption("업로드 리포트 최신 날짜 — " + " · ".join(f"{k} {v}" for k, v in _up)
+                       + (f"  ⚠️ {', '.join(_up_late)}는 어제({_yday}) 리포트가 아직 안 올라와서 "
+                          "매체 관리자보다 숫자가 적게 보입니다 — 사이드바에서 최신 리포트를 올려주세요."
+                          if _up_late else "  ✅ 모두 어제까지"))
     _has_saved_creative = (cre is not None and not cre.empty) or (ad_creative is not None and not ad_creative.empty)
     if not _has_saved_creative and "gc_synced" not in st.session_state and get_ga4_client()[0] is not None:
         st.session_state["gc_synced"] = True
