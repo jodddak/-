@@ -4793,13 +4793,22 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     cols = list(df.columns)
     c_date = _mr_pick(cols, MEDIA_REPORT_COLS["date"])
     c_cre = _mr_pick(cols, MEDIA_REPORT_COLS["creative"])
-    if c_date is None or c_cre is None:
+    # 애드부스트(ADVoost 쇼핑)는 소재가 없고 '애셋 그룹'까지만 있다. 캠페인이 애드부스트면
+    # 소재 이름을 '애드부스트'(GA utm_content와 같은 값)로 두고 애셋 그룹을 광고그룹으로 저장한다.
+    _ab_fallback = False
+    if c_cre is None:
+        _cmp0 = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
+        if (_cmp0 is not None and _mr_pick(cols, ["애셋 그룹 이름", "애셋그룹 이름", "애셋 그룹명"])
+                and df[_cmp0].astype(str).str.contains("애드부스트|advoost|ADVoost", case=False, na=False).any()):
+            _ab_fallback = True
+    if c_date is None or (c_cre is None and not _ab_fallback):
         return _empty_creative()
     c_cost = _mr_pick(cols, MEDIA_REPORT_COLS["cost"])
     c_imp = _mr_pick(cols, MEDIA_REPORT_COLS["imp"])
     c_clk = _mr_pick(cols, MEDIA_REPORT_COLS["click"])
     c_cmp = _mr_pick(cols, MEDIA_REPORT_COLS["campaign"])
-    c_adset = _mr_pick(cols, ["광고 그룹 이름", "광고그룹 이름", "광고그룹명", "광고 그룹명", "adset_name"])
+    c_adset = _mr_pick(cols, ["광고 그룹 이름", "광고그룹 이름", "광고그룹명", "광고 그룹명", "adset_name",
+                              "애셋 그룹 이름", "애셋그룹 이름", "애셋 그룹명"])
     # ── 전환은 '구매완료'만 쓴다 ────────────────────────────────
     # GFA 리포트는 전환 종류를 전부 따로 준다 — 구매완료·장바구니 담기·회원가입·
     # 위시리스트·컨텐츠보기… 그리고 그걸 다 더한 '총 전환매출액'도 같이 준다.
@@ -4865,7 +4874,8 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     rows = pd.DataFrame({
         "report_date": _mr_dates(df[c_date]),
         "channel": channels,
-        "creative": df[c_cre].astype(str).str.strip(),
+        "creative": (df[c_cre].astype(str).str.strip() if c_cre is not None
+                     else pd.Series(["애드부스트"] * len(df), index=df.index)),
         "impressions": num(df[c_imp]) if c_imp else 0.0,
         "clicks": num(df[c_clk]) if c_clk else 0.0,
         "cost_incl_vat": num(df[c_cost]) if c_cost else 0.0,
@@ -13441,6 +13451,97 @@ def _cp_gfa_device_split(master: pd.DataFrame, parent: dict, start: date, end: d
     return out
 
 
+# 채널 성과에서 '신규/리타겟'으로 펼쳐 볼 매체 → 소재 데이터(ad_creative_daily)의 탭
+CP_SEG_MEDIA = {
+    "GFA_자사몰": ("네이버 GFA PC (자사몰)", "네이버 GFA MO (자사몰)"),
+    "GFA_애드부스트": ("네이버 애드부스트",),
+    "메타": ("메타 (자사몰)",),
+}
+
+
+def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, end: date) -> list:
+    """채널 성과 한 줄을 **신규 / 리타겟** 하위 줄로 펼친다(PC/MO 보기와 같은 방식).
+
+    · 노출·클릭·광고비 → ad_creative_daily(매체 API·업로드 리포트)의 캠페인·광고그룹으로
+      신규/리타겟을 가른 **비중**으로 합계 줄을 나눈다(하위 줄 합 = 합계 줄).
+    · GA 구매·매출 → ga_creative_daily의 utm_campaign·utm_content로 가른다.
+      못 가르는 줄(타겟 표시 없음)은 '기타'로 따로 보여준다.
+    """
+    tabs = CP_SEG_MEDIA.get(media)
+    if not tabs:
+        return []
+    labels = (("신규", GC_SEG_NEW), ("리타겟", GC_SEG_RT))
+
+    def _seg(target, campaign, creative=""):
+        return _gc_target_group({"target": target, "campaign": campaign, "creative": creative})
+
+    share = {}
+    try:
+        acd = load_table("ad_creative_daily")
+    except Exception:
+        acd = None
+    if acd is not None and not acd.empty and "channel" in acd.columns:
+        a = acd.copy()
+        a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
+        a = a[(a["_d"] >= start) & (a["_d"] <= end)]
+        a = a[a["channel"].map(_gc_channel).isin(tabs)]
+        if not a.empty:
+            for col in ("impressions", "clicks", "cost_incl_vat"):
+                a[col] = pd.to_numeric(a.get(col), errors="coerce").fillna(0)
+            a["_seg"] = [_seg(_creative_adset_label(ad), cp)
+                         for ad, cp in zip(a.get("adset", ""), a.get("campaign", ""))]
+            for col in ("impressions", "clicks", "cost_incl_vat"):
+                share[col] = {lbl: float(a.loc[a["_seg"] == sg, col].sum()) for lbl, sg in labels}
+                share[col]["기타"] = float(a.loc[~a["_seg"].isin([GC_SEG_NEW, GC_SEG_RT]), col].sum())
+
+    ga = {lbl: [0.0, 0.0] for lbl, _ in labels}
+    ga_ok = False
+    try:
+        cre = load_table("ga_creative_daily")
+    except Exception:
+        cre = None
+    if (cre is not None and not cre.empty and "source_medium" in cre.columns
+            and "campaign" in cre.columns):
+        c = cre.copy()
+        c["_d"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+        c = c[(c["_d"] >= start) & (c["_d"] <= end)]
+        if not c.empty:
+            match = _cp_media_matcher(master)
+            _m = [(_ga_media_fix(sm, cp) or match(sm)) for sm, cp in zip(c["source_medium"], c["campaign"])]
+            c = c[[x == media for x in _m]]
+            if not c.empty:
+                ga_ok = True
+                for col in ("conversions", "revenue"):
+                    c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+                c["_seg"] = [_seg(cr, cp, cr) for cr, cp in zip(c.get("creative", ""), c["campaign"])]
+                for lbl, sg in labels:
+                    ga[lbl] = [float(c.loc[c["_seg"] == sg, "conversions"].sum()),
+                               float(c.loc[c["_seg"] == sg, "revenue"].sum())]
+
+    if not share and not ga_ok:
+        return []
+    p_conv, p_rev = float(parent.get("GA구매") or 0), float(parent.get("GA매출") or 0)
+    names = ["신규", "리타겟"]
+    rest_conv = max(0.0, p_conv - sum(ga[n][0] for n in names))
+    rest_rev = max(0.0, p_rev - sum(ga[n][1] for n in names))
+    if (share and share.get("cost_incl_vat", {}).get("기타", 0) > 0) or rest_rev > 0 or rest_conv > 0:
+        names.append("기타")
+        ga["기타"] = [rest_conv, rest_rev]
+    out = []
+    for lbl in names:
+        rec = {"매체": lbl, "_approx": False}
+        for col, key in (("impressions", "노출"), ("clicks", "클릭"), ("cost_incl_vat", "비용")):
+            sh = share.get(col)
+            tot = sum(sh.values()) if sh else 0.0
+            rec[key] = (float(parent.get(key) or 0) * sh.get(lbl, 0.0) / tot) if tot > 0 else None
+        rec["GA구매"], rec["GA매출"] = (ga[lbl] if ga_ok else (None, None))
+        cost = rec["비용"]
+        rec["GA ROAS"] = ((rec["GA매출"] / cost * 100)
+                          if (cost and cost > 0 and rec["GA매출"] is not None) else None)
+        out.append(rec)
+    return out
+
+
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
@@ -13900,8 +14001,19 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 _gfa_approx = any(s.get("_approx") for s in _subs)
     except Exception as _e:
         st.caption(f"GFA PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
+    # 신규/리타겟 하위 줄 — GFA_자사몰 · GFA_애드부스트 · 메타
+    _seg_subs = {}
+    for _sm in CP_SEG_MEDIA:
+        try:
+            _sp = view[view["매체"] == _sm]
+            if not _sp.empty:
+                _ss = _cp_seg_split(mst, _sp.iloc[0].to_dict(), _sm, start, end)
+                if _ss:
+                    _seg_subs[_sm] = _ss
+        except Exception as _e:
+            st.caption(f"{_sm} 신규/리타겟 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
 
-    def _sub_rows_html(parent_name, subs):
+    def _sub_rows_html(parent_name, subs, kind="dev"):
         mute = '<span class="cp-mute">—</span>'
         rows = []
         for s in subs:
@@ -13915,7 +14027,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             _roas = s["GA ROAS"]
             _roas_v = mute if _roas is None else f"{_roas:,.1f}%"
             rows.append(
-                f'<tr class="cp-subrow" data-parent="{parent_name}" style="display:none">'
+                f'<tr class="cp-subrow" data-parent="{parent_name}" data-kind="{kind}" style="display:none">'
                 f'<td class="l"></td>'
                 f'<td class="l m cp-subname">└ {s["매체"]}</td>'
                 f'<td data-v="{dv(_imp)}">{fmt_i(_imp)}</td>'
@@ -13952,9 +14064,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 cls = "cp-pill zero"
             pace_v = f'<span class="{cls}">{r["예산 소진율"]:.1f}%</span>'
         src = AD_SPEND_SOURCE_LABEL.get(r["_src"], "")
-        _has_sub = r["매체"] in _gfa_subs
-        # PC/MO 하위 줄이 있는 매체는 줄을 누르면 펼쳐진다(기본은 접힘)
-        _tog = ('<span class="cp-tog">▸ PC/MO 보기</span>' if _has_sub else "")
+        _has_sub = r["매체"] in _gfa_subs or r["매체"] in _seg_subs
+        # 하위 줄 버튼 — PC/MO 보기 · 신규/리타겟 보기 (누르면 펼침, 다시 누르면 접힘)
+        _tog = (('<span class="cp-tog" data-kind="dev">▸ PC/MO 보기</span>'
+                 if r["매체"] in _gfa_subs else "")
+                + ('<span class="cp-tog" data-kind="seg">▸ 신규/리타겟 보기</span>'
+                   if r["매체"] in _seg_subs else ""))
         # 출처(네이버 API 등)는 매체명 옆에 한 줄로 붙인다 — 두 줄로 쌓으면 표가 쓸데없이 길어진다
         sub = (f'<span class="cp-src">{src}</span>' if src else "") + \
               (f'<span class="cp-src">{_tog}</span>' if _tog else "")
@@ -13975,7 +14090,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             f'<td data-v="{r["월예산"]:.0f}">{bud}</td>'
             f'<td data-v="{nn(r["예산 소진율"]):.2f}">{pace_v}</td></tr>')
         if r["매체"] in _gfa_subs:
-            body.append(_sub_rows_html(r["매체"], _gfa_subs[r["매체"]]))
+            body.append(_sub_rows_html(r["매체"], _gfa_subs[r["매체"]], "dev"))
+        if r["매체"] in _seg_subs:
+            body.append(_sub_rows_html(r["매체"], _seg_subs[r["매체"]], "seg"))
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{tot_rev / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
@@ -14076,7 +14193,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 <style>
 tr.cp-has-sub{cursor:pointer}
 tr.cp-has-sub:hover td{background:#F4F2EA}
-.cp-tog{color:#2F6FED;font-weight:600}
+.cp-tog{color:#2F6FED;font-weight:600;cursor:pointer;margin-right:10px;white-space:nowrap}
+.cp-tog:hover{text-decoration:underline}
 </style>
 <script>
 (function(){
@@ -14087,14 +14205,19 @@ tr.cp-has-sub:hover td{background:#F4F2EA}
     }catch(e){}
   }
   // 부모 줄(GFA_자사몰)을 누르면 └ PC / └ MO 줄을 펼치고 접는다
-  Array.prototype.forEach.call(document.querySelectorAll('tr.cp-has-sub'), function(tr){
-    tr.addEventListener('click', function(){
-      var name = tr.getAttribute('data-name');
-      var subs = document.querySelectorAll('tr.cp-subrow[data-parent="' + name + '"]');
-      var open = subs.length && subs[0].style.display === 'none';
-      Array.prototype.forEach.call(subs, function(s){ s.style.display = open ? '' : 'none'; });
-      var t = tr.querySelector('.cp-tog');
-      if(t){ t.textContent = open ? '▾ PC/MO 접기' : '▸ PC/MO 보기'; }
+  // 버튼마다 따로 펼친다(PC/MO 보기 · 신규/리타겟 보기). 한쪽을 열면 다른 쪽은 접는다.
+  var LBL={dev:['▸ PC/MO 보기','▾ PC/MO 접기'], seg:['▸ 신규/리타겟 보기','▾ 신규/리타겟 접기']};
+  Array.prototype.forEach.call(document.querySelectorAll('tr.cp-has-sub .cp-tog'), function(t){
+    t.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      var tr = t.closest('tr'), name = tr.getAttribute('data-name'), kind = t.getAttribute('data-kind')||'dev';
+      var all = document.querySelectorAll('tr.cp-subrow[data-parent="' + name + '"]');
+      var mine = Array.prototype.filter.call(all, function(s){ return (s.getAttribute('data-kind')||'dev') === kind; });
+      var open = mine.length && mine[0].style.display === 'none';
+      Array.prototype.forEach.call(all, function(s){ s.style.display = 'none'; });
+      Array.prototype.forEach.call(mine, function(s){ s.style.display = open ? '' : 'none'; });
+      Array.prototype.forEach.call(tr.querySelectorAll('.cp-tog'), function(o){
+        var k=o.getAttribute('data-kind')||'dev'; o.textContent = LBL[k][(open && k===kind)?1:0]; });
       setTimeout(fitNow, 30);
     });
   });
