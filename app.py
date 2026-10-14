@@ -15299,8 +15299,11 @@ def _cr_won(v: float) -> str:
     return f"{v / 1e4:,.1f}만원" if v < 1e6 else f"{v / 1e4:,.0f}만원"
 
 
+CR_CLICK_OFF = 100      # 클릭이 이만큼 쌓였는데 매출이 없거나 OFF선 ROAS 미만이면 OFF 권장
+
+
 def cr_judge(seg: str, spend: float, purch: float, roas: float, age_days=None,
-             avg_spend: float = None) -> tuple:
+             avg_spend: float = None, clicks: float = None) -> tuple:
     """(판정, 사유, 쏠림 여부). seg는 '신규' / '리타겟팅'."""
     seg = "리타겟팅" if seg == "리타겟팅" else "신규"
     spend, purch, roas = float(spend or 0), float(purch or 0), float(roas or 0)
@@ -15308,6 +15311,12 @@ def cr_judge(seg: str, spend: float, purch: float, roas: float, age_days=None,
                 and roas < CR_TARGET_ROAS)
     xs = f" · ⚡매체 평균의 {spend / avg_spend:.1f}배" if conc else ""
     off, up = CR_OFF_ROAS[seg], CR_UP_ROAS[seg]
+    # 클릭 100건↑인데 매출 0 / ROAS가 OFF선 미만 → 표본이 충분하니 학습 중이 아니라 OFF 권장
+    # (2026-10-14 담당자 기준 추가: 코듀로이셔츠v1 클릭 200 · ROAS 61%가 '학습 중'으로 나왔다)
+    clicks = float(clicks or 0)
+    if clicks >= CR_CLICK_OFF and roas < off:
+        return CR_OFF, (f"클릭 {clicks:,.0f}건 · " + ("매출 0원" if roas <= 0 else
+                        f"ROAS {roas:,.0f}% (기준 {off}% 미만)") + xs), conc
     if spend >= CR_M2:
         if roas < off:
             return CR_OFF, f"{_cr_won(spend)} · ROAS {roas:,.0f}% (기준 {off}% 미만){xs}", conc
@@ -15384,7 +15393,8 @@ def cr_rule_for(r, media, avg_spend=None) -> tuple:
     if basis and rev <= 0 and conv <= 0:
         return CR_EXCL, "hold", "외부몰 — 매체가 구매를 못 봄(픽셀 미설치)", age
     roas = rev / cost * 100
-    lab, why, _c = cr_judge(_cr_seg_of(r), cost, conv, roas, age, avg_spend)
+    lab, why, _c = cr_judge(_cr_seg_of(r), cost, conv, roas, age, avg_spend,
+                            clicks=float(m.get("clicks", 0) or 0))
     if basis:
         why += " · 매체 신고 기준"
     return lab, CR_CLS.get(lab, "hold"), why, age
@@ -15734,6 +15744,31 @@ def _gc_filter_rows(rows: pd.DataFrame, seg, item) -> pd.DataFrame:
     if item != GC_ITEM_ALL and "_item" in out.columns:
         out["_item"] = item
     return out
+
+
+def _gc_zero_is_live(key, media, campaign, adset, status_map) -> bool:
+    """실적 0인 소재·광고그룹을 표에 남길지 — 직접 등록했거나(GFA) 매체 API상 지금 ON일 때만."""
+    if str((media or {}).get("src") or "") == "creative_inventory":
+        return True
+    sm = status_map or {}
+    tab = key[0]
+    nk = _creative_image_key(str((media or {}).get("name") or key[1]).split("__", 1)[0])
+
+    def _ceq(a, b):
+        a, b = _gc_tgt_norm(a), _gc_tgt_norm(b)
+        return bool(a and b) and (a == b or a.endswith("_" + b) or b.endswith("_" + a))
+    for a in sm.get(("__ads__", tab)) or []:
+        if (a.get("on") and _creative_image_key(str(a.get("name") or "")) == nk
+                and _ceq(a.get("campaign"), campaign)
+                and (not adset or _gc_tgt_norm(a.get("adset")) == _gc_tgt_norm(adset))):
+            return True
+    for e in sm.get((tab, nk)) or []:
+        try:
+            if e[1] and (_ceq(e[0], campaign) or (adset and _gc_tgt_norm(e[0]) == _gc_tgt_norm(adset))):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _gc_has_performance(row=None, media=None):
@@ -19126,8 +19161,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 for _tv in _tvs:
                     if any(float(_tv.get(f, 0) or 0) for f in ("impressions", "clicks", "cost")):
                         continue
-                    _zero_groups.append((_zk, _zv, str(_tv.get("campaign") or "").strip(),
-                                         str(_tv.get("adset") or "").strip()))
+                    _zc0, _za0 = str(_tv.get("campaign") or "").strip(), str(_tv.get("adset") or "").strip()
+                    # 매체 관리자 '운영가능' 목록과 같게 — **지금 켜져 있는** 소재·그룹만 0으로라도
+                    # 보여준다(직접 등록한 GFA 소재 포함). 꺼진 옛 캠페인(추석세일 등)은 빼야 한다.
+                    if _gc_zero_is_live(_zk, _zv, _zc0, _za0, _status_map):
+                        _zero_groups.append((_zk, _zv, _zc0, _za0))
             # Remove truly empty rows before calculating buttons, totals and exports.
             if not rows.empty:
                 rows = rows[rows.apply(lambda r: _gc_has_performance(r, r.get("_media")), axis=1)].copy()
@@ -19674,7 +19712,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 f"평균 ROAS(선택 기간): {avg_roas:,.0f}% · 판정 = 소재 운영 기준 "
                 f"(10만원 도달: 신규 구매 0 / 리타겟팅 2건 미만 OFF · 20만원↑: 신규 ROAS "
                 f"{CR_OFF_ROAS['신규']}% / 리타겟팅 {CR_OFF_ROAS['리타겟팅']}% 미만 OFF · "
-                f"10일↑·3만원↑·구매 0 OFF · 증액: 신규 {CR_UP_ROAS['신규']}% / 리타겟팅 "
+                f"10일↑·3만원↑·구매 0 OFF · 클릭 {CR_CLICK_OFF}건↑인데 매출 0 또는 ROAS OFF선 미만 OFF · 증액: 신규 {CR_UP_ROAS['신규']}% / 리타겟팅 "
                 f"{CR_UP_ROAS['리타겟팅']}%↑·구매 3건↑) — 자세한 건 아래 '이 표 읽는 법'"))
 
             # 채널 성과와의 차이는 코멘트 바로 밑에서 따로 그린다(_gap_panel).
