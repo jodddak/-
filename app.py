@@ -15757,14 +15757,17 @@ def _gc_zero_is_live(key, media, campaign, adset, status_map) -> bool:
     def _ceq(a, b):
         a, b = _gc_tgt_norm(a), _gc_tgt_norm(b)
         return bool(a and b) and (a == b or a.endswith("_" + b) or b.endswith("_" + a))
-    for a in sm.get(("__ads__", tab)) or []:
-        if (a.get("on") and _creative_image_key(str(a.get("name") or "")) == nk
-                and _ceq(a.get("campaign"), campaign)
-                and (not adset or _gc_tgt_norm(a.get("adset")) == _gc_tgt_norm(adset))):
-            return True
+    ads = sm.get(("__ads__", tab))
+    if ads:
+        # 광고 목록이 있는 매체(메타): 소재·캠페인·광고세트가 모두 같은 광고가 ON일 때만
+        return any(a.get("on") and _creative_image_key(str(a.get("name") or "")) == nk
+                   and _ceq(a.get("campaign"), campaign)
+                   and (not adset or _gc_tgt_norm(a.get("adset")) == _gc_tgt_norm(adset))
+                   for a in ads)
+    # 구글: (캠페인, ON) 목록 — 캠페인이 같은 것만 본다
     for e in sm.get((tab, nk)) or []:
         try:
-            if e[1] and (_ceq(e[0], campaign) or (adset and _gc_tgt_norm(e[0]) == _gc_tgt_norm(adset))):
+            if e[1] and _ceq(e[0], campaign):
                 return True
         except Exception:
             continue
