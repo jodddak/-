@@ -19753,6 +19753,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 '.gc-table-scroll th,.gc-table-scroll td{box-sizing:border-box;} '
                 '.gc-table-scroll .gc-img img{object-fit:cover;}'
                 '.gc-table-scroll{position:relative}'
+                # 칸 너비 — 판정 칸이 남는 폭을 다 먹어 ON/OFF와 판정 사이가 휑했다.
+                # 판정은 고정 폭 + 왼쪽 정렬(ON/OFF 바로 옆), 나머지 숫자 칸이 고르게 나눠 갖는다.
+                '.gc-tbl th:last-child,.gc-tbl td:last-child{width:250px;min-width:250px;max-width:250px;'
+                'text-align:left!important;padding-left:14px}'
+                '.gc-tbl td:last-child .gc-why{margin-left:0;text-align:left;max-width:240px}'
+                '.gc-tbl th.gc-st-th,.gc-tbl td.gc-status{width:132px;min-width:132px}'
+                '.gc-tbl th:first-child,.gc-tbl td:first-child{min-width:230px}'
                 '.gc-tbl td.gc-status,.gc-tbl th.gc-st-th{text-align:left!important;white-space:nowrap;padding-left:18px}'
                 '.gc-chk,.gc-chk-all{width:17px;height:17px;margin:0 12px 0 0;vertical-align:middle;'
                 'cursor:pointer;accent-color:#2C5AA0}'
