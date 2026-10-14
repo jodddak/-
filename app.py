@@ -17686,9 +17686,19 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
     _get = (r.get if isinstance(r, dict) else (lambda k, d=None: r[k] if k in r else d))
     _camp = str(_get("campaign", "") or "").strip()
     _tgt = str(_get("target", "") or "").strip()
+    if not is_total and not (_camp or _tgt) and isinstance(media, dict) and (
+            media.get("campaign") or media.get("_adset")):
+        # leftovers(GA에 못 붙은 매체 줄)는 매체가 준 캠페인·광고그룹을 그대로 쓴다
+        # (예전엔 아랫줄 문자열을 잘라 썼는데, TOTAL 탭은 앞에 매체명이 붙어 있어
+        #  캠페인 칸에 '구글'이 들어가고 구분이 '기타'로 나왔다)
+        _camp = str(media.get("campaign") or "").strip()
+        _tgt = str(media.get("_adset") or "").strip()
     if not is_total and sub and not (_camp or _tgt):
         # leftovers처럼 rows에 없는 줄은 아랫줄 문자열에서 되꺼낸다
         _parts = [p.strip() for p in sub.split("·")]
+        if len(_parts) > 1 and (_parts[0] in ("구글", "크리테오")
+                                or _parts[0].startswith(("네이버 ", "메타 ("))):
+            _parts = _parts[1:]
         _camp = _parts[0] if _parts else ""
         _tgt = _parts[1] if len(_parts) > 1 else ""
     _seg = str(_get("_seg", "") or "") or (
