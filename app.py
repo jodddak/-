@@ -1266,7 +1266,8 @@ def get_supabase_client():
     try:
         from supabase import create_client
 
-        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        return create_client(str(st.secrets["SUPABASE_URL"]).strip().rstrip("/"),
+                             str(st.secrets["SUPABASE_KEY"]).strip())
     except Exception:
         return None
 
@@ -1337,6 +1338,10 @@ def _load_query(client, table_name, name=None, since=None, count=None):
     return q
 
 
+class _LoadFailed(Exception):
+    """조회 자체가 실패 — 빈 표를 캐시에 남기지 않으려고 예외로 올린다."""
+
+
 class _IncompleteLoad(Exception):
     """표를 끝까지 못 받았다 — 받은 만큼(rows)을 들고 나온다. 캐시에 안 남기려고 예외로 올린다."""
     def __init__(self, rows, total):
@@ -1402,9 +1407,9 @@ def _load_table_raw(name: str) -> pd.DataFrame:
         except Exception:
             # 테이블이 아직 Supabase에 없는 경우(예: 신규 테이블 미생성) 등 API 에러가 나면
             # 앱 전체가 죽지 않도록 빈 데이터로 취급하고 안내만 띄운다.
-            st.sidebar.warning(
-                f"'{table_name}' 테이블 조회 실패 — 해당 테이블이 Supabase에 없을 수 있습니다. ({e_first})")
-            return pd.DataFrame()
+            # 빈 표를 돌려주면 그 결과가 1시간 캐시돼, 저장소가 잠깐 막혔다 풀려도
+            # '저장된 데이터 없음'이 계속 떴다. 예외로 올려 캐시에 남기지 않는다.
+            raise _LoadFailed(f"'{table_name}' 테이블 조회 실패 ({str(e_first)[:160]})")
 
     rows = list(first.data or [])
     total = getattr(first, "count", None)
@@ -1488,7 +1493,18 @@ def load_table(name: str) -> pd.DataFrame:
     (실제로 캠페인 이름으로만 거르던 때 소재별 표에 '모션프리수트 140,074원'이 남았다.)
     """
     try:
-        df = _load_table_raw(name)
+        try:
+            df = _load_table_raw(name)
+        except _LoadFailed:
+            # 연결이 꼬였을 수 있으니 저장소 연결을 새로 만들어 한 번 더 받는다
+            get_supabase_client.clear()
+            df = _load_table_raw(name)
+    except _LoadFailed as e:
+        df = pd.DataFrame()
+        try:
+            st.sidebar.warning(f"{e} — 저장소(Supabase) 응답 오류입니다. 잠시 후 새로고침하면 다시 시도합니다.")
+        except Exception:
+            pass
     except _IncompleteLoad as e:
         df = pd.DataFrame(e.rows)
         try:
