@@ -16050,8 +16050,14 @@ def _gc_detail_target_label(row):
     historical = row.get("_current_group") is False or (
         norm == "패션관심타겟" and "STCO_자사몰_" in campaign
         and not _gc_is_ab(campaign))
+    # 담당자가 끈 그룹(2026-10-14): GFA PC·MO·메타 수트 캠페인의 쇼핑관심타겟_이전·방문자180일_이전
+    if (not historical and "수트" in campaign and "외부몰" not in campaign
+            and not _gc_is_ab(campaign)
+            and norm in (_gc_tgt_norm("쇼핑관심타겟_이전"), _gc_tgt_norm("방문자180일_이전"))):
+        historical = True
     # 신규/리타겟팅을 못 가르는 그룹(외부몰 N배송상품·일반상품 등)은 '구분 미확인'을 달지 않는다
-    return pretty + (f" ({suffix})" if suffix else "") + (" (현재X)" if historical else "")
+    # 운영 안 하는 그룹은 ' - OFF'를 붙여 맨 끝 + 회색으로 보인다.
+    return pretty + (f" ({suffix})" if suffix else "") + (" - OFF" if historical else "")
 
 
 def _gc_gfa_target_matches(target, choice):
@@ -19193,7 +19199,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
                 _target_options = ["전체"] + sorted(_groups,
-                    key=lambda x: ("(현재X)" in x, "리타겟팅" in x, x == "그룹 미확인", x))
+                    key=lambda x: (" - OFF" in x, "리타겟팅" in x, x == "그룹 미확인", x))
                 _detail_counts = {choice: (
                     sum(_row_label(r) == choice for _, r in rows.iterrows())
                     + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
@@ -19212,13 +19218,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     with _tc2:
                         detail_target = _gc_choice("세부 타겟팅", _target_options,
                                                    key=_detail_key, counts=_detail_counts)
-                # 지금 운영 안 하는 묶음(현재X)은 맨 끝 + 회색으로 — 버튼은 Streamlit 부품이라
+                # 지금 운영 안 하는 묶음( - OFF)은 맨 끝 + 회색으로 — 버튼은 Streamlit 부품이라
                 # 글자로 골라 칠하는 작은 스크립트를 한 번 붙인다(화면이 바뀌어도 다시 칠한다).
-                if any("(현재X)" in o_ for o_ in _target_options):
+                if any(" - OFF" in o_ for o_ in _target_options):
                     st.components.v1.html("""<script>
 (function(){var d=window.parent.document;
  function paint(){d.querySelectorAll('[data-testid="stButtonGroup"] button').forEach(function(b){
-  var off=b.innerText.indexOf('(현재X)')>=0;
+  var off=b.innerText.indexOf(' - OFF')>=0;
   if(off){b.style.background='#ECEBE7';b.style.color='#9A968C';b.style.borderStyle='dashed';}
   else if(b.style.borderStyle==='dashed'){b.style.background='';b.style.color='';b.style.borderStyle='';}
  });}
