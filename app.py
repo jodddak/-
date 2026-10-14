@@ -19335,6 +19335,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 | {_raw_left_label(v, k) for k, v in _left_all})
                                if label != "TOTAL" else set())
             _off_alias = {x[:-len(" - OFF")]: x for x in _all_raw_labels if x.endswith(" - OFF")}
+            # 버전 없는 옛 그룹(방문자180일·의류관심타겟·쇼핑관심타겟)은 이름만 바뀐 '_이전'과 같은 그룹
+            def _lbl_key(x):
+                x = re.sub(r"\s*-\s*OFF$", "", str(x))
+                x = re.sub(r"\s*\([^)]*\)\s*$", "", x)
+                return "".join(x.split())
+            _by_key = {_lbl_key(x): x for x in _all_raw_labels}
+            for _x in _all_raw_labels:
+                _k = _lbl_key(_x)
+                if _k in ("의류관심타겟", "방문자180일", "쇼핑관심타겟") and (_k + "_이전") in _by_key:
+                    _tgt = _by_key[_k + "_이전"]
+                    _off_alias[_x] = _off_alias.get(_tgt, _tgt)
+                    if _x.endswith(" - OFF"):
+                        _off_alias[_x[:-len(" - OFF")]] = _off_alias[_x]
 
             def _row_label(r):
                 _l = _raw_row_label(r)
