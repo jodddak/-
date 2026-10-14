@@ -17768,7 +17768,9 @@ def _gc_inline_onoff_row(row_html, index, record):
                '<option value="" selected>' + html.escape(status or "미확인") + '</option>')
     options += ''.join(f'<option value="{v}" {"selected" if status == v else ""}>{v}</option>'
                        for v in ("ON", "OFF"))
-    control = (f'<select class="gc-inline-onoff" data-row="{index}" '
+    control = (f'<input type="checkbox" class="gc-chk" data-row="{index}" '
+               f'aria-label="{html.escape(str(record.get("이름") or ""), quote=True)} 선택">'
+               f'<select class="gc-inline-onoff" data-row="{index}" '
                f'aria-label="{html.escape(str(record.get("이름") or ""), quote=True)} ON/OFF" '
                f'style="font-size:11px;font-weight:800;border:1px solid #ddd;border-radius:8px;'
                f'padding:2px 5px;background:{"#E4F6DC" if status.startswith("ON") else "#EFEEE8"};margin-right:6px">'
@@ -17792,31 +17794,45 @@ def _gc_status_table_body(card, recs, label, height, ti):
     if not (isinstance(event, dict) and event.get("nonce") != st.session_state.get(f"gc_status_event_{ti}")):
         return
     st.session_state[f"gc_status_event_{ti}"] = event.get("nonce")
-    index, status = event.get("row"), event.get("status")
-    if not (isinstance(index, int) and 0 <= index < len(recs) and status in ("ON", "OFF")
-            and event.get("identity") == [str(recs[index].get("이름") or ""),
-                                          str(recs[index].get("타겟팅") or ""),
-                                          str(recs[index].get("_status_campaign") or "")]):
+    status = event.get("status")
+    if status not in ("ON", "OFF"):
         return
-    record = recs[index]
-    campaign = str(record.get("_status_campaign") or "")
-    if not campaign:
+    # 한 줄(row) 또는 여러 줄(rows, 선택 상자로 한 번에) — 둘 다 같은 방식으로 저장한다
+    if isinstance(event.get("rows"), list):
+        pairs = list(zip(event.get("rows") or [], event.get("identities") or []))
+    else:
+        pairs = [(event.get("row"), event.get("identity"))]
+
+    def _ident(r):
+        return [str(r.get("이름") or ""), str(r.get("타겟팅") or ""), str(r.get("_status_campaign") or "")]
+    _now = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
+    rows_out, keys_out, skipped = [], [], 0
+    for index, ident in pairs:
+        if not (isinstance(index, int) and 0 <= index < len(recs) and ident == _ident(recs[index])):
+            skipped += 1
+            continue
+        record = recs[index]
+        campaign = str(record.get("_status_campaign") or "")
+        if not campaign:
+            skipped += 1
+            continue
+        target_key = _gc_manual_target_key(campaign, record.get("타겟팅") or "")
+        rows_out.append(dict(channel=label, creative=record.get("이름"),
+                             target=target_key, status=status, updated_at=_now))
+        keys_out.append((label, _creative_image_key(str(record.get("이름") or "")), target_key))
+    if not rows_out:
         st.warning("캠페인이 합쳐졌거나 미확인인 행입니다. 캠페인별 행에서 상태를 선택해주세요.")
         return
-    target_key = _gc_manual_target_key(campaign, record.get("타겟팅") or "")
-    _now = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
-    frame = pd.DataFrame([dict(channel=label, creative=record.get("이름"),
-                               target=target_key, status=status, updated_at=_now)])
+    frame = pd.DataFrame(rows_out).drop_duplicates(["channel", "creative", "target"], keep="last")
     if save_table("creative_status_manual", frame, "channel,creative,target", "소재 옆 ON/OFF 선택"):
         _ov = dict(st.session_state.get("gc_manual_overlay") or {})
-        _ov[(label, _creative_image_key(str(record.get("이름") or "")),
-             target_key)] = (status, _now[:10])
+        for k in keys_out:
+            _ov[k] = (status, _now[:10])
         st.session_state["gc_manual_overlay"] = _ov
-        st.toast(f"{record.get('이름')} → {status} 저장")
-        # 화면 전체를 다시 그리지 않는다(예전엔 저장소 캐시를 통째로 비우고 앱 전체를
-        # 재실행해서 한 번 바꿀 때마다 수십 초 걸렸다). 표 안 ON/OFF·필터 개수는 브라우저에서
-        # 바로 바뀌고, 판정·요약·엑셀은 다음에 화면이 새로 그려질 때(필터·탭 변경 등)
-        # 이번 세션 값(gc_manual_overlay)으로 반영된다.
+        _who = rows_out[0]["creative"] if len(rows_out) == 1 else f"{len(rows_out)}개 소재"
+        st.toast(f"{_who} → {status} 저장" + (f" (캠페인 미확인 {skipped}개 제외)" if skipped else ""))
+        # 화면 전체를 다시 그리지 않는다 — 표 안 ON/OFF·개수는 브라우저에서 바로 바뀌고,
+        # 판정·요약·엑셀은 다음에 화면이 새로 그려질 때 이번 세션 값으로 반영된다.
     else:
         st.error("ON/OFF 저장에 실패했습니다. 저장소 연결과 creative_status_manual 테이블을 확인해주세요.")
 
@@ -17858,7 +17874,7 @@ function patchNode(oldNode,newNode){
 }
 window.addEventListener('message',function(event){
  if(event.data.type!=='streamlit:render')return;
- var args=event.data.args, root=document.getElementById('root');
+ var args=event.data.args, root=document.getElementById('root'); window.__gcArgs=args;
  if(lastHtml===args.html){fitSoon();return;}
  var template=document.createElement('template');template.innerHTML=args.html;
  var next=Array.from(template.content.childNodes);
@@ -19714,6 +19730,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                              and len(recs) == len(body))
             if _inline_onoff:
                 body = [_gc_inline_onoff_row(h, i, recs[i]) for i, h in enumerate(body)]
+                # 여러 소재 한 번에 ON/OFF — ON/OFF 칸 맨 앞에 선택 상자(머리글은 전체 선택)
+                th = th.replace('<th class="">ON/OFF<span',
+                                '<th class="gc-st-th"><input type="checkbox" class="gc-chk-all" '
+                                'aria-label="전체 선택">ON/OFF<span', 1)
             table = (f'<table class="fv4-tbl gc-tbl" id="{tid}"><thead><tr>{th}</tr></thead>'
                      f'<tbody>{sum_html}{"".join(body)}</tbody></table>')
 
@@ -19731,7 +19751,22 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 + '<style>.gc-table-scroll{width:100%;overflow-x:auto;box-sizing:border-box;} '
                 '.gc-table-scroll .gc-tbl{min-width:1150px;width:100%;table-layout:auto;} '
                 '.gc-table-scroll th,.gc-table-scroll td{box-sizing:border-box;} '
-                '.gc-table-scroll .gc-img img{object-fit:cover;}</style>'
+                '.gc-table-scroll .gc-img img{object-fit:cover;}'
+                '.gc-table-scroll{position:relative}'
+                '.gc-tbl td.gc-status,.gc-tbl th.gc-st-th{text-align:left!important;white-space:nowrap;padding-left:18px}'
+                '.gc-chk,.gc-chk-all{width:17px;height:17px;margin:0 12px 0 0;vertical-align:middle;'
+                'cursor:pointer;accent-color:#2C5AA0}'
+                '.gc-bulk{position:absolute;z-index:5;display:none;align-items:center;gap:8px;'
+                'padding:8px 10px 8px 14px;background:#fff;border:1px solid #D9D3C3;border-radius:12px;'
+                'box-shadow:0 8px 24px rgba(20,24,31,.16);font-family:inherit}'
+                '.gc-bulk .n{font-size:13px;font-weight:800;color:#fff;background:#2C5AA0;'
+                'padding:5px 10px;border-radius:8px;margin-right:4px;white-space:nowrap}'
+                '.gc-bulk button{height:34px;padding:0 16px;border-radius:9px;border:1.5px solid #D9D3C3;'
+                'background:#fff;font-size:13.5px;font-weight:800;cursor:pointer;font-family:inherit}'
+                '.gc-bulk button.on{border-color:#2C7A3C;color:#2C7A3C}'
+                '.gc-bulk button.off{border-color:#8A8A7C;color:#55554A}'
+                '.gc-bulk button.x{border:none;color:#8A8A7C;font-weight:700;padding:0 8px}'
+                '.gc-bulk button:hover{transform:translateY(-1px)}</style>'
                 + '<div class="fv4-wrap"><div class="fv4-card">' 
                 # 배지에는 '소재별'처럼 이미 아는 말 대신 **지금 무엇을 보고 있는지**를 적는다.
                 + (f'<span class="fv4-badge-dark">{view_lbl}</span>'
@@ -19780,7 +19815,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                              for k, t, c in (("all", "전체", "#14181F"), ("keep", "유지", "#2C5AA0"),
                                              ("up", "증액", "#2C7A3C"), ("off", "OFF 권장", "#C0273A")))
                    + '</div></div>' if level == "소재" else '')
-                + '<div class="gc-table-scroll">' + table + '</div>' + '</div></div>'
+                + '<div class="gc-table-scroll">'
+                + ('<div class="gc-bulk"><span class="n">0개 선택됨</span>'
+                   '<button type="button" class="on" data-bulk="ON">ON</button>'
+                   '<button type="button" class="off" data-bulk="OFF">OFF</button>'
+                   '<button type="button" class="x" data-bulk="">선택 해제</button></div>'
+                   if _inline_onoff else '')
+                + table + '</div>' + '</div></div>'
                 + """
 <script>
 (function(){
@@ -19839,6 +19880,38 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     // 표 안에서 ON/OFF를 바꾸면 개수·필터를 다시 맞춘다
     t.onchange=function(e){if(e.target&&e.target.classList&&e.target.classList.contains('gc-inline-onoff')){setTimeout(function(){counts();apply();},0);}};
     counts(); apply();
+    window.__gcRefresh=function(){counts();apply();};
+    // ── 여러 소재 한 번에 ON/OFF ── 선택 상자를 누르면 그 줄 옆에 막대가 뜬다
+    (function(){
+      var bar=document.querySelector('.gc-bulk'); if(!bar) return;
+      var all=t.querySelector('.gc-chk-all'), box=bar.parentNode;
+      function chks(){return Array.prototype.slice.call(t.querySelectorAll('.gc-chk'));}
+      function sel(){return chks().filter(function(c){return c.checked&&c.closest('tr').style.display!=='none';});}
+      function place(anchor){var s=sel(); bar.querySelector('.n').textContent=s.length+'개 선택됨';
+        if(!s.length){bar.style.display='none'; if(all) all.checked=false; return;}
+        bar.style.display='flex';
+        var a=anchor&&anchor.checked?anchor:s[s.length-1], td=a.closest('td'), tr=a.closest('tr');
+        var br=box.getBoundingClientRect(), cr=td.getBoundingClientRect(), rr=tr.getBoundingClientRect();
+        bar.style.top=(rr.bottom-br.top+box.scrollTop-8)+'px';
+        var w=bar.offsetWidth||330, L=cr.left-br.left+box.scrollLeft, maxL=box.scrollWidth-w-8;
+        bar.style.left=Math.max(0,Math.min(L,maxL))+'px';}
+      chks().forEach(function(c){c.onclick=function(e){e.stopPropagation();}; c.onchange=function(){place(c);};});
+      if(all){all.onclick=function(e){e.stopPropagation();};
+        all.onchange=function(){chks().forEach(function(c){if(c.closest('tr').style.display!=='none')c.checked=all.checked;});
+          place(null); if(all.checked){bar.style.top='4px';}};}
+      bar.querySelectorAll('[data-bulk]').forEach(function(b){b.onclick=function(){
+        var v=b.getAttribute('data-bulk'), s=sel();
+        if(v&&s.length){var rows=[];
+          s.forEach(function(c){var tr=c.closest('tr'), el=tr.querySelector('select.gc-inline-onoff'); if(!el) return;
+            var r=Number(el.dataset.row); rows.push(r);
+            el.value=v; el.style.background=(v==='ON'?'#E4F6DC':'#EFEEE8');
+            var td=el.closest('td'), k=v==='ON'?'3':'0'; td.setAttribute('data-o',k); td.setAttribute('data-v',k);});
+          var A=window.__gcArgs||{}, ids=A.identities||[];
+          if(rows.length&&window.send) send('streamlit:setComponentValue',{value:{rows:rows,
+            identities:rows.map(function(r){return ids[r];}),status:v,nonce:Date.now()+'-'+Math.random()},dataType:'json'});}
+        chks().forEach(function(c){c.checked=false;}); if(all) all.checked=false; place(null);
+        if(window.__gcRefresh) window.__gcRefresh();};});
+    })();
   })();
   var ths=t.tHead.rows[0].cells, st={i:-1,k:'',asc:false};
   function oo(c){var s=c.querySelector('select.gc-inline-onoff');
@@ -19854,7 +19927,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
   for(var i=0;i<ths.length;i++){(function(i){
     ths[i].style.cursor='pointer';
     ths[i].onclick=function(ev){
-      if(ev && ev.target && ev.target.closest('select'))return;
+      if(ev && ev.target && (ev.target.closest('select')||ev.target.closest('input')))return;
       var kel=ev&&ev.target&&ev.target.closest?ev.target.closest('[data-k]'):null;
       var k=kel?kel.getAttribute('data-k'):'';
       var asc=(st.i===i)?!st.asc:false; st={i:i,k:k,asc:asc};
