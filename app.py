@@ -19110,10 +19110,52 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 return {"target": str(v.get("_adset") or ""), "campaign": v.get("campaign"),
                         "creative": v.get("name") or k[1]}
 
+            # 실적 0인 광고그룹(매체 관리자엔 있는데 이 기간 노출 0)을 미리 모아둔다 —
+            # 아래 '빈 줄 제거'에서 같이 빠지면 매체 관리자 목록과 달라 보인다.
+            _zero_groups = []
+            for _zk, _zv in media_map.items():
+                if _zk[0] not in ch_keep:
+                    continue
+                _tvs = list((_zv.get("_by_target") or {}).values())
+                if not _tvs:
+                    # 광고그룹 단위로 이미 쪼개진 키('소재__캠페인\x1f광고그룹')
+                    _ad0 = str(_zv.get("_adset") or "").strip()
+                    if not _ad0 and "\x1f" in str(_zk[1]):
+                        _ad0 = _creative_adset_label(str(_zk[1]).split("\x1f", 1)[1])
+                    _tvs = [dict(_zv, campaign=_zv.get("campaign"), adset=_ad0)]
+                for _tv in _tvs:
+                    if any(float(_tv.get(f, 0) or 0) for f in ("impressions", "clicks", "cost")):
+                        continue
+                    _zero_groups.append((_zk, _zv, str(_tv.get("campaign") or "").strip(),
+                                         str(_tv.get("adset") or "").strip()))
             # Remove truly empty rows before calculating buttons, totals and exports.
             if not rows.empty:
                 rows = rows[rows.apply(lambda r: _gc_has_performance(r, r.get("_media")), axis=1)].copy()
             _left_all = [(k, v) for k, v in _left_all if _gc_has_performance(media=v)]
+            # 매체 관리자와 같게 — 실적 0인 소재·광고그룹도 한 줄씩 보여준다(이미 보이는 건 빼고).
+            if _zero_groups:
+                def _zid(name, camp, ad):
+                    return (_creative_image_key(str(name or "")), _gc_tgt_norm(camp), _gc_tgt_norm(ad))
+                _shown = set()
+                for _, _r in rows.iterrows():
+                    _m0 = _r.get("_media") if isinstance(_r.get("_media"), dict) else {}
+                    _shown.add(_zid(_m0.get("name") or _r.get("creative"),
+                                    _m0.get("campaign") or _r.get("campaign"),
+                                    _m0.get("_adset") or _r.get("target")))
+                for _k0, _v0 in _left_all:
+                    _shown.add(_zid(_v0.get("name") or _k0[1], _v0.get("campaign"), _v0.get("_adset")))
+                for _zk, _zv, _zc, _za in _zero_groups:
+                    _id = _zid(_zv.get("name") or _zk[1], _zc, _za)
+                    if _id in _shown:
+                        continue
+                    _shown.add(_id)
+                    _left_all.append((_zk, dict(
+                        channel=_zv.get("channel"), name=_zv.get("name"), src=_zv.get("src"),
+                        campaign=_zc, campaigns=[_zc] if _zc else [], _adset=_za,
+                        impressions=0.0, clicks=0.0, cost=0.0, media_conv=0.0, media_rev=0.0,
+                        _by_campaign={_zc: dict(impressions=0.0, clicks=0.0, cost=0.0,
+                                                media_conv=0.0, media_rev=0.0)} if _zc else {},
+                        _zero_group=True)))
             if not rows.empty:
                 rows["_seg"] = [_gc_target_group_m(r) for _, r in rows.iterrows()]
                 rows["_item"] = [_gc_item_group(r) for _, r in rows.iterrows()]
