@@ -16959,7 +16959,10 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
                 hit = manual.get(k + (tgt0,)) or manual.get(k + ("",))
             # API로 상태를 받는 매체(메타·구글 등)는 직접 바꾼 값을 **그날만** 쓴다.
             # 다음 날부터는 매체에서 긁어온 실제 상태가 다시 기준이 된다.
-            if hit and ent and str(hit[1] or "")[:10] < _today:
+            # API로 실제 상태를 받는 매체(메타·구글·크리테오)는 **항상 매체 상태가 기준**이다.
+            # 대시보드에서 바꾼 값은 매체에 반영되지 않으므로, 실수로 바꿔도 화면이 매체와
+            # 어긋나지 않게 무시한다(직접 체크는 API가 없는 GFA 등에서만 쓴다).
+            if hit and (ent or (status_map or {}).get(("__ads__", tab))):
                 continue
             if hit:
                 return hit[0], hit[0] == "ON", f"직접 체크 {hit[1]}"
