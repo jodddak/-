@@ -15898,12 +15898,16 @@ def _gc_pick_version_part(parts, original):
                 or gcamp.endswith("_" + _gc_tgt_norm(parts[i].get("campaign")))]
         if same:
             idx = same
+        else:
+            return None
+    exact_target = [i for i in idx if _gc_tgt_norm(parts[i].get("adset")) == tgt and tgt]
+    if len(exact_target) == 1:
+        return exact_target[0]
     bases = {info[i][0] for i in idx}
     if len(bases) > 1:                      # 기본 이름이 다르면 GA 타겟과 같은 쪽만
         idx = [i for i in idx if info[i][0] == tgt] or [i for i in idx if tgt and tgt in info[i][0]]
-        pass
         if not idx:
-            idx = list(range(len(parts)))
+            return None
     if len(idx) == 1:
         return idx[0]
     def vdate(v):
@@ -15919,17 +15923,8 @@ def _gc_pick_version_part(parts, original):
         exact = [i for d, i in dated if d == cdate]
         if len(exact) == 1:
             return exact[0]
-        older = sorted([(d, i) for d, i in dated if d <= cdate])
-        if older:
-            return older[-1][1]
-    prev = [i for i in idx if info[i][1] == "이전"]
-    if len(prev) == 1:
-        return prev[0]
-    # 그래도 못 고르면(같은 광고그룹 이름이 여러 캠페인에 있고 GA 링크도 양쪽에서 들어온 경우)
-    # 광고비가 가장 많이 나간 그룹에 붙인다 — '미확인'으로 따로 빼지 않는다.
-    real = [i for i in idx if str(parts[i].get("adset") or "") not in ("", "그룹 미확인")] or idx
-    return max(real, key=lambda i: (float(parts[i].get("cost", 0) or 0),
-                                    float(parts[i].get("impressions", 0) or 0)))
+    # Spend, nearest date and a Previous label do not identify a GA group.
+    return None
 
 
 def _gc_merge_renamed_adsets(ad_creative):
@@ -16028,6 +16023,10 @@ def _gc_google_detail_label(row, campaign_names):
 
 
 def _gc_detail_target_label(row):
+    if row.get("_ga_group_unresolved") == True:
+        original_target = str(row.get("_ga_original_target") or "").strip()
+        if original_target and original_target not in ("(미설정)", "(규칙 외)", "(타겟팅 없음)"):
+            return f"UTM {original_target} (버전 연결 확인)"
     target = str(row.get("target") or "").strip()
     media = row.get("_media")
     # 매체가 붙은 줄은 **광고 관리자의 광고세트 이름**(의류관심타겟_261001)을 먼저 쓴다.
@@ -16428,6 +16427,17 @@ def _gc_add_zero_live_ads(ad_creative, start, end, status_snapshot=None):
         return extra
     return pd.concat([ad_creative, extra[[c for c in extra.columns if c in ad_creative.columns]]],
                      ignore_index=True)
+
+
+def _gc_api_coverage_channels(ad_creative, start, end):
+    if ad_creative is None or ad_creative.empty:
+        return set()
+    frame = ad_creative.copy()
+    days = pd.to_datetime(frame["report_date"], errors="coerce").dt.date
+    mask = days.notna() & (days >= start) & (days <= end)
+    if "source" in frame.columns:
+        mask &= frame["source"].ne("creative_inventory")
+    return set(frame.loc[mask, "channel"].map(_gc_channel).dropna())
 
 
 def _gc_api_by_key(ad_creative: pd.DataFrame, start: date, end: date) -> dict:
@@ -16908,6 +16918,9 @@ def cr_onoff(tab: str, r, media, status_map: dict, last_map: dict, ch_max: dict,
         if any(_creative_image_key(str(a.get("name") or "")) in _nk and _ceq(a.get("campaign"), _camp)
                for a in _ads_all):
             return "OFF", False, "이 광고세트에 지금 없음(매체 API)"
+        return "미확인", None, "이 캠페인·광고세트 상태 연결 미확인"
+    if ent and _camp and _ads_all:
+        return "미확인", None, "캠페인별 광고 상태 연결 미확인"
     if ent:
         tgt = str((r.get("target") if hasattr(r, "get") else "") or "").strip()
         # ① 이 줄에 실제로 붙인 광고세트 이름(정확히 같은 것) → ② 타겟팅과 이름이 같은 것
@@ -17217,6 +17230,7 @@ def _gc_expand_actual_groups(rows):
             if len(campaigns) == 1:
                 row["campaign"] = next(iter(campaigns))
                 row["camp_list"] = [row["campaign"]]
+            row["_ga_original_target"] = original.get("target")
             row["target"] = "GA 그룹 미확인"
             row["_media"] = None
             row["_ga_group_unresolved"] = True
@@ -17497,6 +17511,16 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         # 구매·매출이 어디서 온 값인지. 외부몰만 매체 기준이라 섞어 더하면 안 된다.
         "기준": "매체(GFA)" if _basis else "GA4",
     }
+
+
+def _gc_export_signature(sheets, views, notes, level, start, end):
+    import hashlib
+    import json
+    payload = dict(sheets=sheets, views=views, notes=notes,
+                   level=level, start=str(start), end=str(end))
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                         default=str, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @st.cache_data(ttl=3600, show_spinner=False, max_entries=600)
@@ -17959,7 +17983,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     ROAS는 방문 비중으로 나눈 '추정치'다 — 순위 판단용이지 정산용이 아니다.
     """
     st.markdown(FUNNEL_V4_CSS, unsafe_allow_html=True)
-    st.caption("소재 화면 버전: 2026-10-13 · 캠페인·그룹 정합성 / 현재X 분리")
+    st.caption("소재 화면 버전: 2026-10-14 · 보고서 오류 점검 수정")
     st.markdown(
         '<div class="fv4-wrap"><div class="fv4-eyebrow">CREATIVE · GA4</div>'
         '<div class="fv4-h2">GA 소재별 성과</div></div>', unsafe_allow_html=True)
@@ -18340,9 +18364,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 둘을 소재명으로만 합치면, 리포트에만 있고 API엔 이름이 조금 다른 소재가 남아서
     # 그 매체 광고비가 실제보다 커진다(형이 잡은 메타 84만원 → 104만원).
     # 게다가 리포트는 '당월 누적' 스냅샷이라 기간 개념도 API와 달라서 섞으면 안 된다.
-    _api_channels = {ch for ch, _ in _api_map}
+    _api_channels = (_gc_api_coverage_channels(ad_creative, start, end)
+                     & {ch for ch, _ in _api_map})
     media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
-    media_map.update(_api_map)
+    # Inventory-only rows must not replace a report's real creative metrics.
+    for _media_key, _media_value in _api_map.items():
+        if _media_key[0] in _api_channels or _media_key not in media_map:
+            media_map[_media_key] = _media_value
     if ad_creative is not None and not ad_creative.empty and "source" in ad_creative.columns:
         _legacy_other = ad_creative.copy()
         _legacy_other["_day"] = pd.to_datetime(_legacy_other["report_date"], errors="coerce").dt.date
@@ -19847,11 +19875,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # ── GFA ON/OFF 직접 체크 ── 네이버가 GFA API를 파트너사에만 열어줘서 상태를
             # 못 받는다. 끄는 사람이 여기서 한 번 체크하면 판정·엑셀에 그대로 반영된다.
             if not rows.empty and "_ga_group_unresolved" in rows.columns and rows["_ga_group_unresolved"].fillna(False).any():
-                st.caption("GA 그룹 미확인: UTM에 그룹 날짜·이전 구분이 없어 구매·매출을 특정 광고 그룹에 확정할 수 없는 행입니다. 총합에는 포함하고 임의 배분하지 않습니다.")
+                st.caption("버전 연결 확인: 원래 UTM 타겟은 유지했지만 실제 광고 그룹 후보가 여러 개여서 구매·매출을 한 그룹에 확정하지 않은 행입니다. 합계에는 포함하며 그룹별 광고비와 임의로 연결하지 않습니다.")
             if cmt:
                 st.markdown(cmt, unsafe_allow_html=True)
             # 코멘트 바로 밑 — 채널 성과와 다르면 얼마나·왜 다른지 (접혀 있음)
-            if not _media_basis and label != "TOTAL":
+            if (not _media_basis and label != "TOTAL" and seg == GC_SEG_ALL
+                    and item == GC_ITEM_ALL and detail_target == "전체"
+                    and manager_campaign == "전체"):
                 _gap_panel(label, tot_rev, tot_conv)
             if _inline_onoff:
                 _gc_status_table(card, recs, label, min(14000, 288 + row_h * len(body)), ti)
@@ -19986,8 +20016,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if not export_sheets:
         _render_tools()
         return
-    _sig = (f"{level}|{start}|{end}|{'|'.join(export_sheets)}|"
-            f"{'|'.join(f'{k}={v}' for k, v in export_views.items())}")
+    _sig = _gc_export_signature(export_sheets, export_views, export_notes, level, start, end)
     if st.session_state.get("gc_xlsx_sig") != _sig:
         st.session_state.pop("gc_xlsx", None)      # 기간·단위가 바뀌면 옛 파일은 버린다
     with export_slot:
