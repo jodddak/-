@@ -19328,6 +19328,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                                    _google_campaign_names)
                 return _gc_detail_target_label(_with_current_group_state(dict(
                     target=v.get("_adset") or "", campaign=v.get("campaign") or "")))
+            # 같은 그룹이 'X'와 'X - OFF' 두 버튼으로 갈라지지 않게 — OFF 그룹이 있으면 그쪽으로 합친다
+            # (메타 수트 '의류관심타겟_이전 (신규)'(GA 줄 1개)와 '… - OFF'(8)가 따로 보였다).
+            _raw_row_label, _raw_left_label = _row_label, _detail_left_label
+            _all_raw_labels = (({_raw_row_label(r) for _, r in _detail_pool_rows.iterrows()}
+                                | {_raw_left_label(v, k) for k, v in _left_all})
+                               if label != "TOTAL" else set())
+            _off_alias = {x[:-len(" - OFF")]: x for x in _all_raw_labels if x.endswith(" - OFF")}
+
+            def _row_label(r):
+                _l = _raw_row_label(r)
+                return _off_alias.get(_l, _l)
+
+            def _detail_left_label(v, k):
+                _l = _raw_left_label(v, k)
+                return _off_alias.get(_l, _l)
             if label == "구글":
                 # Explicitly exclude unresolved campaigns from this performance view.
                 if not rows.empty:
