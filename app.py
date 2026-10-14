@@ -19328,26 +19328,42 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                                    _google_campaign_names)
                 return _gc_detail_target_label(_with_current_group_state(dict(
                     target=v.get("_adset") or "", campaign=v.get("campaign") or "")))
-            # 같은 그룹이 'X'와 'X - OFF' 두 버튼으로 갈라지지 않게 — OFF 그룹이 있으면 그쪽으로 합친다
-            # (메타 수트 '의류관심타겟_이전 (신규)'(GA 줄 1개)와 '… - OFF'(8)가 따로 보였다).
+            # 같은 그룹이 'X'와 'X - OFF' 두 버튼으로 갈라지지 않게 합친다.
+            # ON/OFF 판단은 **매체 실적이 붙은 줄(광고세트가 확실한 줄)** 기준이다 — GA만 있는 줄은
+            # 광고세트 상태를 모르므로 따라간다. 매체 줄 중 하나라도 켜진 그룹이면 'X'(켜짐),
+            # 매체 줄이 전부 꺼진 그룹이면 'X - OFF'.
             _raw_row_label, _raw_left_label = _row_label, _detail_left_label
-            _all_raw_labels = (({_raw_row_label(r) for _, r in _detail_pool_rows.iterrows()}
-                                | {_raw_left_label(v, k) for k, v in _left_all})
-                               if label != "TOTAL" else set())
-            _off_alias = {x[:-len(" - OFF")]: x for x in _all_raw_labels if x.endswith(" - OFF")}
-            # 버전 없는 옛 그룹(방문자180일·의류관심타겟·쇼핑관심타겟)은 이름만 바뀐 '_이전'과 같은 그룹
+            _media_labels, _ga_labels = set(), set()
+            if label != "TOTAL":
+                for _, _r0 in _detail_pool_rows.iterrows():
+                    _m0 = _r0.get("_media")
+                    _has_ad = isinstance(_m0, dict) and str(_m0.get("_adset") or "").strip()
+                    (_media_labels if _has_ad else _ga_labels).add(_raw_row_label(_r0))
+                for _k0, _v0 in _left_all:
+                    _media_labels.add(_raw_left_label(_v0, _k0))
+            _all_raw_labels = _media_labels | _ga_labels
+
             def _lbl_key(x):
                 x = re.sub(r"\s*-\s*OFF$", "", str(x))
                 x = re.sub(r"\s*\([^)]*\)\s*$", "", x)
-                return "".join(x.split())
-            _by_key = {_lbl_key(x): x for x in _all_raw_labels}
+                k = "".join(x.split())
+                # 버전 없는 옛 그룹은 이름만 바뀐 '_이전'과 같은 그룹
+                return k + "_이전" if k in ("의류관심타겟", "방문자180일", "쇼핑관심타겟") else k
+            _groups_by_key = {}
             for _x in _all_raw_labels:
-                _k = _lbl_key(_x)
-                if _k in ("의류관심타겟", "방문자180일", "쇼핑관심타겟") and (_k + "_이전") in _by_key:
-                    _tgt = _by_key[_k + "_이전"]
-                    _off_alias[_x] = _off_alias.get(_tgt, _tgt)
-                    if _x.endswith(" - OFF"):
-                        _off_alias[_x[:-len(" - OFF")]] = _off_alias[_x]
+                _groups_by_key.setdefault(_lbl_key(_x), set()).add(_x)
+            _off_alias = {}
+            for _k, _labs in _groups_by_key.items():
+                if len(_labs) < 2:
+                    continue
+                _live_media = [x for x in _labs if x in _media_labels and not x.endswith(" - OFF")]
+                _off_media = [x for x in _labs if x in _media_labels and x.endswith(" - OFF")]
+                _pick = (sorted(_live_media, key=len)[0] if _live_media else
+                         sorted(_off_media, key=len)[0] if _off_media else
+                         sorted(_labs, key=lambda x: (x.endswith(" - OFF"), len(x)))[0])
+                for _x in _labs:
+                    if _x != _pick:
+                        _off_alias[_x] = _pick
 
             def _row_label(r):
                 _l = _raw_row_label(r)
