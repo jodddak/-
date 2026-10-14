@@ -19875,6 +19875,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 + f'{str(m.get("campaign") or "").strip() or ch_k}'
                                 + (f' · {str(m.get("_adset") or "").strip()}'
                                    if str(m.get("_adset") or "").strip() and "," not in str(m.get("_adset"))
+                                   and str(m.get("_adset")).strip() not in str(m.get("campaign") or "")
                                    else "")
                                 + '</span>'),
                         # 광고세트 이름은 GA 줄과 같은 꼴로 앞부분만 보여준다
