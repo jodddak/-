@@ -14536,6 +14536,19 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
                 _lines.append(_bd.round(0).to_string())
                 _cp = _ac.groupby(["_tab", "campaign"])["cost_incl_vat"].sum().round(0)
                 _lines.append(_cp.to_string())
+                _lines.append("COLS " + ", ".join(map(str, _ac.columns)))
+                for _fc in ("source_file", "file_name", "uploaded_at"):
+                    if _fc in _ac.columns:
+                        _k = _ac[_fc].astype(str).str[:16] if _fc == "uploaded_at" else _ac[_fc].astype(str)
+                        _lines.append(f"BY {_fc}\n" + _ac.groupby([_k, "_tab"])["cost_incl_vat"].agg(["sum", "count"]).round(0).to_string())
+                _ac["_al"] = _ac.get("adset", pd.Series("", index=_ac.index)).map(_creative_adset_label)
+                _ac["_raw_ad"] = _ac.get("adset", pd.Series("", index=_ac.index)).astype(str).str[:14]
+                _dk = ["_d", "_tab", "creative", "_al"]
+                _dup = _ac[_ac.duplicated(_dk, keep=False)]
+                _lines.append(f"DUP rows={len(_dup)} cost={_dup['cost_incl_vat'].sum():,.0f}")
+                if not _dup.empty:
+                    _lines.append(_dup.sort_values(_dk)[_dk + ["_raw_ad", "campaign", "cost_incl_vat"]].head(12).to_string())
+                _lines.append("ADSET KEY KIND\n" + _ac.groupby([_ac["_raw_ad"].str[:13], "_tab"])["cost_incl_vat"].sum().round(0).to_string())
             st.code("\n".join(_lines) or "데이터 없음")
         except Exception as _e:
             st.code(f"진단 실패: {_e}")
