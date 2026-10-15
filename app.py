@@ -17704,6 +17704,50 @@ def _gc_expand_actual_groups(rows):
         _best = _gc_pick_version_part(parts, original) if unresolved else None
         if _best is not None:
             unresolved = False
+        # 그래도 못 고르면 **신규/리타겟 캠페인**으로 좁힌다. 애드부스트는 GA utm_campaign이
+        # '신규타겟'/'리타겟'뿐이라 광고그룹(3050남성·3050연령)을 못 가른다 — 예전엔 GA 매출을
+        # 'GA 그룹 미확인' 줄로 떼어내 광고비 줄은 매출 0 → OFF 권장으로 잘못 나왔다.
+        #  · 같은 구분의 그룹이 하나면 그 그룹에 붙이고
+        #  · 여럿이면 그 그룹들을 **한 줄로 합쳐** GA와 같이 둔다(임의 배분 없이).
+        _combine = None
+        if unresolved:
+            _gseg = _gc_seg_of_campaign(original.get("campaign"))
+            if _gseg is None and _gc_is_bare_adboost(original.get("campaign")):
+                _gseg = GC_SEG_NEW
+            _same = [i for i, p in enumerate(parts)
+                     if _gseg and _gc_seg_of_campaign(p.get("campaign")) == _gseg]
+            if not _same and len({_gc_seg_of_campaign(p.get("campaign")) for p in parts}) == 1 \
+                    and _gc_seg_of_campaign(parts[0].get("campaign")):
+                _same = list(range(len(parts)))       # 전부 같은 구분이면 통째로 합친다
+            if len(_same) == 1:
+                _best, unresolved = _same[0], False
+            elif len(_same) > 1:
+                _combine, unresolved = set(_same), False
+        if _combine:
+            _cp = [parts[i] for i in sorted(_combine)]
+            _vals = {f: sum(float(p.get(f, 0) or 0) for p in _cp) for f in _GC_MF}
+            _cps = list(dict.fromkeys(str(p.get("campaign") or "").strip() for p in _cp if p.get("campaign")))
+            _ads = list(dict.fromkeys(str(p.get("adset") or "").strip() for p in _cp if p.get("adset")))
+            _bc = {}
+            for p in _cp:
+                _c = str(p.get("campaign") or "").strip()
+                if _c:
+                    _d = _bc.setdefault(_c, {f: 0.0 for f in _GC_MF})
+                    for f in _GC_MF:
+                        _d[f] += float(p.get(f, 0) or 0)
+            row = original.copy()
+            row["ga_campaign"] = original.get("campaign")
+            _tg = " + ".join(_ads)
+            row["_media"] = dict(media, **_vals, _adset=_tg, campaign=(_cps[0] if len(_cps) == 1 else ""),
+                                 campaigns=_cps, _by_campaign=_bc, _group_parts=None,
+                                 _full_cost=_vals["cost"])
+            row["target"] = _tg or "(타겟팅 없음)"
+            if len(_cps) == 1:
+                row["campaign"] = _cps[0]
+                row["camp_list"] = [_cps[0]]
+            expanded.append(row)
+            parts = [p for i, p in enumerate(parts) if i not in _combine]
+            _best = -1          # 남은 그룹(다른 구분)은 GA 없이 광고비만
         for _pi, part in enumerate(parts):
             row = original.copy()
             row["ga_campaign"] = original.get("campaign")
@@ -17718,7 +17762,7 @@ def _gc_expand_actual_groups(rows):
             if campaign:
                 row["campaign"] = campaign
                 row["camp_list"] = [campaign]
-            if unresolved or (_best is not None and _pi != _best):
+            if unresolved or (_best is not None and (_best == -1 or _pi != _best)):
                 for field in _GC_GA_COLS:
                     if field in row:
                         row[field] = 0.0
@@ -18016,22 +18060,50 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
             _p0 = _p0[1:]
         if _p0 and _p0[0] not in ("캠페인 없음", ""):
             _camp = _p0[0]
+    if not is_total and not _tgt and sub:
+        _p1 = [p.strip() for p in sub.split("·")]
+        if len(_p1) > 1 and (_p1[0] in ("구글", "크리테오") or _p1[0].startswith(("네이버 ", "메타 ("))):
+            _p1 = _p1[1:]
+        if len(_p1) > 1:
+            _tgt = _p1[1]
     _seg = str(_get("_seg", "") or "") or (
         _gc_target_group({"target": _tgt, "campaign": _camp, "creative": name})
         if not is_total else "")
     _item = "" if is_total else (str(_get("_item", "") or "") or _gc_item_group(
         {"creative": name, "campaign": _camp}))
+    # 매체(탭) — TOTAL 시트에서 GFA PC/MO·메타가 같은 이름으로 섞여 구분이 안 되던 것
+    _ch_raw = (media or {}).get("channel") if isinstance(media, dict) else None
+    _ch = "" if is_total else (_gc_channel(_ch_raw or _get("channel", "") or "") or "")
+    if not is_total:
+        if _ch == "크리테오":
+            # 크리테오는 리타겟팅만 돌린다 — 광고세트(다이나믹/스태틱_리텐션)가 타겟팅이다
+            _seg = GC_SEG_RT
+            if _tgt in ("", "(타겟팅 없음)", "(규칙 외)", "(미설정)") and _camp:
+                _tgt = _camp
+        elif "외부몰" in _ch and _seg not in (GC_SEG_NEW, GC_SEG_RT):
+            _seg = "외부몰"
+        if not _tgt:
+            _tgt = "(타겟팅 없음)"
+    _contract = (not is_total) and any(w in _ch for w in ("맨즈탭", "브랜드검색"))
+    if _contract and cost <= 0:
+        # 정액(보장형) 상품은 소재별 광고비가 없다 — '광고비 없음(꺼짐·이름 불일치)'로 읽히면 안 된다
+        label, _why = "정액 계약", "정액(보장형) 상품이라 소재별 광고비가 없습니다 — 매출·구매만 참고"
+        if _seg not in (GC_SEG_NEW, GC_SEG_RT):
+            _seg = "-"
+    _r0 = lambda v: (round(float(v)) if v is not None else v)
     return {
         "이름": "TOTAL" if is_total else name,
+        "매체": _ch,
         "캠페인": "" if is_total else _camp,
         "타겟팅": "" if is_total else _tgt,
         "구분": "" if is_total else _seg,
         "품목": _item,
         "_img": img_url,
-        "노출": imp, "클릭": clk, "CTR(%)": ctr, "CPC": (cost / clk) if clk else 0.0,
-        "광고비(VAT+)": cost, "방문(세션)": ses,
-        "구매": conv, "매출": rev, "객단가": aov,
-        "ROAS(%)": roas, "판정": label, "사유": _why, "경과일": _age,
+        "노출": _r0(imp), "클릭": _r0(clk), "CTR(%)": round(ctr, 2),
+        "CPC": _r0((cost / clk) if clk else 0.0),
+        "광고비(VAT+)": _r0(cost), "방문(세션)": _r0(ses),
+        "구매": round(conv, 1) if conv != round(conv) else _r0(conv), "매출": _r0(rev), "객단가": _r0(aov),
+        "ROAS(%)": (round(roas, 1) if roas is not None else None), "판정": label, "사유": _why, "경과일": _age,
         "ON/OFF": (((media or {}).get("_onoff") or ("",))[0] if not is_total else ""),
         "_status_campaign": _gc_status_campaign(r, media) if not is_total else "",
         # 구매·매출이 어디서 온 값인지. 외부몰만 매체 기준이라 섞어 더하면 안 된다.
@@ -18108,7 +18180,7 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
 
     # 캠페인·타겟팅·구분을 따로 둬야 엑셀에서 필터와 피벗이 된다.
     # (예전엔 'STCO_수트_전환 · 패션관심타겟'을 한 칸에 넣어서 타겟팅별로 못 갈랐다)
-    cols = ["이름", "캠페인", "타겟팅", "구분", "품목"] + (["이미지"] if with_images else []) + [
+    cols = ["이름", "매체", "캠페인", "타겟팅", "구분", "품목"] + (["이미지"] if with_images else []) + [
         "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "방문(세션)",
         "구매", "매출", "객단가", "ROAS(%)", "ON/OFF", "판정", "사유", "경과일", "기준"]
     # CTR·ROAS는 값이 이미 퍼센트 단위(110 = 110%)라 엑셀 기본 '백분율' 서식을 쓰면
@@ -18118,7 +18190,7 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": '0.00"%"', "CPC": '#,##0"원"',
               "광고비(VAT+)": '#,##0"원"', "방문(세션)": "#,##0", "구매": "#,##0",
               "매출": '#,##0"원"', "객단가": '#,##0"원"', "ROAS(%)": '#,##0"%"'}
-    width = {"이름": 30, "캠페인": 32, "타겟팅": 20, "구분": 12, "품목": 12,
+    width = {"이름": 30, "매체": 20, "캠페인": 32, "타겟팅": 20, "구분": 12, "품목": 12,
              "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
              "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "방문(세션)": 11, "구매": 9,
              "매출": 15, "객단가": 12, "ROAS(%)": 11, "ON/OFF": 9, "판정": 14, "사유": 46, "경과일": 8,
@@ -19206,6 +19278,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     tab_labels = (["TOTAL"] if len(_total_keep) >= 2 else []) + list(order)
     # 엑셀 버튼은 표보다 위에 있어야 찾기 쉬운데, 담을 내용은 탭을 다 그려봐야 안다.
     # 자리만 먼저 잡아두고 맨 아래에서 채운다.
+    # 엑셀은 화면 필터(타겟팅·품목·세부 타겟팅)와 상관없이 **전체 소재**로 만든다.
+    # 필터를 건 채 내려받으면 그 탭이 걸러진 몇 줄만 들어갔다(GFA MO = A/B테스트 4줄).
+    # 버튼을 누르면 필터를 잠시 풀고 한 번 다시 그려 전체로 만든 뒤, 원래 필터로 되돌린다.
+    _GC_FILTER_KEYS = ("gc_seg_", "gc_item_", "gc_detail_target_")
+    if st.session_state.get("gc_xlsx_restore") is not None and not st.session_state.get("gc_xlsx_full_pending"):
+        for _k, _v in st.session_state.pop("gc_xlsx_restore").items():
+            st.session_state[_k] = _v
     export_slot = st.container()
     export_sheets = {}
     export_views = {}       # 탭별로 고른 타겟팅·품목 — 엑셀 2행에 적는다
@@ -20769,15 +20848,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     if not export_sheets:
         _render_tools()
         return
-    _sig = _gc_export_signature(export_sheets, export_views, export_notes, level, start, end)
+    # 필터를 바꿔도 같은 기간·단위면 받아둔 파일을 그대로 쓴다(엑셀은 늘 전체 소재라서)
+    _sig = f"{level}|{start}|{end}"
     if st.session_state.get("gc_xlsx_sig") != _sig:
         st.session_state.pop("gc_xlsx", None)      # 기간·단위가 바뀌면 옛 파일은 버린다
+    _full_pending = st.session_state.get("gc_xlsx_full_pending")
     with export_slot:
         _c1, _c2 = st.columns([1.3, 2.7])
         _n_rows = sum(len(v) for v in export_sheets.values())
         _n_imgs = sum(1 for v in export_sheets.values() for r in v if r.get("_img"))
-        if _c1.button(f"📗 엑셀로 내보내기 ({len(export_sheets)}개 매체)",
-                      key="gc_xlsx_make", use_container_width=True):
+        _clicked = _c1.button(f"📗 엑셀로 내보내기 ({len(export_sheets)}개 매체)",
+                              key="gc_xlsx_make", use_container_width=True)
+        if _clicked and _full_pending is None:
+            _saved = {k: v for k, v in st.session_state.items()
+                      if str(k).startswith(_GC_FILTER_KEYS)}
+            _busy = {k: v for k, v in _saved.items() if v not in (None, GC_SEG_ALL, GC_ITEM_ALL, "전체")}
+            if _busy:
+                # 필터가 걸려 있다 — 풀고 한 번 더 그린 다음 거기서 만든다
+                st.session_state["gc_xlsx_full_pending"] = _saved
+                for _k in _saved:
+                    st.session_state.pop(_k, None)
+                st.rerun()
+        if _clicked or _full_pending is not None:
             _bar = _c2.progress(0.0, text="소재 이미지를 받아 줄이는 중…")
             try:
                 st.session_state["gc_xlsx"] = gc_build_excel(
@@ -20792,6 +20884,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 st.error(f"엑셀을 만들지 못했습니다: {_e}")
             finally:
                 _bar.empty()
+            if _full_pending is not None:
+                # 만들었으면 화면 필터를 원래대로 되돌린다
+                st.session_state["gc_xlsx_restore"] = st.session_state.pop("gc_xlsx_full_pending")
+                st.rerun()
         if st.session_state.get("gc_xlsx"):
             _mb = len(st.session_state["gc_xlsx"]) / 1024 / 1024
             _c2.download_button(
@@ -20803,8 +20899,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         else:
             _c2.caption(
                 f"매체별 시트 · 총 {_n_rows:,}줄 · 이미지 {_n_imgs:,}장 "
-                f"(2~3MB · 10~30초) — 지금 보는 **{level}** 단위 "
-                f"**{start}~{end}** 그대로."
+                f"(2~3MB · 10~30초) — **{level}** 단위 · **{start}~{end}** · "
+                f"화면 필터와 상관없이 매체별 전체 소재."
             )
 
     # 진단·설정 패널은 전부 맨 아래에서 그린다.
