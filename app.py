@@ -17999,6 +17999,23 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
             _parts = _parts[1:]
         _camp = _parts[0] if _parts else ""
         _tgt = _parts[1] if len(_parts) > 1 else ""
+    # 캠페인 칸이 비던 문제(타겟팅은 있는데 GA 줄에 캠페인이 없을 때) — 화면처럼 **매체가 준
+    # 실제 캠페인**을 먼저 쓰고, 없으면 화면 아랫줄(캠페인 · 타겟팅)에서 가져온다.
+    if not is_total and isinstance(media, dict):
+        _mc = [str(c).strip() for c in (media.get("campaigns") or []) if str(c or "").strip()]
+        _mc = list(dict.fromkeys(_mc))
+        if len(_mc) == 1:
+            _camp = _mc[0]
+        elif len(_mc) > 1 and not _camp:
+            _camp = " + ".join(_mc[:2]) + (f" 외 {len(_mc) - 2}" if len(_mc) > 2 else "")
+        elif not _camp and media.get("campaign"):
+            _camp = str(media.get("campaign")).split(" · ")[0].strip()
+    if not is_total and not _camp and sub:
+        _p0 = [p.strip() for p in sub.split("·")]
+        if len(_p0) > 1 and (_p0[0] in ("구글", "크리테오") or _p0[0].startswith(("네이버 ", "메타 ("))):
+            _p0 = _p0[1:]
+        if _p0 and _p0[0] not in ("캠페인 없음", ""):
+            _camp = _p0[0]
     _seg = str(_get("_seg", "") or "") or (
         _gc_target_group({"target": _tgt, "campaign": _camp, "creative": name})
         if not is_total else "")
@@ -18075,6 +18092,9 @@ def _gc_safe_sheet(name: str, used: set) -> str:
     return s
 
 
+GC_EXCEL_SHOW_COMMENTS = False
+
+
 def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = True,
                    px: int = 90, progress=None, views: dict = None,
                    notes: dict = None) -> bytes:
@@ -18098,7 +18118,7 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": '0.00"%"', "CPC": '#,##0"원"',
               "광고비(VAT+)": '#,##0"원"', "방문(세션)": "#,##0", "구매": "#,##0",
               "매출": '#,##0"원"', "객단가": '#,##0"원"', "ROAS(%)": '#,##0"%"'}
-    width = {"이름": 30, "캠페인": 22, "타겟팅": 16, "구분": 12, "품목": 12,
+    width = {"이름": 30, "캠페인": 32, "타겟팅": 20, "구분": 12, "품목": 12,
              "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
              "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "방문(세션)": 11, "구매": 9,
              "매출": 15, "객단가": 12, "ROAS(%)": 11, "ON/OFF": 9, "판정": 14, "사유": 46, "경과일": 8,
@@ -18213,7 +18233,8 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
             ws.column_dimensions[get_column_letter(i)].width = width.get(c, 12)
 
         row = 4
-        lines = (notes or {}).get(tab) or []
+        # 📝 코멘트는 당분간 엑셀에서 숨긴다(2026-10-15 요청 — 필요할 때 GC_EXCEL_SHOW_COMMENTS=True)
+        lines = ((notes or {}).get(tab) or []) if GC_EXCEL_SHOW_COMMENTS else []
         has_rule = any(r.get("판정") in CR_ORDER for r in body_recs)
         if lines:
             # ── 📝 코멘트 — 주간보고 '특이사항 및 리뷰'처럼 번호 매긴 문장 ──
