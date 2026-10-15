@@ -17347,9 +17347,12 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
             camps = (rows["campaign"].tolist() if "campaign" in rows.columns else [""] * len(rows))
 
             def _camp_ok(i, a):
-                gc = _gc_tgt_norm(camps[i])
+                # 'A/B테스트'(매체) ↔ 'AB테스트'(UTM)처럼 빗금 표기만 다른 경우도 같은 캠페인으로 본다.
+                # (GFA MO A/B테스트 소재가 GA 줄·매체 줄 두 개로 쪼개져 보였다 — 2026-10-15)
+                gc = _gc_tgt_norm(camps[i]).replace("/", "")
                 mc = bt[a].get("campaign")
-                return bool(gc) and (gc == _gc_tgt_norm(mc) or gc in _gc_tgt_norm(mc)
+                mcn = _gc_tgt_norm(mc).replace("/", "")
+                return bool(gc) and (gc == mcn or gc in mcn
                                      or str(camps[i]).strip().lower() in _gc_camp_parts(mc))
 
             # 타겟팅 이름이 같은 GA 줄이 몇 개인지 먼저 센다.
