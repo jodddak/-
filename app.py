@@ -15736,6 +15736,13 @@ _GC_NEW_WORDS = ("관심", "유사", "신규", "lookalike", "prospect", "broad",
 GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT = "TOTAL", "신규타겟팅", "리타겟팅"
 
 
+# 애드부스트 — utm_campaign이 그냥 '애드부스트'(신규/리타겟 표시 없음)인 줄은 **신규**다.
+# (2026-10-15 사용자 확인: Naver / GFA_애드부스트 · 캠페인 애드부스트 · 콘텐츠 애드부스트 = 신규)
+# 고정 규칙 — 업데이트해도 지우지 말 것.
+def _gc_is_bare_adboost(campaign) -> bool:
+    return str(campaign or "").strip().casefold() in ("애드부스트", "adboost", "advoost")
+
+
 def _gc_target_group(row) -> str:
     """이 줄이 신규 발굴인지 리타겟팅인지. 못 가리면 '기타'(TOTAL에서만 보인다)."""
     campaign = str(row.get("campaign") or "").strip()
@@ -15745,6 +15752,8 @@ def _gc_target_group(row) -> str:
     if any(w in blob for w in _GC_RT_WORDS):
         return GC_SEG_RT
     if any(w in blob for w in _GC_NEW_WORDS):
+        return GC_SEG_NEW
+    if _gc_is_bare_adboost(campaign):
         return GC_SEG_NEW
     return "기타"
 
@@ -15778,6 +15787,8 @@ def _gc_seg_of_campaign(c):
         return GC_SEG_RT if any(w in s for w in _GC_RT_WORDS) else GC_SEG_NEW
     rt = any(w in s for w in _GC_RT_WORDS)
     nw = any(w in s for w in _GC_NEW_WORDS)
+    if not rt and not nw and _gc_is_bare_adboost(s):
+        return GC_SEG_NEW
     if rt and not nw:
         return GC_SEG_RT
     if nw and not rt:
