@@ -13464,6 +13464,77 @@ CP_SEG_MEDIA = {
 }
 
 
+# 신규/리타겟 말고 다른 기준으로 펼쳐 볼 매체 — (버튼 이름, ((하위 줄 이름, 찾을 단어들), ...))
+# 크리테오는 리타겟팅만 돌려서, 다이나믹(상품 피드) / 스태틱(배너) 묶음별 효율을 본다.
+#  · 광고비·노출·클릭 = 크리테오 API 광고세트(AdSet) 단위 비중
+#  · GA 구매·매출 = utm_campaign(다이나믹_리텐션 / 스태틱_리텐션)
+CP_SEG_CUSTOM = {
+    "크리테오": ("다이나믹/스태틱", (("다이나믹", ("다이나믹", "dynamic")),
+                                  ("스태틱", ("스태틱", "static")))),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_criteo_adset_totals(start: date, end: date) -> dict:
+    """크리테오 광고세트(AdSet)별 기간 합계. {'다이나믹_리텐션': {'impressions':..,'clicks':..,'cost_incl_vat':..}}
+    소재(Ad) 데이터에는 묶음 이름이 없어서 채널 성과의 다이나믹/스태틱 비중은 여기서 받는다."""
+    cfg = _secrets_section("criteo")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return {}
+    try:
+        token = _criteo_token(cfg)
+    except Exception:
+        return {}
+    adv = str(cfg.get("advertiser_id", "") or "").strip()
+    vers = ([str(cfg["api_version"]).strip()] if cfg.get("api_version") else []) \
+        + CRITEO_VERSION_CANDIDATES
+    for ver in vers:
+        try:
+            adv_ids = adv or _criteo_advertiser_ids(token, ver)
+        except Exception:
+            continue
+        if not adv_ids:
+            continue
+        for dim in ("AdSet", "Adset"):
+            r = _criteo_post(f"/{ver}/statistics/report", token, {
+                "advertiserIds": adv_ids,
+                "dimensions": [dim],
+                "metrics": ["AdvertiserCost", "Displays", "Clicks"],
+                "currency": str(cfg.get("currency", "KRW")).strip(),
+                "startDate": str(start), "endDate": str(end), "format": "json",
+            })
+            if r is None or r.status_code >= 400:
+                continue
+            try:
+                payload = r.json()
+            except Exception:
+                continue
+            rows = (payload.get("Rows") or payload.get("rows") or []) \
+                if isinstance(payload, dict) else (payload or [])
+            out = {}
+            for d in rows:
+                if not isinstance(d, dict):
+                    continue
+                n = str(d.get(dim) or d.get(dim.lower()) or "").strip()
+
+                def _f(*ks):
+                    for k in ks:
+                        v = d.get(k)
+                        if v is not None:
+                            try:
+                                return float(str(v).replace(",", ""))
+                            except Exception:
+                                pass
+                    return 0.0
+                o = out.setdefault(n, {"impressions": 0.0, "clicks": 0.0, "cost_incl_vat": 0.0})
+                o["impressions"] += _f("Displays", "displays")
+                o["clicks"] += _f("Clicks", "clicks")
+                o["cost_incl_vat"] += _f("AdvertiserCost", "advertiserCost", "advertisercost") * 1.1
+            if out:
+                return out
+    return {}
+
+
 def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, end: date) -> list:
     """채널 성과 한 줄을 **신규 / 리타겟** 하위 줄로 펼친다(PC/MO 보기와 같은 방식).
 
@@ -13472,19 +13543,44 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
     · GA 구매·매출 → ga_creative_daily의 utm_campaign·utm_content로 가른다.
       못 가르는 줄(타겟 표시 없음)은 '기타'로 따로 보여준다.
     """
+    custom = CP_SEG_CUSTOM.get(media)
     tabs = CP_SEG_MEDIA.get(media)
-    if not tabs:
+    if not tabs and not custom:
         return []
-    labels = (("신규", GC_SEG_NEW), ("리타겟", GC_SEG_RT))
+    if custom:
+        labels = tuple((nm, nm) for nm, _ in custom[1])
 
-    def _seg(target, campaign, creative=""):
-        return _gc_target_group({"target": target, "campaign": campaign, "creative": creative})
+        def _seg(target, campaign, creative=""):
+            blob = f"{target} {campaign} {creative}".lower()
+            hit = [nm for nm, ws in custom[1] if any(w in blob for w in ws)]
+            return hit[0] if len(hit) == 1 else "기타"
+    else:
+        labels = (("신규", GC_SEG_NEW), ("리타겟", GC_SEG_RT))
+
+        def _seg(target, campaign, creative=""):
+            return _gc_target_group({"target": target, "campaign": campaign, "creative": creative})
+    _segs = [sg for _, sg in labels]
+    names = [lbl for lbl, _ in labels]
 
     share = {}
-    try:
-        acd = load_table("ad_creative_daily")
-    except Exception:
-        acd = None
+    acd = None
+    if custom:
+        try:
+            _ast = fetch_criteo_adset_totals(start, end) if media == "크리테오" else {}
+        except Exception:
+            _ast = {}
+        if _ast:
+            for col in ("impressions", "clicks", "cost_incl_vat"):
+                share[col] = {lbl: 0.0 for lbl in names}
+                share[col]["기타"] = 0.0
+                for an, v in _ast.items():
+                    k = _seg(an, "")
+                    share[col][k if k in share[col] else "기타"] += float(v.get(col) or 0)
+    else:
+        try:
+            acd = load_table("ad_creative_daily")
+        except Exception:
+            acd = None
     if acd is not None and not acd.empty and "channel" in acd.columns:
         a = acd.copy()
         a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
@@ -13497,7 +13593,7 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
                          for ad, cp in zip(a.get("adset", ""), a.get("campaign", ""))]
             for col in ("impressions", "clicks", "cost_incl_vat"):
                 share[col] = {lbl: float(a.loc[a["_seg"] == sg, col].sum()) for lbl, sg in labels}
-                share[col]["기타"] = float(a.loc[~a["_seg"].isin([GC_SEG_NEW, GC_SEG_RT]), col].sum())
+                share[col]["기타"] = float(a.loc[~a["_seg"].isin(_segs), col].sum())
 
     ga = {lbl: [0.0, 0.0] for lbl, _ in labels}
     ga_ok = False
@@ -13540,7 +13636,6 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
     if not share and not ga_ok:
         return []
     p_conv, p_rev = float(parent.get("GA구매") or 0), float(parent.get("GA매출") or 0)
-    names = ["신규", "리타겟"]
     rest_conv = max(0.0, p_conv - sum(ga[n][0] for n in names))
     rest_rev = max(0.0, p_rev - sum(ga[n][1] for n in names))
     _etc_media = sum((share.get(c) or {}).get("기타", 0.0) for c in ("impressions", "clicks", "cost_incl_vat"))
@@ -14030,7 +14125,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         st.caption(f"GFA PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
     # 신규/리타겟 하위 줄 — GFA_자사몰 · GFA_애드부스트 · 메타
     _seg_subs = {}
-    for _sm in CP_SEG_MEDIA:
+    for _sm in list(CP_SEG_MEDIA) + list(CP_SEG_CUSTOM):
         try:
             _sp = view[view["매체"] == _sm]
             if not _sp.empty:
@@ -14092,10 +14187,11 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             pace_v = f'<span class="{cls}">{r["예산 소진율"]:.1f}%</span>'
         src = AD_SPEND_SOURCE_LABEL.get(r["_src"], "")
         _has_sub = r["매체"] in _gfa_subs or r["매체"] in _seg_subs
+        _seg_btn = (CP_SEG_CUSTOM.get(r["매체"]) or ("신규/리타겟",))[0]
         # 하위 줄 버튼 — PC/MO 보기 · 신규/리타겟 보기 (누르면 펼침, 다시 누르면 접힘)
         _tog = (('<span class="cp-tog" data-kind="dev">▸ PC/MO 보기</span>'
                  if r["매체"] in _gfa_subs else "")
-                + ('<span class="cp-tog" data-kind="seg">▸ 신규/리타겟 보기</span>'
+                + (f'<span class="cp-tog" data-kind="seg" data-lbl="{_seg_btn}">▸ {_seg_btn} 보기</span>'
                    if r["매체"] in _seg_subs else ""))
         # 출처(네이버 API 등)는 매체명 옆에 한 줄로 붙인다 — 두 줄로 쌓으면 표가 쓸데없이 길어진다
         sub = (f'<span class="cp-src">{src}</span>' if src else "") + \
@@ -14244,7 +14340,8 @@ tr.cp-has-sub:hover td{background:#F4F2EA}
       Array.prototype.forEach.call(all, function(s){ s.style.display = 'none'; });
       Array.prototype.forEach.call(mine, function(s){ s.style.display = open ? '' : 'none'; });
       Array.prototype.forEach.call(tr.querySelectorAll('.cp-tog'), function(o){
-        var k=o.getAttribute('data-kind')||'dev'; o.textContent = LBL[k][(open && k===kind)?1:0]; });
+        var k=o.getAttribute('data-kind')||'dev', on=(open && k===kind), l=o.getAttribute('data-lbl');
+        o.textContent = l ? ((on?'▾ ':'▸ ') + l + (on?' 접기':' 보기')) : LBL[k][on?1:0]; });
       setTimeout(fitNow, 30);
     });
   });
