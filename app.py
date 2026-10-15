@@ -13646,40 +13646,72 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
             _cmax = pd.to_datetime(cre["report_date"], errors="coerce").max().date() if cre is not None and not cre.empty else None
     except Exception:
         pass
-    if (cre is not None and not cre.empty and "source_medium" in cre.columns
-            and "campaign" in cre.columns):
-        c = cre.copy()
-        c["_d"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
-        c = c[(c["_d"] >= start) & (c["_d"] <= end)]
-        if not c.empty:
-            match = _cp_media_matcher(master)
-            _m = [(_ga_media_fix(sm, cp) or match(sm)) for sm, cp in zip(c["source_medium"], c["campaign"])]
-            c = c[[x == media for x in _m]]
+    p_conv, p_rev = float(parent.get("GA구매") or 0), float(parent.get("GA매출") or 0)
+    c_all = [0.0, 0.0]          # 소재 GA 표에서 이 매체로 잡힌 전체(분류 못 한 줄 포함)
+
+    def _ga_split(cre):
+        nonlocal ga_ok
+        out_ga = {lbl: [0.0, 0.0] for lbl, _ in labels}
+        tot = [0.0, 0.0]
+        if (cre is not None and not cre.empty and "source_medium" in cre.columns
+                and "campaign" in cre.columns):
+            c = cre.copy()
+            c["_d"] = pd.to_datetime(c["report_date"], errors="coerce").dt.date
+            c = c[(c["_d"] >= start) & (c["_d"] <= end)]
             if not c.empty:
-                ga_ok = True
-                for col in ("conversions", "revenue"):
-                    c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
-                c["_seg"] = [_seg(cr, cp, cr) for cr, cp in zip(c.get("creative", ""), c["campaign"])]
-                for lbl, sg in labels:
-                    ga[lbl] = [float(c.loc[c["_seg"] == sg, "conversions"].sum()),
-                               float(c.loc[c["_seg"] == sg, "revenue"].sum())]
+                match = _cp_media_matcher(master)
+                _m = [(_ga_media_fix(sm, cp) or match(sm)) for sm, cp in zip(c["source_medium"], c["campaign"])]
+                c = c[[x == media for x in _m]]
+                if not c.empty:
+                    ga_ok = True
+                    for col in ("conversions", "revenue"):
+                        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+                    tot = [float(c["conversions"].sum()), float(c["revenue"].sum())]
+                    c["_seg"] = [_seg(cr, cp, cr) for cr, cp in zip(c.get("creative", ""), c["campaign"])]
+                    for lbl, sg in labels:
+                        out_ga[lbl] = [float(c.loc[c["_seg"] == sg, "conversions"].sum()),
+                                       float(c.loc[c["_seg"] == sg, "revenue"].sum())]
+        return out_ga, tot
+
+    ga, c_all = _ga_split(cre)
+    # GA는 지난 며칠 구매를 나중에 보정한다. 채널 GA 표는 새로 받았는데 소재 GA 표가 캐시에
+    # 옛 값으로 남아 있으면 합이 모자라 'UTM 구분 없음'으로 빠졌다(GFA 8건·653,614원, 10/15).
+    # 소재 GA 합이 채널 합보다 모자라면 한 번 새로 읽는다.
+    if ga_ok and (p_conv - c_all[0] >= 0.5 or p_rev - c_all[1] >= 1):
+        try:
+            _load_table_raw.clear("ga_creative_daily")
+        except Exception:
+            pass
+        try:
+            ga, c_all = _ga_split(load_table("ga_creative_daily"))
+        except Exception:
+            pass
 
     if not share and not ga_ok:
         return []
-    p_conv, p_rev = float(parent.get("GA구매") or 0), float(parent.get("GA매출") or 0)
     rest_conv = max(0.0, p_conv - sum(ga[n][0] for n in names))
     rest_rev = max(0.0, p_rev - sum(ga[n][1] for n in names))
     _etc_media = sum((share.get(c) or {}).get("기타", 0.0) for c in ("impressions", "clicks", "cost_incl_vat"))
     _lag = _cmax is not None and _cmax < end
-    _etc_name = (f"집계 대기({(_cmax + timedelta(days=1)):%m/%d}~)" if _lag and _etc_media < 1
-                 else "UTM 구분 없음")
-    if _etc_media >= 1 or rest_rev >= 1 or rest_conv >= 0.5:
+    _etc_name = "UTM 구분 없음"
+    # 남는 몫을 둘로 가른다 — ① 소재 GA 표엔 있는데 신규/리타겟 표시가 없는 줄(UTM 문제)
+    #                         ② 채널 GA엔 있는데 소재 GA 표엔 아직 없는 몫(집계 대기)
+    _utm_conv = max(0.0, (c_all[0] if ga_ok else 0.0) - sum(ga[n][0] for n in names))
+    _utm_rev = max(0.0, (c_all[1] if ga_ok else 0.0) - sum(ga[n][1] for n in names))
+    _wait_conv = max(0.0, rest_conv - _utm_conv)
+    _wait_rev = max(0.0, rest_rev - _utm_rev)
+    if _etc_media >= 1 or _utm_rev >= 1 or _utm_conv >= 0.5:
         names.append(_etc_name)
-        ga[_etc_name] = [rest_conv, rest_rev]
+        ga[_etc_name] = [_utm_conv, _utm_rev]
         share.setdefault("cost_incl_vat", {})
         for _col in ("impressions", "clicks", "cost_incl_vat"):
             if _col in share and "기타" in share[_col]:
                 share[_col][_etc_name] = share[_col].pop("기타", 0.0)
+    if _wait_rev >= 1 or _wait_conv >= 0.5:
+        _wn = (f"소재 GA 집계 대기({(_cmax + timedelta(days=1)):%m/%d}~)" if _lag and _cmax
+               else "소재 GA 집계 대기")
+        names.append(_wn)
+        ga[_wn] = [_wait_conv, _wait_rev]
     out = []
     for lbl in names:
         rec = {"매체": lbl, "_approx": False}
