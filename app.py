@@ -13495,10 +13495,11 @@ def fetch_criteo_adset_totals(start: date, end: date) -> dict:
             continue
         if not adv_ids:
             continue
-        for dim in ("AdSet", "Adset"):
+        for dims in (["AdSetId", "AdSet"], ["AdSet"], ["AdsetId", "Adset"], ["Adset"]):
+            dim = dims[-1]
             r = _criteo_post(f"/{ver}/statistics/report", token, {
                 "advertiserIds": adv_ids,
-                "dimensions": [dim],
+                "dimensions": dims,
                 "metrics": ["AdvertiserCost", "Displays", "Clicks"],
                 "currency": str(cfg.get("currency", "KRW")).strip(),
                 "startDate": str(start), "endDate": str(end), "format": "json",
@@ -13515,7 +13516,26 @@ def fetch_criteo_adset_totals(start: date, end: date) -> dict:
             for d in rows:
                 if not isinstance(d, dict):
                     continue
-                n = str(d.get(dim) or d.get(dim.lower()) or "").strip()
+                # 응답 키 표기가 흔들린다(AdSet/adSet/Adset) — 'adset'이 들어간 키에서
+                # 숫자가 아닌 값을 이름으로, 숫자 값을 ID로 쓴다. 이름이 없으면 ID→이름 표로 바꾼다.
+                n, i = "", ""
+                for k, v in d.items():
+                    if "adset" not in str(k).lower() or v is None:
+                        continue
+                    vs = str(v).strip()
+                    if vs.isdigit():
+                        i = i or vs
+                    elif vs:
+                        n = n or vs
+                if not n and i:
+                    try:
+                        n = fetch_criteo_id_names().get(i, i)
+                    except Exception:
+                        n = i
+                try:
+                    st.session_state["cp_criteo_adset_keys"] = list(d.keys())
+                except Exception:
+                    pass
 
                 def _f(*ks):
                     for k in ks:
@@ -13569,6 +13589,10 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
             _ast = fetch_criteo_adset_totals(start, end) if media == "크리테오" else {}
         except Exception:
             _ast = {}
+        try:
+            st.session_state[f"cp_seg_names_{media}"] = list(_ast.keys())[:12]
+        except Exception:
+            pass
         if _ast:
             for col in ("impressions", "clicks", "cost_incl_vat"):
                 share[col] = {lbl: 0.0 for lbl in names}
@@ -14132,6 +14156,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 _ss = _cp_seg_split(mst, _sp.iloc[0].to_dict(), _sm, start, end)
                 if _ss:
                     _seg_subs[_sm] = _ss
+                    _cust = CP_SEG_CUSTOM.get(_sm)
+                    if _cust and not any((x.get("비용") or 0) > 0 for x in _ss
+                                         if x["매체"] in [n for n, _ in _cust[1]]):
+                        st.caption(f"⚠️ {_sm} {_cust[0]} 광고비를 못 나눴습니다 — 받은 묶음 이름: "
+                                   f"{st.session_state.get(f'cp_seg_names_{_sm}')} · 응답 키: "
+                                   f"{st.session_state.get('cp_criteo_adset_keys')}")
         except Exception as _e:
             st.caption(f"{_sm} 신규/리타겟 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
 
