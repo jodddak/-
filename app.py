@@ -13549,7 +13549,7 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
         ga[_etc_name] = [rest_conv, rest_rev]
         share.setdefault("cost_incl_vat", {})
         for _col in ("impressions", "clicks", "cost_incl_vat"):
-            if _col in share and _etc_name != "기타" and "기타" in share[_col]:
+            if _col in share and "기타" in share[_col]:
                 share[_col][_etc_name] = share[_col].pop("기타", 0.0)
     out = []
     for lbl in names:
