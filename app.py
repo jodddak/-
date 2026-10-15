@@ -13000,6 +13000,10 @@ CP_CSS = """
 .cp-tbl th:nth-child(1),.cp-tbl td:nth-child(1){width:62px;padding-left:10px;padding-right:4px}
 .cp-tbl th:nth-child(2),.cp-tbl td:nth-child(2){width:auto;
   white-space:nowrap;padding-left:6px}
+/* 매체 칸은 글자 길이만큼만 — 남는 폭은 숫자 칸들이 나눠 갖는다(매체 칸 오른쪽이 텅 비어 보이던 것).
+   합계·선택 합계 줄은 colspan=2라 두 번째 칸이 '노출'이므로 빼고 건다. */
+.cp-tbl th:nth-child(2),.cp-tbl tr:not(.cp-tot):not(.cp-selrow) td:nth-child(2){width:1%;padding-right:28px}
+.cp-tbl th:nth-child(n+3){min-width:72px}
 .cp-src{font-size:12.5px;color:#8A9098;font-weight:500;margin-left:8px}
 .cp-tbl th:nth-child(n+3),.cp-tbl td:nth-child(n+3){padding-left:8px;padding-right:8px}
 .cp-tbl td{padding:12px;text-align:right;border-bottom:1px solid #F3F1EC;white-space:nowrap;
