@@ -14498,6 +14498,48 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
         with st.expander(_lbl, expanded=False):
             _render_cp_notices()
 
+    # ── 진단(임시): GFA 자사몰 광고비 — 채널 성과(ad_spend) vs 소재별(ad_creative) ──
+    with st.expander("🔎 GFA 자사몰 광고비 대조 (진단)", expanded=False):
+        try:
+            _lines = []
+            _sp = ad_spend.copy() if ad_spend is not None else pd.DataFrame()
+            if not _sp.empty:
+                _sp["_d"] = pd.to_datetime(_sp["report_date"], errors="coerce").dt.date
+                _sp = _sp[(_sp["_d"] >= start) & (_sp["_d"] <= end)]
+                _sp = _sp[_sp["channel"].astype(str).str.contains("GFA", case=False)]
+                for (_c, _s), _g in _sp.groupby(["channel", "source"]):
+                    _lines.append(f"SPEND | {_c} | {_s} | days={_g['_d'].nunique()} | "
+                                  f"imp={pd.to_numeric(_g.get('impressions'), errors='coerce').sum():,.0f} | "
+                                  f"clk={pd.to_numeric(_g.get('clicks'), errors='coerce').sum():,.0f} | "
+                                  f"cost={pd.to_numeric(_g['cost_incl_vat'], errors='coerce').sum():,.0f}")
+            _ac = load_table("ad_creative_daily")
+            if _ac is not None and not _ac.empty:
+                _ac = _ac.copy()
+                _ac["_d"] = pd.to_datetime(_ac["report_date"], errors="coerce").dt.date
+                _ac = _ac[(_ac["_d"] >= start) & (_ac["_d"] <= end)]
+                _ac["_tab"] = _ac["channel"].map(_gc_channel)
+                _ac = _ac[_ac["_tab"].isin([GFA_PC_OWN, GFA_MO_OWN])]
+                for _c in ("impressions", "clicks", "cost_incl_vat"):
+                    _ac[_c] = pd.to_numeric(_ac[_c], errors="coerce").fillna(0)
+                _ad = _ac.get("adset", pd.Series("", index=_ac.index)).fillna("").astype(str).str.strip()
+                _ac["_blank"] = _ad.eq("")
+                _ac["_ex"] = (_ac["creative"].map(_google_campaign_excluded).astype(bool)
+                              | _ac.get("campaign", pd.Series("", index=_ac.index)).map(_google_campaign_excluded).astype(bool))
+                for (_t, _c, _s), _g in _ac.groupby(["_tab", "channel", "source"]):
+                    _lines.append(f"CRE | {_t} | {_c} | {_s} | rows={len(_g)} days={_g['_d'].nunique()} | "
+                                  f"imp={_g['impressions'].sum():,.0f} | clk={_g['clicks'].sum():,.0f} | "
+                                  f"cost={_g['cost_incl_vat'].sum():,.0f} | blank_adset_cost={_g.loc[_g['_blank'],'cost_incl_vat'].sum():,.0f} | "
+                                  f"excluded_cost={_g.loc[_g['_ex'],'cost_incl_vat'].sum():,.0f}")
+                _bd = _ac.groupby(["_d", "_tab"])["cost_incl_vat"].sum().unstack(fill_value=0)
+                if not _sp.empty:
+                    _bd["SPEND"] = _sp.groupby("_d")["cost_incl_vat"].apply(lambda x: pd.to_numeric(x, errors="coerce").sum())
+                _lines.append(_bd.round(0).to_string())
+                _cp = _ac.groupby(["_tab", "campaign"])["cost_incl_vat"].sum().round(0)
+                _lines.append(_cp.to_string())
+            st.code("\n".join(_lines) or "데이터 없음")
+        except Exception as _e:
+            st.code(f"진단 실패: {_e}")
+
     # 어느 매체에도 안 잡힌 GA 유입을 드러낸다. 조용히 사라지면 합계가 안 맞는 걸 눈치채기 어렵다.
     un = ga_map.get("_미매칭", {})
     if un.get("rev", 0) > 0 or un.get("conv", 0) > 0:
