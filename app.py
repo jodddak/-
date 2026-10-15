@@ -14133,8 +14133,11 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # ── 표 ───────────────────────────────────────────────
     heads = ["구분", "매체", "노출", "클릭", "CTR", "CPC", "총비용(VAT 포함)",
              "GA 구매", "GA 매출", "GA ROAS", "월 예산", "예산 소진율"]
+    # 맨 앞 '구분' 칸에 전체 선택 상자 — 매체를 골라 그 매체들만 합쳐 보는 용도(소재별 성과와 같은 방식)
     th = "".join(
-        f'<th class="{"l" if h in ("구분", "매체") else ""}">{h}<span class="cp-ar">&#8645;</span></th>'
+        f'<th class="{"l" if h in ("구분", "매체") else ""}">'
+        + ('<input type="checkbox" class="cp-chkall" title="전체 선택">' if h == "구분" else "")
+        + f'{h}<span class="cp-ar">&#8645;</span></th>'
         for h in heads)
     # GFA_자사몰은 합계 줄 아래에 PC / MO 하위 줄을 붙인다 (예산은 합계 줄에만).
     _gfa_subs, _gfa_approx = {}, False
@@ -14230,7 +14233,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         _tr_cls = ' class="cp-has-sub"' if _has_sub else ""
         body.append(
             f'<tr data-name="{r["매체"]}"{_tr_cls}>'
-            f'<td class="l"><span class="cp-badge {badge}">{r["구분"]}</span></td>'
+            f'<td class="l"><input type="checkbox" class="cp-chk">'
+            f'<span class="cp-badge {badge}">{r["구분"]}</span></td>'
             f'<td class="l m">{r["매체"]}{sub}</td>'
             f'<td data-v="{r["노출"]:.0f}">{_cp_int(r["노출"])}</td>'
             f'<td data-v="{r["클릭"]:.0f}">{_cp_int(r["클릭"])}</td>'
@@ -14252,6 +14256,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     _s_imp, _s_clk = float(view["노출"].sum()), float(view["클릭"].sum())
     s_ctr = f'{_s_clk / _s_imp * 100:.2f}%' if _s_imp > 0 else '<span class="cp-mute">—</span>'
     s_cpc = _cp_won(s_cost / _s_clk) if _s_clk > 0 else '<span class="cp-mute">—</span>'
+    # 선택 합계 줄 — 매체를 하나라도 고르면 합계 줄 바로 위에 나타난다(값은 화면에서 계산)
+    body.append('<tr class="cp-selrow" style="display:none"><td class="l" colspan="2">'
+                '선택 합계 <span class="cp-selcnt"></span></td>'
+                + "".join(f'<td data-k="{k}"></td>' for k in
+                          ("imp", "clk", "ctr", "cpc", "cost", "conv", "rev", "roas", "bud", "pace"))
+                + '</tr>')
     body.append(
         f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
         f'<td>{_cp_int(view["노출"].sum())}</td><td>{_cp_int(view["클릭"].sum())}</td>'
@@ -14281,7 +14291,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     )
     html = (
         CP_CSS
-        + '<div class="cp-wrap"><table class="cp-tbl" id="cptbl"><thead><tr>' + th + '</tr></thead>'
+        + '<div class="cp-wrap">'
+        + '<div class="cp-selbar" id="cpselbar" style="display:none">'
+          '<span class="cp-selinfo"></span>'
+          '<span class="cp-selbtns"><button type="button" class="cp-selonly">선택한 매체만 보기</button>'
+          '<button type="button" class="cp-selclear">선택 해제</button></span></div>'
+        + '<table class="cp-tbl" id="cptbl"><thead><tr>' + th + '</tr></thead>'
         + '<tbody>' + "".join(body) + '</tbody></table>' + note + '</div>'
         + """
 <script>
@@ -14303,14 +14318,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         state = {i:i, asc:asc};
         var tb = tbl.tBodies[0];
         var rows = Array.prototype.slice.call(tb.rows);
-        var total = rows.filter(function(r){return r.classList.contains('cp-tot');});
+        var total = rows.filter(function(r){return r.classList.contains('cp-tot') || r.classList.contains('cp-selrow');});
         // 하위 줄(└ PC / └ MO)은 따로 정렬하지 않고 항상 제 부모 줄 바로 밑에 붙인다.
         var subs = {};
         rows.filter(function(r){return r.classList.contains('cp-subrow');}).forEach(function(r){
           var p = r.getAttribute('data-parent'); (subs[p] = subs[p] || []).push(r);
         });
         rows = rows.filter(function(r){
-          return !r.classList.contains('cp-tot') && !r.classList.contains('cp-subrow');});
+          return !r.classList.contains('cp-tot') && !r.classList.contains('cp-subrow')
+                 && !r.classList.contains('cp-selrow');});
         rows.sort(function(a,b){
           var x=val(a,i), y=val(b,i);
           if(typeof x==='number' && typeof y==='number'){
@@ -14348,6 +14364,19 @@ tr.cp-has-sub{cursor:pointer}
 tr.cp-has-sub:hover td{background:#F4F2EA}
 .cp-tog{color:#2F6FED;font-weight:600;cursor:pointer;margin-right:10px;white-space:nowrap}
 .cp-tog:hover{text-decoration:underline}
+.cp-tbl th:nth-child(1),.cp-tbl td:nth-child(1){width:90px}
+.cp-chk,.cp-chkall{width:15px;height:15px;margin:0 8px 0 0;vertical-align:middle;cursor:pointer;accent-color:#14181F}
+tr.cp-picked td{background:#F1F4FF}
+tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px solid #C9D6FF}
+.cp-selbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  background:#14181F;color:#FFF;border-radius:12px;padding:12px 16px;margin:0 0 10px;font-size:13.5px}
+.cp-selinfo b{color:#C6F36B;font-weight:800;margin:0 2px}
+.cp-selinfo .sep{opacity:.35;margin:0 8px}
+.cp-selbtns button{border:0;border-radius:8px;padding:7px 14px;font-weight:700;font-size:13px;cursor:pointer;
+  margin-left:6px;font-family:inherit}
+.cp-selonly{background:#C6F36B;color:#14181F}
+.cp-selonly.on{background:#FFF}
+.cp-selclear{background:#2B313B;color:#FFF}
 </style>
 <script>
 (function(){
@@ -14375,6 +14404,71 @@ tr.cp-has-sub:hover td{background:#F4F2EA}
       setTimeout(fitNow, 30);
     });
   });
+})();
+</script>
+<script>
+(function(){
+  // 매체 선택 상자 — 고른 매체들만 합쳐서 본다(새로고침 없이 화면에서 바로 계산)
+  var tbl=document.getElementById('cptbl'), bar=document.getElementById('cpselbar');
+  if(!tbl||!bar) return;
+  var only=false;
+  function fit(){try{window.parent.postMessage({type:'streamlit:setFrameHeight',
+    height:document.documentElement.scrollHeight+8},'*');}catch(e){}}
+  function mains(){return Array.prototype.slice.call(tbl.tBodies[0].rows).filter(function(r){
+    return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow');});}
+  function num(r,i){var v=parseFloat(r.cells[i].getAttribute('data-v'));return (isNaN(v)||v<0)?0:v;}
+  function won(v){return '\u20A9'+Math.round(v).toLocaleString('ko-KR');}
+  function n0(v){return Math.round(v).toLocaleString('ko-KR');}
+  var DASH='<span class="cp-mute">\u2014</span>';
+  function update(){
+    var rs=mains(), sel=rs.filter(function(r){return r.querySelector('.cp-chk').checked;});
+    rs.forEach(function(r){
+      var on=r.querySelector('.cp-chk').checked;
+      r.classList.toggle('cp-picked',on);
+      var hide = only && sel.length && !on;
+      r.style.display = hide ? 'none' : '';
+      if(hide){tbl.querySelectorAll('tr.cp-subrow[data-parent="'+r.getAttribute('data-name')+'"]')
+        .forEach(function(s){s.style.display='none';});}
+    });
+    var all=tbl.querySelector('.cp-chkall');
+    all.checked = sel.length>0 && sel.length===rs.length;
+    all.indeterminate = sel.length>0 && sel.length<rs.length;
+    var row=tbl.querySelector('tr.cp-selrow');
+    if(!sel.length){bar.style.display='none';row.style.display='none';only=false;
+      bar.querySelector('.cp-selonly').classList.remove('on');
+      bar.querySelector('.cp-selonly').textContent='선택한 매체만 보기';fit();return;}
+    var t={imp:0,clk:0,cost:0,conv:0,rev:0,bud:0};
+    sel.forEach(function(r){t.imp+=num(r,2);t.clk+=num(r,3);t.cost+=num(r,6);
+      t.conv+=num(r,7);t.rev+=num(r,8);t.bud+=num(r,10);});
+    var v={imp:n0(t.imp),clk:n0(t.clk),
+      ctr:t.imp>0?(t.clk/t.imp*100).toFixed(2)+'%':DASH,
+      cpc:t.clk>0?won(t.cost/t.clk):DASH, cost:won(t.cost), conv:n0(t.conv), rev:won(t.rev),
+      roas:t.cost>0?(t.rev/t.cost*100).toLocaleString('ko-KR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%':DASH,
+      bud:t.bud>0?won(t.bud):DASH, pace:t.bud>0?(t.cost/t.bud*100).toFixed(1)+'%':DASH};
+    Array.prototype.forEach.call(row.querySelectorAll('td[data-k]'),function(c){c.innerHTML=v[c.getAttribute('data-k')];});
+    row.querySelector('.cp-selcnt').textContent='('+sel.length+'개 매체)';
+    row.style.display='';
+    var names=sel.map(function(r){return r.getAttribute('data-name');});
+    bar.querySelector('.cp-selinfo').innerHTML='\u2713 <b>'+sel.length+'개</b> 매체 선택'
+      +'<span class="sep">|</span>광고비 <b>'+v.cost+'</b><span class="sep">|</span>GA 매출 <b>'+v.rev
+      +'</b><span class="sep">|</span>ROAS <b>'+v.roas+'</b><span class="sep">|</span>구매 <b>'+v.conv+'</b>건'
+      +'<div style="opacity:.6;font-size:12px;margin-top:4px">'+names.join(' · ')+'</div>';
+    bar.style.display='flex'; fit();
+  }
+  tbl.addEventListener('click',function(e){
+    var t=e.target;
+    if(t.classList&&(t.classList.contains('cp-chk')||t.classList.contains('cp-chkall'))){
+      e.stopPropagation();
+      if(t.classList.contains('cp-chkall')){
+        var on=t.checked; mains().forEach(function(r){r.querySelector('.cp-chk').checked=on;});}
+      update();
+    }
+  },true);
+  bar.querySelector('.cp-selonly').addEventListener('click',function(){
+    only=!only; this.classList.toggle('on',only);
+    this.textContent = only ? '전체 매체 보기' : '선택한 매체만 보기'; update();});
+  bar.querySelector('.cp-selclear').addEventListener('click',function(){
+    mains().forEach(function(r){r.querySelector('.cp-chk').checked=false;}); only=false; update();});
 })();
 </script>
 <script>
