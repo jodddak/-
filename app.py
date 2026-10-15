@@ -13502,6 +13502,20 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
         cre = load_table("ga_creative_daily")
     except Exception:
         cre = None
+    # 소재 GA 표가 채널 GA 표보다 하루 늦게 캐시돼 있으면(아침 동기화 직후 등) 마지막 날
+    # 구매가 통째로 '기타'로 빠졌다(GFA 7건·686,940원). 한 번 새로 읽어 맞춘다.
+    _cmax = None
+    try:
+        _cmax = pd.to_datetime(cre["report_date"], errors="coerce").max().date() if cre is not None and not cre.empty else None
+        if _cmax is not None and _cmax < end:
+            try:
+                _load_table_raw.clear("ga_creative_daily")
+            except Exception:
+                pass
+            cre = load_table("ga_creative_daily")
+            _cmax = pd.to_datetime(cre["report_date"], errors="coerce").max().date() if cre is not None and not cre.empty else None
+    except Exception:
+        pass
     if (cre is not None and not cre.empty and "source_medium" in cre.columns
             and "campaign" in cre.columns):
         c = cre.copy()
@@ -13527,9 +13541,16 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
     rest_conv = max(0.0, p_conv - sum(ga[n][0] for n in names))
     rest_rev = max(0.0, p_rev - sum(ga[n][1] for n in names))
     _etc_media = sum((share.get(c) or {}).get("기타", 0.0) for c in ("impressions", "clicks", "cost_incl_vat"))
+    _lag = _cmax is not None and _cmax < end
+    _etc_name = (f"집계 대기({(_cmax + timedelta(days=1)):%m/%d}~)" if _lag and _etc_media < 1
+                 else "UTM 구분 없음")
     if _etc_media >= 1 or rest_rev >= 1 or rest_conv >= 0.5:
-        names.append("기타")
-        ga["기타"] = [rest_conv, rest_rev]
+        names.append(_etc_name)
+        ga[_etc_name] = [rest_conv, rest_rev]
+        share.setdefault("cost_incl_vat", {})
+        for _col in ("impressions", "clicks", "cost_incl_vat"):
+            if _col in share and _etc_name != "기타" and "기타" in share[_col]:
+                share[_col][_etc_name] = share[_col].pop("기타", 0.0)
     out = []
     for lbl in names:
         rec = {"매체": lbl, "_approx": False}
