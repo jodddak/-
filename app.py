@@ -16656,10 +16656,11 @@ def _gc_detail_target_label(row):
     # 상시 캠페인(…_전환)이 아닌 **행사 캠페인**(STCO_고객감사제 등)은 같은 그룹 이름이어도
     # 따로 버튼을 둔다 — 안 그러면 꺼둔 옛 패션관심타겟과 한 버튼으로 합쳐졌다.
     _ev = ""
-    if campaign.startswith("STCO_") and "전환" not in campaign and "제로라운지" not in campaign and not _gc_is_ab(campaign) and "외부몰" not in campaign \
+    if campaign.startswith("STCO_") and ("전환" not in campaign or "감사제" in campaign or "베스트" in campaign) \
+            and "제로라운지" not in campaign and not _gc_is_ab(campaign) and "외부몰" not in campaign \
             and not campaign.casefold().startswith("pmax") and "애드부스트" not in campaign \
             and "리텐션" not in campaign:
-        _ev = " · " + re.sub(r"^STCO_", "", campaign.split(" · ")[0].strip())
+        _ev = " · " + re.sub(r"_(PC|MO)$", "", re.sub(r"_전환", "", re.sub(r"^STCO_(자사몰_)?", "", campaign.split(" · ")[0].strip())))
     return pretty + (f" ({suffix})" if suffix else "") + _ev + (" - OFF" if historical else "")
 
 
@@ -20092,7 +20093,29 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 따로 정하다 보니(GA 줄·매체 줄·못 붙은 줄) 한 줄이라도 상태를 못 정하면 꺼진 그룹이
             # 'OFF' 없이 나왔다(메타 셔츠 의류관심타겟_이전·방문자180일_이전). 그룹 이름이 광고
             # 목록에 있으면 그 그룹 광고가 하나라도 켜져 있을 때만 켜짐, 아니면 OFF.
+            # GFA는 광고 목록 API가 없다 — 담당자 확인(2026-10-19): GFA PC·MO 자사몰은
+            # **쇼핑관심타겟·방문자180일 두 그룹만 켜짐**, 나머지(_0929·_0930·_261006·_이전·
+            # 패션관심타겟 등)는 꺼짐. 단 고객감사제·A/B테스트 캠페인은 이 규칙에서 뺀다.
+            _lab_camps = {}
+            if label in (GFA_PC_OWN, GFA_MO_OWN):
+                for _, _r0 in _detail_pool_rows.iterrows():
+                    _lab_camps.setdefault(_raw_row_label(_r0), set()).add(
+                        str(_gc_actual_campaign_label(_r0) or "").split(" · ")[0])
+                for _k0, _v0 in _left_all:
+                    _lab_camps.setdefault(_raw_left_label(_v0, _k0), set()).add(
+                        str(_v0.get("campaign") or "").split(" · ")[0])
+            _GFA_ON = {"쇼핑관심타겟", "방문자180일"}
+
             def _ads_state(lab):
+                if label in (GFA_PC_OWN, GFA_MO_OWN):
+                    _base = re.sub(r"\s*-\s*OFF$", "", str(lab))
+                    if " · " in _base:
+                        return None                      # 행사 캠페인 그룹은 규칙 밖
+                    _cs = _lab_camps.get(lab, set())
+                    if any(_gc_is_ab(c) or "감사제" in str(c) for c in _cs):
+                        return None
+                    _base = re.sub(r"\s*\([^)]*\)\s*$", "", _base)
+                    return _gc_tgt_norm(_base) in _GFA_ON
                 if not _ads_lbl:
                     return None
                 base = re.sub(r"\s*-\s*OFF$", "", str(lab))
