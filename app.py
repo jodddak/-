@@ -18747,18 +18747,35 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 한 fetcher가 계정 여러 개를 받는 경우(메타: 자사몰·외부몰·제로라운지)는 계정별 매체도 본다.
     # 예전엔 '메타'(STCO_AD) 날짜만 봐서, 새로 붙인 제로라운지가 한 번도 안 받아졌는데도
     # '메타 최신'으로 보고 자동 동기화를 건너뛰었다.
+    # 캠페인을 꺼둬서 광고비가 안 나간 매체는 소재 데이터가 멈춘 게 정상이다 — '늦음'으로
+    # 띄우지 않는다(구글 10/14~ 일시중지, 메타 외부몰 10/9~ 0원인데 계속 '늦음'으로 떴다).
+    _sp_all = ad_spend if ad_spend is not None else pd.DataFrame()
+    if not _sp_all.empty and {"report_date", "channel", "cost_incl_vat"} <= set(_sp_all.columns):
+        _sp_all = _sp_all.assign(_d=pd.to_datetime(_sp_all["report_date"], errors="coerce").dt.date,
+                                 _k=_sp_all["channel"].map(_v4_canon_channel),
+                                 _c=pd.to_numeric(_sp_all["cost_incl_vat"], errors="coerce").fillna(0))
+
+    def _spent_after(key, d):
+        if _sp_all.empty or "_k" not in _sp_all.columns:
+            return True
+        _m = (_sp_all["_k"] == _v4_canon_channel(key)) & (_sp_all["_d"] > (d or date(2000, 1, 1)))
+        if not _m.any():
+            return False
+        return float(_sp_all.loc[_m, "_c"].sum()) > 0
+
     def _sub_lag(lab):
         for _c in FETCHER_CHANNELS.get(lab, []):
             _k = _v4_canon_channel(_c)
             if _k == _v4_canon_channel(lab):
                 continue
             _d = _media_last.get(_k)
-            if _d is None or _d < _yday - timedelta(days=2):
+            if (_d is None or _d < _yday - timedelta(days=2)) and _spent_after(_k, _d):
                 return _c
         return None
     _sub_missing = {lab: _sub_lag(lab) for lab, _ in AD_CREATIVE_FETCHERS if _sub_lag(lab)}
     _stale = [lab for lab, _ in AD_CREATIVE_FETCHERS
-              if _media_last.get(lab) is None or _media_last[lab] < _yday
+              if ((_media_last.get(lab) is None or _media_last[lab] < _yday)
+                  and _spent_after(lab, _media_last.get(lab)))
               or lab in _sub_missing]
     with c1:
         st.caption(
