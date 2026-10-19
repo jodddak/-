@@ -1600,6 +1600,9 @@ def delete_channel_audience_for_date(as_of_date_value):
         st.sidebar.warning(f"기존 채널×오디언스 스냅샷 삭제 실패(무시하고 계속 진행합니다): {e}")
 
 
+_SAVE_ERRORS = {}      # 표별 마지막 저장 오류(백그라운드 동기화에선 사이드바 메시지가 안 보여서 따로 둔다)
+
+
 def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
     if df is None or df.empty:
         return 0
@@ -1655,8 +1658,13 @@ def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
     except Exception as e:
         # 예: creative_performance처럼 Supabase에 아직 테이블을 안 만든 경우 — 이 테이블만 건너뛰고
         # 나머지 저장(주간/월별/매체 등)은 정상 진행되도록 전체 저장 흐름을 막지 않는다.
-        st.sidebar.error(f"'{TABLES.get(name, name)}' 저장 실패 — Supabase에 해당 테이블이 있는지 확인해주세요. ({e})")
+        _SAVE_ERRORS[name] = str(e)[:400]
+        try:
+            st.sidebar.error(f"'{TABLES.get(name, name)}' 저장 실패 — Supabase에 해당 테이블이 있는지 확인해주세요. ({e})")
+        except Exception:
+            pass
         return 0
+    _SAVE_ERRORS.pop(name, None)
     return len(df)
 
 
@@ -8091,16 +8099,24 @@ def sync_ga4_creative_daily(existing: pd.DataFrame, channel_map: dict, force_ful
         return 0, None, None, f"GA4 조회 실패: {e}"
     if df.empty:
         return 0, start, end, "GA4에서 받아온 소재 데이터가 0행입니다"
-    # 받아온 다음에 지운다 — 조회가 실패했는데 먼저 지워버리면 데이터가 날아간다.
-    # 지우고 넣어야 GA4가 취소·재귀속으로 없앤 옛 행이 화면에서도 사라진다.
-    delete_ga_rows_in_range("ga_creative_daily", start, end)
+    # **먼저 저장하고, 저장이 성공한 다음에** 이 구간의 옛 행(이번 저장보다 먼저 들어온 것)만 지운다.
+    # 예전엔 지우고 저장했는데, 저장이 실패하면 그 구간 소재 GA가 통째로 비어버렸다(2026-10-19).
+    _stamp = datetime.utcnow().isoformat()
     n = save_table("ga_creative_daily", df,
                    "report_date,source_medium,campaign,creative,user_type", "GA4 API")
     if not n:
         return 0, start, end, (
             "GA4에서 데이터는 받았지만 저장에 실패했습니다 — "
-            "ga_creative_daily 테이블이 없을 수 있습니다(배포 SQL 실행 필요)"
+            + (_SAVE_ERRORS.get("ga_creative_daily") or "ga_creative_daily 테이블 확인 필요")
         )
+    try:
+        _cl = get_supabase_client()
+        if _cl is not None:
+            (_cl.table(TABLES["ga_creative_daily"]).delete()
+             .gte("report_date", str(start)).lte("report_date", str(end))
+             .lt("uploaded_at", _stamp).execute())
+    except Exception:
+        pass
     if _deep:
         _ga4_deep_mark("creative")
     return n, start, end, None
