@@ -15572,6 +15572,8 @@ def _gc_image_keys(row) -> list:
         if ymd:
             keys.append(f"{ymd[2:]}_{name}")
             keys.append(f"{ymd}_{name}")
+            if len(ymd) == 8:
+                keys.append(f"{ymd[4:]}_{name}")      # 월일만 쓴 광고명(1014_고객감사제1)
         keys.append(name)
     if raw:
         keys.append(raw)
@@ -16026,6 +16028,14 @@ def _gc_parse_content(v):
             pass
     parts = raw.split("_")
     idx = next((i for i, t in enumerate(parts) if GC_DATE_TOKEN.match(t)), None)
+    _mmdd = None
+    if idx is None:
+        # 6·8자리 날짜가 없을 때만 4자리 월일(MMDD)을 날짜로 본다
+        # (메타 STCO_고객감사제: 방문자180일_1014_고객감사제1 — 매체 광고명도 1014_고객감사제1).
+        for i, t in enumerate(parts):
+            if re.fullmatch(r"\d{4}", t) and 1 <= int(t[:2]) <= 12 and 1 <= int(t[2:]) <= 31:
+                idx, _mmdd = i, t
+                break
     if idx is None or idx == len(parts) - 1:
         # 날짜가 아예 없거나 맨 뒤면 규칙 밖이다 — 억지로 쪼개면 엉뚱한 타겟팅이 생긴다
         return "(규칙 외)", "", raw
@@ -16036,6 +16046,10 @@ def _gc_parse_content(v):
     target = "_".join(parts[:idx]) if idx > 0 else "(타겟팅 없음)"
     ymd = parts[idx]
     name = "_".join(parts[idx + 1:])
+    if _mmdd:
+        _t = kst_today()
+        _y = _t.year if (int(_mmdd[:2]), int(_mmdd[2:])) <= (_t.month, _t.day) else _t.year - 1
+        ymd = f"{_y}{_mmdd}"
     if len(ymd) == 6:
         ymd = f"20{ymd[:2]}-{ymd[2:4]}-{ymd[4:]}"
     else:
