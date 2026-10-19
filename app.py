@@ -19999,6 +19999,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 known_campaigns = {str(a.get("campaign") or "").strip() for a in _ads_lbl}
                 if _active_groups and campaign in known_campaigns and target and target not in ("GA 그룹 미확인", "그룹 미확인", "(타겟팅 없음)"):
                     row["_current_group"] = (campaign, target) in _active_groups
+                elif _ads_lbl and target and target not in ("GA 그룹 미확인", "그룹 미확인", "(타겟팅 없음)"):
+                    # 캠페인 이름이 GA 표기(셔츠_전환)라 관리자 이름과 안 맞아도, 광고 목록에 있는
+                    # 그룹이면 그 그룹의 켜짐/꺼짐을 따른다 — 예전엔 여기서 상태를 못 정해서 꺼진
+                    # '의류관심타겟_이전·방문자180일_이전'이 켜진 그룹처럼(OFF 표시 없이) 보였다.
+                    _tn = _gc_tgt_norm(target)
+                    _cn = _gc_tgt_norm(campaign)
+                    _same = [a for a in _ads_lbl if _gc_tgt_norm(a.get("adset")) == _tn]
+                    _same_c = [a for a in _same if _cn and (_gc_tgt_norm(a.get("campaign")) == _cn
+                               or _gc_tgt_norm(a.get("campaign")).endswith(_cn)
+                               or _cn.endswith(_gc_tgt_norm(a.get("campaign"))))]
+                    _pool = _same_c or _same
+                    if _pool:
+                        row["_current_group"] = any(a.get("on") for a in _pool)
                 elif label == META_OWN_TAB and campaign in ("STCO_수트_전환", "STCO_아우터_전환", "STCO_셔츠_전환") and _gc_tgt_norm(target) == "패션관심타겟":
                     row["_current_group"] = False
                 return row
