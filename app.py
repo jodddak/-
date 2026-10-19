@@ -19995,7 +19995,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 row = dict(row)
                 media = row.get("_media")
                 target = str((media or {}).get("_adset") or row.get("target") or "").strip() if isinstance(media, dict) else str(row.get("target") or "").strip()
-                campaign = _gc_actual_campaign_label(row)
+                # GA에 못 붙은 매체 줄은 campaign 칸이 'STCO_셔츠_전환 · 의류관심타겟_이전'처럼 그룹까지
+                # 붙어 있다 — 그대로 비교하면 관리자 캠페인과 안 맞아 켜짐/꺼짐을 못 정했고, 그 줄의
+                # 'OFF 없는' 버튼 이름이 꺼진 그룹 버튼을 덮어써서 '_이전' 그룹이 켜진 것처럼 보였다.
+                campaign = str(_gc_actual_campaign_label(row) or "").split(" · ")[0].strip()
                 known_campaigns = {str(a.get("campaign") or "").strip() for a in _ads_lbl}
                 if _active_groups and campaign in known_campaigns and target and target not in ("GA 그룹 미확인", "그룹 미확인", "(타겟팅 없음)"):
                     row["_current_group"] = (campaign, target) in _active_groups
@@ -20084,6 +20087,48 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 for _x in _labs:
                     if _x != _pick:
                         _off_alias[_x] = _pick
+
+            # 마지막으로 **광고 목록(API)의 실제 켜짐/꺼짐**으로 버튼 이름을 확정한다. 줄마다 상태를
+            # 따로 정하다 보니(GA 줄·매체 줄·못 붙은 줄) 한 줄이라도 상태를 못 정하면 꺼진 그룹이
+            # 'OFF' 없이 나왔다(메타 셔츠 의류관심타겟_이전·방문자180일_이전). 그룹 이름이 광고
+            # 목록에 있으면 그 그룹 광고가 하나라도 켜져 있을 때만 켜짐, 아니면 OFF.
+            def _ads_state(lab):
+                if not _ads_lbl:
+                    return None
+                base = re.sub(r"\s*-\s*OFF$", "", str(lab))
+                ev = ""
+                if " · " in base:
+                    base, ev = base.split(" · ", 1)
+                base = re.sub(r"\s*\([^)]*\)\s*$", "", base)
+                bn = _gc_tgt_norm(base)
+                evn = _gc_tgt_norm(ev)
+                pool = []
+                for a in _ads_lbl:
+                    cn = _gc_tgt_norm(a.get("campaign"))
+                    if evn:
+                        if evn not in cn:
+                            continue
+                    elif "감사제" in cn or "베스트" in cn:
+                        continue
+                    # 품목을 골랐으면 그 품목 캠페인의 그룹만 본다(셔츠 캠페인의 _이전은 꺼졌는데
+                    # 수트 캠페인의 같은 이름 그룹이 켜져 있으면 셔츠 화면에서도 켜짐으로 보이지 않게)
+                    if item != GC_ITEM_ALL and _gc_item_of_campaign(a.get("campaign")) not in (None, item):
+                        continue
+                    if _gc_tgt_norm(a.get("adset")) == bn:
+                        pool.append(a)
+                if not pool:
+                    return None
+                return any(a.get("on") for a in pool)
+
+            for _x in list(_all_raw_labels) + list(set(_off_alias.values())):
+                _tgt_l = _off_alias.get(_x, _x)
+                _stt = _ads_state(_tgt_l)
+                if _stt is None:
+                    continue
+                _fixed = (_tgt_l if _tgt_l.endswith(" - OFF") else _tgt_l + " - OFF") if not _stt \
+                    else re.sub(r"\s*-\s*OFF$", "", _tgt_l)
+                if _fixed != _x:
+                    _off_alias[_x] = _fixed
 
             def _row_label(r):
                 _l = _raw_row_label(r)
