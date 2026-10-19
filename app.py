@@ -16137,6 +16137,10 @@ def _gc_item_of_campaign(c):
         return None
     if _gc_is_ab(low):
         return GC_ITEM_AB
+    if "감사제" in low:
+        return GC_ITEM_EVENT
+    if "베스트" in low or "best" in low:
+        return GC_ITEM_BEST
     hits = {it for it, ws in _GC_ITEM_WORDS if any(w in low for w in ws)}
     # '수트자켓'처럼 수트 안에 자켓이 들어간 이름은 수트로 본다
     if GC_ITEM_SUIT in hits and GC_ITEM_OUTER in hits and "수트" in low and not any(
@@ -16486,7 +16490,7 @@ def _gc_pick_version_part(parts, original):
                                    float(parts[i].get("cost", 0) or 0)))
 
 
-def _gc_merge_renamed_adsets(ad_creative):
+def _gc_merge_renamed_adsets(ad_creative, status_map=None):
     """메타·GFA 광고세트 개편(2026-10) — 옛 이름(의류관심타겟·방문자180일·쇼핑관심타겟)은
     이름만 바뀌어 '…_이전'이 됐다. 같은 매체·같은 캠페인에 '옛이름_이전'이 있으면 옛 이름으로
     저장된 날짜도 '_이전'으로 합쳐 보여준다(합계는 그대로, 버튼만 하나로)."""
@@ -16500,19 +16504,46 @@ def _gc_merge_renamed_adsets(ad_creative):
     lbl = raw.map(_creative_adset_label)
     norm = lbl.map(_gc_tgt_norm)
     have = {}
-    for k, n_, l_ in zip(zip(ch, camp), norm, lbl):
+    dts = pd.to_datetime(c.get("report_date"), errors="coerce").dt.date
+    _old_days, _old_max = {}, {}
+    for k, n_, l_, d_ in zip(zip(ch, camp), norm, lbl, dts):
         if n_.endswith("_이전"):
             have.setdefault(k, {})[n_[:-3]] = l_.strip()
+            _old_days.setdefault((k, n_[:-3]), set()).add(d_)
+            if d_ is not None and not pd.isna(d_):
+                _old_max[(k, n_[:-3])] = max(_old_max.get((k, n_[:-3]), d_), d_)
     if not have:
         return ad_creative
+    # 옛 그룹을 '_이전'으로 바꾸고 **같은 이름으로 새 그룹을 만든** 경우(메타 셔츠: 의류관심타겟
+    # 10/12 신규)가 있다. 예전엔 옛 이름 줄을 전부 '_이전'으로 몰아서, 새 그룹(켜져 있는 광고)의
+    # 실적이 통째로 '_이전'(꺼짐)에 붙고 켜진 광고는 0으로 보였다. 새 그룹 줄은 남긴다:
+    #  · 광고 목록(API)에 그 이름 그룹 광고가 있으면 그 광고의 생성일 이후
+    #  · '_이전' 줄이 같은 날에도 있으면(동시에 돈 날) 또는 '_이전'의 마지막 날 이후
+    _new_start = {}
+    for a in [x for k_, v_ in (status_map or {}).items() if k_[0] == "__ads__" for x in v_]:
+        _an = _gc_tgt_norm(a.get("adset") or "")
+        if not _an or _an.endswith("_이전"):
+            continue
+        _cd = pd.to_datetime(a.get("created_time"), errors="coerce", utc=True)
+        if pd.isna(_cd):
+            continue
+        _cd = _cd.tz_convert("Asia/Seoul").date()
+        _kk = (str(a.get("campaign") or "").strip(), _an)
+        _new_start[_kk] = min(_new_start.get(_kk, _cd), _cd)
     new = raw.copy()
     changed = False
-    for idx, k, n_, l_, r_ in zip(c.index, zip(ch, camp), norm, lbl, raw):
+    for idx, k, n_, l_, r_, d_ in zip(c.index, zip(ch, camp), norm, lbl, raw, dts):
         if not n_ or n_.endswith("_이전") or r_.startswith(GOOGLE_ASSET_KEY_PREFIX):
             continue
         tgt = have.get(k, {}).get(n_)
         if not tgt:
             continue
+        _ns = _new_start.get((k[1], n_))
+        if d_ is not None and not pd.isna(d_) and (
+                (_ns is not None and d_ >= _ns)
+                or d_ in _old_days.get((k, n_), set())
+                or (_old_max.get((k, n_)) is not None and d_ > _old_max[(k, n_)])):
+            continue                     # 새로 만든 같은 이름 그룹 — 그대로 둔다
         new_l = tgt                      # 지금 광고세트 이름 표기 그대로
         new.at[idx] = (_campaign_adset_key(k[1], new_l) if r_.startswith(CAMPAIGN_ADSET_KEY_PREFIX)
                        else new_l)
@@ -16663,7 +16694,11 @@ def _gc_filter_left(left, seg, item, row_of):
 GC_ITEM_ALL = "전체"
 GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER = "수트", "아우터", "이너(셔츠 등)"
 GC_ITEM_AB = "A/B테스트"
-GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_AB]
+# 행사·기획 캠페인은 소재가 수트든 셔츠든 **캠페인 기준으로** 따로 묶고, 일반 품목(수트·아우터·이너)
+# 성과에서는 뺀다(2026-10-19 요청: STCO_고객감사제·STCO_베스트 / GFA 자사몰_베스트)
+GC_ITEM_EVENT = "고객감사제"
+GC_ITEM_BEST = "베스트"
+GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_AB, GC_ITEM_EVENT, GC_ITEM_BEST]
 
 
 def _gc_is_ab(text) -> bool:
@@ -19091,7 +19126,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     d = d[~_google_rows | _online_pmax].copy()
     ad_creative = _gc_latest_gfa_snapshots(ad_creative)
     ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
-    ad_creative = _gc_merge_renamed_adsets(ad_creative)
+    ad_creative = _gc_merge_renamed_adsets(ad_creative, _status_map)
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
     # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
