@@ -16609,9 +16609,12 @@ def _gc_detail_target_label(row):
     # 버전 없는 '패션관심타겟'은 지금 안 쓰는 그룹이다. 매체 실적이 없는 GA 줄은 캠페인 이름이
     # 비어 있거나 GA 표기라 예전 조건(STCO_자사몰_)에 안 걸려 '패션 관심타겟 (신규)' 버튼이
     # OFF 버튼과 따로 하나 더 생겼다 → 외부몰·A/B만 빼고 모두 OFF 그룹으로 합친다.
+    # 단, 광고 목록에서 **지금 켜져 있는 그룹**(_current_group=True)이면 OFF로 묶지 않는다
+    # (10/14 새로 연 STCO_고객감사제의 패션관심타겟이 'OFF' 버튼으로 들어갔다).
     historical = row.get("_current_group") is False or (
-        norm == "패션관심타겟" and "외부몰" not in campaign
-        and not _gc_is_ab(campaign))
+        row.get("_current_group") is not True
+        and norm == "패션관심타겟" and "외부몰" not in campaign
+        and not _gc_is_ab(campaign) and "감사제" not in campaign)
     # 담당자가 끈 그룹(2026-10-14): GFA PC·MO·메타 수트 캠페인의 쇼핑관심타겟_이전·방문자180일_이전
     if (not historical and "수트" in campaign and "외부몰" not in campaign
             and not _gc_is_ab(campaign)
