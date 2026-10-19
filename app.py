@@ -20405,12 +20405,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # (규칙 외))가 같은 매체에 동시에 있으면 십중팔구 같은 광고다 — 크리테오 다이나믹처럼
             # utm_id에 소재명 대신 숫자나 빈값이 들어간 경우. 합계는 맞지만 줄이 둘로 갈라진다.
             if level == "소재" and leftovers:
-                _noname = rows[rows["cre_name"].isin(["(미설정)"]) | (rows["target"] == "(규칙 외)")]
+                # 이미 광고비가 붙은 줄(크리테오 다이나믹_리텐션처럼 묶음 단위로 맞춰진 줄)은 빼고,
+                # **같은 매체**의 못 붙은 광고비끼리만 짝짓는다. 예전엔 다이나믹_리텐션 45건(이미
+                # 광고비 157만원과 짝 지어짐)을 옛 소재 광고비 1,073원과 같은 광고라고 안내했다.
+                _nn_mask = (rows["cre_name"].isin(["(미설정)"]) | (rows["target"] == "(규칙 외)")) & [
+                    float((m or {}).get("cost", 0) or 0) <= 0 for m in rows["_media"]]
+                _noname = rows[_nn_mask]
                 _nn_conv = float(pd.to_numeric(_noname["conv"], errors="coerce").fillna(0).sum())
                 _nn_rev = float(pd.to_numeric(_noname["rev"], errors="coerce").fillna(0).sum())
-                _lo_cost = sum(float(m.get("cost", 0) or 0) for _, m in leftovers)
-                if _nn_conv > 0 and _lo_cost > 0:
-                    _lo_names = ", ".join(str(m.get("name") or k[1]) for k, m in leftovers[:3])
+                _nn_ch = {_gc_channel(c) for c in _noname.get("channel", pd.Series(dtype=str))}
+                _lo_same = [(k, m) for k, m in leftovers if _gc_channel(m.get("channel") or k[0]) in _nn_ch]
+                _lo_cost = sum(float(m.get("cost", 0) or 0) for _, m in _lo_same)
+                if _nn_conv > 0 and _lo_cost >= 10000:
+                    _lo_names = ", ".join(str(m.get("name") or k[1]) for k, m in
+                                          sorted(_lo_same, key=lambda x: -float(x[1].get("cost", 0) or 0))[:3])
                     notes.append((
                         "info",
                         f"GA에 **소재명 없이 들어온 구매 {_nn_conv:,.0f}건 · {_nn_rev:,.0f}원**과 "
