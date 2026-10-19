@@ -20153,13 +20153,27 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 if _fixed != _x:
                     _off_alias[_x] = _fixed
 
+            def _gfa_fix(_l, _camp):
+                # GFA 자사몰: 줄마다 **그 줄의 캠페인**으로 규칙을 건다(라벨을 여러 캠페인이 같이 쓰면
+                # 묶음 판정이 꼬여 수트 '쇼핑관심타겟_이전'이 OFF 없이 남았다).
+                if label not in (GFA_PC_OWN, GFA_MO_OWN):
+                    return _l
+                _c = str(_camp or "").split(" · ")[0]
+                if _gc_is_ab(_c) or "감사제" in _c:
+                    return _l
+                _b = re.sub(r"\s*-\s*OFF$", "", str(_l))
+                if " · " in _b or _b in ("그룹 미확인", "캠페인 미확인"):
+                    return _l
+                _n = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", _b))
+                return _b if _n in _GFA_ON else _b + " - OFF"
+
             def _row_label(r):
                 _l = _raw_row_label(r)
-                return _off_alias.get(_l, _l)
+                return _gfa_fix(_off_alias.get(_l, _l), _gc_actual_campaign_label(r))
 
             def _detail_left_label(v, k):
                 _l = _raw_left_label(v, k)
-                return _off_alias.get(_l, _l)
+                return _gfa_fix(_off_alias.get(_l, _l), v.get("campaign"))
             if label == "구글":
                 # Explicitly exclude unresolved campaigns from this performance view.
                 if not rows.empty:
