@@ -16622,7 +16622,14 @@ def _gc_detail_target_label(row):
         historical = True
     # 신규/리타겟팅을 못 가르는 그룹(외부몰 N배송상품·일반상품 등)은 '구분 미확인'을 달지 않는다
     # 운영 안 하는 그룹은 ' - OFF'를 붙여 맨 끝 + 회색으로 보인다.
-    return pretty + (f" ({suffix})" if suffix else "") + (" - OFF" if historical else "")
+    # 상시 캠페인(…_전환)이 아닌 **행사 캠페인**(STCO_고객감사제 등)은 같은 그룹 이름이어도
+    # 따로 버튼을 둔다 — 안 그러면 꺼둔 옛 패션관심타겟과 한 버튼으로 합쳐졌다.
+    _ev = ""
+    if campaign.startswith("STCO_") and "전환" not in campaign and "제로라운지" not in campaign and not _gc_is_ab(campaign) and "외부몰" not in campaign \
+            and not campaign.casefold().startswith("pmax") and "애드부스트" not in campaign \
+            and "리텐션" not in campaign:
+        _ev = " · " + re.sub(r"^STCO_", "", campaign)
+    return pretty + (f" ({suffix})" if suffix else "") + _ev + (" - OFF" if historical else "")
 
 
 def _gc_gfa_target_matches(target, choice):
