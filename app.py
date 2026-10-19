@@ -19124,6 +19124,22 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # Google GA scope: session campaign must belong to the online-team PMax family.
     _google_rows = d["_gc_ch"].eq("구글")
     _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
+    # 차이 패널용 — 이 화면에서 뺀 구글 줄(온라인팀 PMax가 아닌 캠페인)의 매출·구매.
+    # 채널 성과(소스/매체 단위)에는 이 줄이 들어 있어서, 안 적어주면 '오류'처럼 보였다.
+    _google_drop = {"rev": 0.0, "conv": 0.0, "camps": []}
+    try:
+        _gd = d[_google_rows & ~_online_pmax]
+        _gd_p = _gd[(pd.to_datetime(_gd["report_date"], errors="coerce").dt.date >= start)
+                    & (pd.to_datetime(_gd["report_date"], errors="coerce").dt.date <= end)]
+        _google_drop["rev"] = float(pd.to_numeric(_gd_p.get("revenue"), errors="coerce").fillna(0).sum())
+        _google_drop["conv"] = float(pd.to_numeric(_gd_p.get("conversions"), errors="coerce").fillna(0).sum())
+        if "revenue" in _gd_p.columns and not _gd_p.empty:
+            _gcs = (_gd_p.assign(_r=pd.to_numeric(_gd_p["revenue"], errors="coerce").fillna(0))
+                    .groupby(_gd_p["campaign"].fillna("(미설정)").astype(str))["_r"].sum()
+                    .sort_values(ascending=False))
+            _google_drop["camps"] = [(c, float(v)) for c, v in _gcs.items() if v > 0][:5]
+    except Exception:
+        pass
     d = d[~_google_rows | _online_pmax].copy()
     ad_creative = _gc_latest_gfa_snapshots(ad_creative)
     ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
@@ -19293,8 +19309,30 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         _cc = float(_chan_conv.get(label, 0) or 0)
         if _cr <= 0:
             return
-        _gap = _cr - tot_rev
+        # 이유를 아는 차이는 먼저 뺀다 — 이게 안 빠져 있어서 '오류'처럼 보였다.
+        #  · 메타 (자사몰): 제로라운지도 같은 소스/매체(Facebook / Facebook_Feed)로 들어와
+        #    채널 성과(소스/매체 단위)에선 자사몰에 합쳐진다. 이 화면은 캠페인으로 갈라 따로 탭.
+        #  · 구글: 이 화면은 온라인팀 PMax만 본다(다른 팀 구글 캠페인은 일부러 뺌).
+        _expl = []
+        if label == META_OWN_TAB and META_ZERO_TAB not in _chan_rev:
+            _zp = _in_period[_in_period["_gc_ch"] == META_ZERO_TAB]
+            _zr = float(pd.to_numeric(_zp.get("revenue"), errors="coerce").fillna(0).sum()) if not _zp.empty else 0.0
+            _zc = float(pd.to_numeric(_zp.get("conversions"), errors="coerce").fillna(0).sum()) if not _zp.empty else 0.0
+            if _zr or _zc:
+                _expl.append(("메타 (제로라운지) 탭 — 같은 소스/매체라 채널 성과에선 자사몰에 합쳐짐", _zc, _zr))
+        if label == "구글" and (_google_drop["rev"] or _google_drop["conv"]):
+            _cn = ", ".join(f"{c}" for c, _ in _google_drop["camps"][:3])
+            _expl.append(("온라인팀 PMax가 아닌 구글 캠페인 — 이 화면에서 일부러 뺌"
+                          + (f" ({_cn})" if _cn else ""), _google_drop["conv"], _google_drop["rev"]))
+        _ex_rev = sum(x[2] for x in _expl)
+        _ex_conv = sum(x[1] for x in _expl)
+        _gap = _cr - tot_rev - _ex_rev
         if abs(_gap) / _cr < 0.005:      # 0.5% 안쪽이면 굳이 안 띄운다
+            if _expl:
+                st.caption(
+                    f"📐 채널 성과 {label} {_cr:,.0f}원 = 이 표 {tot_rev:,.0f}원 + "
+                    + " + ".join(f"{n.split(' — ')[0]} {r:,.0f}원" for n, _, r in _expl)
+                    + " — 숫자는 맞습니다(" + " / ".join(n.split(' — ')[1] for n, _, _ in _expl) + ").")
             return
         _bigger = "채널 성과" if _gap > 0 else "이 표"
         with st.expander(
@@ -19304,7 +19342,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 f"| | GA 구매 | GA 매출 |\n|---|---|---|\n"
                 f"| 채널 성과 · {label} | {_cc:,.0f}건 | {_cr:,.0f}원 |\n"
                 f"| 이 표 합계 | {tot_conv:,.0f}건 | {tot_rev:,.0f}원 |\n"
-                f"| **차이** | **{_cc - tot_conv:+,.0f}건** | **{_gap:+,.0f}원** |"
+                + "".join(f"| (빼고 봄) {n} | {c:,.0f}건 | {r:,.0f}원 |\n" for n, c, r in _expl)
+                + f"| **남는 차이** | **{_cc - tot_conv - _ex_conv:+,.0f}건** | **{_gap:+,.0f}원** |"
             )
             # 두 매핑 중 하나라도 이 탭으로 보내는 소스/매체를 모두 모은다
             _keys = set(_sm_chan) | set(_sm_cre)
@@ -19327,7 +19366,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     "채널 매출": round(_a["rev"]),
                     "소재 매출": round(_b["rev"]),
                     "매출 차이": round(_a["rev"] - _b["rev"]),
-                    "매핑": "✅ 같음" if (_mb or "") == (_ml or "") else "⚠️ 다름",
+                    # 이름 표기만 다른 건('구글_실적최대화' vs '(DA) 구글_실적최대화') 같은 매체다
+                    "매핑": "✅ 같음" if ((_mb or "") == (_ml or "") or (_tb and _tb == _tl)) else "⚠️ 다름",
                 })
             if not _rows:
                 st.caption(
