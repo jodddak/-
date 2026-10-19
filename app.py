@@ -20043,12 +20043,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _media_labels.add(_raw_left_label(_v0, _k0))
             _all_raw_labels = _media_labels | _ga_labels
 
-            def _lbl_key(x):
+            def _lbl_key0(x):
                 x = re.sub(r"\s*-\s*OFF$", "", str(x))
                 x = re.sub(r"\s*\([^)]*\)\s*$", "", x)
-                k = "".join(x.split())
-                # 버전 없는 옛 그룹은 이름만 바뀐 '_이전'과 같은 그룹
-                return k + "_이전" if k in ("의류관심타겟", "방문자180일", "쇼핑관심타겟") else k
+                return "".join(x.split())
+            # 광고 관리자에 **같은 이름의 새 그룹**(메타 셔츠 의류관심타겟·방문자180일, 10/12~)이
+            # 매체 실적과 함께 있으면 '_이전'과 합치지 않는다 — 그룹 하나하나 관리자 화면 그대로.
+            _live_base = {_lbl_key0(x) for x in _media_labels if not str(x).endswith(" - OFF")}
+
+            def _lbl_key(x):
+                k = _lbl_key0(x)
+                # 버전 없는 옛 그룹은 이름만 바뀐 '_이전'과 같은 그룹(새 그룹이 없을 때만)
+                return (k + "_이전" if k in ("의류관심타겟", "방문자180일", "쇼핑관심타겟")
+                        and k not in _live_base else k)
             _groups_by_key = {}
             for _x in _all_raw_labels:
                 _groups_by_key.setdefault(_lbl_key(_x), set()).add(_x)
