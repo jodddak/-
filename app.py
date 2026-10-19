@@ -20408,8 +20408,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # 이미 광고비가 붙은 줄(크리테오 다이나믹_리텐션처럼 묶음 단위로 맞춰진 줄)은 빼고,
                 # **같은 매체**의 못 붙은 광고비끼리만 짝짓는다. 예전엔 다이나믹_리텐션 45건(이미
                 # 광고비 157만원과 짝 지어짐)을 옛 소재 광고비 1,073원과 같은 광고라고 안내했다.
-                _nn_mask = (rows["cre_name"].isin(["(미설정)"]) | (rows["target"] == "(규칙 외)")) & [
-                    float((m or {}).get("cost", 0) or 0) <= 0 for m in rows["_media"]]
+                _nn_mask = (rows["cre_name"].isin(["(미설정)"]) | (rows["target"] == "(규칙 외)")) & pd.Series([
+                    float((m or {}).get("cost", 0) or 0) <= 0 for m in rows["_media"]], index=rows.index)
                 _noname = rows[_nn_mask]
                 _nn_conv = float(pd.to_numeric(_noname["conv"], errors="coerce").fillna(0).sum())
                 _nn_rev = float(pd.to_numeric(_noname["rev"], errors="coerce").fillna(0).sum())
