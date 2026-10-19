@@ -11873,6 +11873,41 @@ def _run_bounded(fn, seconds: float):
         ex.shutdown(wait=False)
 
 
+def _auto_sync_ga_creative() -> str:
+    """소재 GA 표(ga_creative_daily)가 어제까지 안 차 있으면 세션당 한 번 받는다.
+
+    채널 GA는 화면을 열 때 자동으로 받는데 소재 GA는 평일 아침 메일 작업(GitHub Actions)이나
+    버튼으로만 받았다. 그래서 주말이 끼면 소재 GA가 며칠씩 밀려, 채널 성과의 신규/리타겟
+    아래에 '소재 GA 집계 대기(10/16~)'가 크게 생기고 소재별 성과 매출이 모자랐다(2026-10-19).
+    GA4만 받는다(매체 API는 무거워서 여기서 안 돈다)."""
+    if st.session_state.get("ga_cre_autosynced"):
+        return ""
+    st.session_state["ga_cre_autosynced"] = True
+    try:
+        cre = load_table("ga_creative_daily")
+        _yday = kst_today() - timedelta(days=1)
+        last = (pd.to_datetime(cre["report_date"], errors="coerce").max().date()
+                if cre is not None and not cre.empty and "report_date" in cre.columns else None)
+        if last is not None and last >= _yday:
+            return ""
+        if get_ga4_client()[0] is None:
+            return ""
+        utm = load_table("utm_channel_map")
+        cmap = (build_utm_channel_lookup(utm, include_extra=False)
+                if utm is not None and not utm.empty else {})
+        n, s_, e_, err = _run_bounded(
+            lambda: sync_ga4_creative_daily(cre, cmap, force_full=cre is None or cre.empty), 240)
+        if n:
+            try:
+                _load_table_raw.clear("ga_creative_daily")
+            except Exception:
+                st.cache_data.clear()
+            return f"소재 GA 자동 동기화 {n:,}행 ({s_} ~ {e_})"
+        return f"소재 GA 자동 동기화 실패 — {err}" if err else ""
+    except Exception as _e:
+        return f"소재 GA 자동 동기화 건너뜀 — {str(_e)[:120]}"
+
+
 def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
                   progress=None):
     """매체별로 일별 광고비를 받아 ad_spend_daily에 upsert한다. 한 매체가 실패해도 나머지는
@@ -13662,6 +13697,11 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
                 match = _cp_media_matcher(master)
                 _m = [(_ga_media_fix(sm, cp) or match(sm)) for sm, cp in zip(c["source_medium"], c["campaign"])]
                 c = c[[x == media for x in _m]]
+                # 채널 GA와 같은 제외 규칙(마케팅팀·VIBESHIFT 등) — 안 빼면 소재 쪽 합이 채널보다
+                # 커져 'UTM 구분 없음'이 부모 줄보다 큰 숫자로 나왔다(구글 28건, 2026-10-19)
+                if not c.empty:
+                    c = c[~(c["campaign"].map(_google_campaign_excluded).astype(bool)
+                            | c.get("creative", pd.Series("", index=c.index)).map(_google_campaign_excluded).astype(bool))]
                 if not c.empty:
                     ga_ok = True
                     for col in ("conversions", "revenue"):
@@ -13696,8 +13736,9 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
     _etc_name = "UTM 구분 없음"
     # 남는 몫을 둘로 가른다 — ① 소재 GA 표엔 있는데 신규/리타겟 표시가 없는 줄(UTM 문제)
     #                         ② 채널 GA엔 있는데 소재 GA 표엔 아직 없는 몫(집계 대기)
-    _utm_conv = max(0.0, (c_all[0] if ga_ok else 0.0) - sum(ga[n][0] for n in names))
-    _utm_rev = max(0.0, (c_all[1] if ga_ok else 0.0) - sum(ga[n][1] for n in names))
+    # 하위 줄 합은 절대 부모 줄을 넘지 않게 — 남는 몫(rest) 안에서만 나눈다
+    _utm_conv = min(rest_conv, max(0.0, (c_all[0] if ga_ok else 0.0) - sum(ga[n][0] for n in names)))
+    _utm_rev = min(rest_rev, max(0.0, (c_all[1] if ga_ok else 0.0) - sum(ga[n][1] for n in names)))
     _wait_conv = max(0.0, rest_conv - _utm_conv)
     _wait_rev = max(0.0, rest_rev - _utm_rev)
     if _etc_media >= 1 or _utm_rev >= 1 or _utm_conv >= 0.5:
@@ -13730,6 +13771,9 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
+    _cre_note = _auto_sync_ga_creative()
+    if _cre_note and "실패" in _cre_note:
+        st.caption("⚠️ " + _cre_note)
 
     mst = media_master_frame(master)
 
@@ -18668,6 +18712,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 매번 버튼을 눌러야 최신이 되는 구조라 하루 지난 표를 보고 판단하는 일이 있었다.
     # '시도했음' 플래그를 먼저 세워, 중간에 멈춰도 새로고침 때 또 멈추지 않게 한다.
     _yday = kst_today() - timedelta(days=1)
+    _cre_note = _auto_sync_ga_creative()
+    if _cre_note and "행" in _cre_note:
+        cre = load_table("ga_creative_daily")
+    elif _cre_note:
+        st.caption("⚠️ " + _cre_note)
 
     def _last(df):
         if df is None or df.empty or "report_date" not in df.columns:
@@ -20943,6 +20992,9 @@ def render_ga_channel_funnel_page(
             st.cache_data.clear()
             ga_daily = load_table("ga_channel_daily")
             sync_note = f"GA4 자동 동기화 {n:,}행 ({s} ~ {e})"
+    _cre_note = _auto_sync_ga_creative()
+    if _cre_note:
+        sync_note = (sync_note + " · " if sync_note else "") + _cre_note
 
     # 광고비도 같은 시점에 동기화한다(매체별로 실패해도 나머지는 계속 진행).
     ad_spend = ad_spend if ad_spend is not None else pd.DataFrame()
