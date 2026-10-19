@@ -16628,7 +16628,7 @@ def _gc_detail_target_label(row):
     if campaign.startswith("STCO_") and "전환" not in campaign and "제로라운지" not in campaign and not _gc_is_ab(campaign) and "외부몰" not in campaign \
             and not campaign.casefold().startswith("pmax") and "애드부스트" not in campaign \
             and "리텐션" not in campaign:
-        _ev = " · " + re.sub(r"^STCO_", "", campaign)
+        _ev = " · " + re.sub(r"^STCO_", "", campaign.split(" · ")[0].strip())
     return pretty + (f" ({suffix})" if suffix else "") + _ev + (" - OFF" if historical else "")
 
 
@@ -17866,9 +17866,30 @@ def _gc_expand_actual_groups(rows):
     # Multiple UTM aliases may refer to the same manager creative/group.
     # Merge those rows after attribution so the manager identity appears once.
     merged = {}
+    # 위에서 'A + B'로 합친 그룹이 있으면, 같은 소재·캠페인의 A·B 단독 줄(GA 없이 광고비만
+    # 나뉜 몫)도 그 줄로 모은다 — 안 그러면 애드부스트 3050남성/3050연령이 매출 0원 줄로
+    # 따로 남아 'OFF 권장'이 떴다.
+    _combo = {}
+    for row in expanded:
+        _t = str(row.get("target") or "")
+        if " + " in _t:
+            _m = row.get("_media")
+            _n = str((_m or {}).get("name") or row.get("cre_title") or row.get("creative") or row.get("cre_name") or "")
+            _ck = (str(row.get("channel") or ""), _creative_image_key(_n), str(row.get("campaign") or ""))
+            for _part in _t.split(" + "):
+                _combo[_ck + (_part.strip(),)] = _t
     for row in expanded:
         media = row.get("_media")
         name = str((media or {}).get("name") or row.get("cre_title") or row.get("creative") or row.get("cre_name") or "")
+        _tg0 = str(row.get("target") or "")
+        _tg0 = _combo.get((str(row.get("channel") or ""), _creative_image_key(name),
+                           str(row.get("campaign") or ""), _tg0), _tg0)
+        if _tg0 != str(row.get("target") or ""):
+            row = row.copy()
+            row["target"] = _tg0
+            if isinstance(media, dict):
+                media = dict(media, _adset=_tg0)
+                row["_media"] = media
         identity = (str(row.get("channel") or ""), _creative_image_key(name),
                     str(row.get("campaign") or ""), str(row.get("target") or ""),
                     bool(row.get("_ga_group_unresolved", False)))
