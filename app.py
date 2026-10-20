@@ -16722,8 +16722,15 @@ def _gc_merge_renamed_adsets(ad_creative, status_map=None):
         _new_start[_kk] = min(_new_start.get(_kk, _cd), _cd)
     new = raw.copy()
     changed = False
-    for idx, k, n_, l_, r_, d_ in zip(c.index, zip(ch, camp), norm, lbl, raw, dts):
+    # GFA 등 **업로드한 매체 리포트**는 줄마다 내보낸 시점의 실제 그룹 이름이 적혀 있고, 같은
+    # 캠페인·날짜는 최신 파일 하나만 쓴다(_gc_latest_gfa_snapshots). 그래서 '방문자180일'과
+    # '방문자180일_이전'이 동시에 돈 날의 줄을 옮기면 안 된다 — 옮겨서 셔츠 PC 방문자180일이
+    # 관리자 78,723 노출인데 대시보드 32,090으로 나왔다(2026-10-20).
+    _src = (c["source"].astype(str) if "source" in c.columns else pd.Series("", index=c.index))
+    for idx, k, n_, l_, r_, d_, s_ in zip(c.index, zip(ch, camp), norm, lbl, raw, dts, _src):
         if not n_ or n_.endswith("_이전") or r_.startswith(GOOGLE_ASSET_KEY_PREFIX):
+            continue
+        if s_ == MEDIA_REPORT_CREATIVE_SOURCE:
             continue
         tgt = have.get(k, {}).get(n_)
         if not tgt:
