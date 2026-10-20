@@ -11633,6 +11633,7 @@ def probe_criteo_status() -> list:
                 atr = it.get("attributes") if isinstance(it.get("attributes"), dict) else it
                 sch = atr.get("schedule") if isinstance(atr.get("schedule"), dict) else {}
                 bits = [str(atr.get(k)) for k in ("name", "Ad", "Adset", "Campaign", "status",
+                                                  "adDeliveryStatus",
                                                   "creativeId", "adSetId", "startDate", "endDate",
                                                   "AdId", "AdsetId", "CampaignId", "Displays")
                         if atr.get(k) not in (None, "")]
@@ -11689,7 +11690,11 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
     # 게다가 크리테오가 API 매체로 잡히면서 대행사 리포트 폴백이 꺼져, 원래 보이던
     # 소재 3개의 노출·클릭·광고비까지 사라졌다. 광고 단위가 안 되면 차라리 실패시키고
     # 리포트를 계속 쓰는 편이 낫다.
-    dim_candidates = [["Day", n] for n in CRITEO_CREATIVE_DIM_CANDIDATES]
+    # 광고세트·캠페인까지 같이 받는다(진단으로 확인: Ad·Adset·Campaign 동시 조회 200 OK,
+    # 2026-10-20). 그래야 메타처럼 '광고세트(다이나믹_리텐션/스태틱_리텐션)' 단위로 갈라
+    # 크리테오 관리자 화면과 숫자를 맞춰 보고, 광고세트 ON/OFF를 붙일 수 있다.
+    dim_candidates = [["Day", "Ad", "Adset", "Campaign"]] + \
+        [["Day", n] for n in CRITEO_CREATIVE_DIM_CANDIDATES]
 
     # 지표는 광고비 페처와 **똑같은 세 개만** 쓴다.
     #
@@ -11787,7 +11792,9 @@ def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
             "creative": _name,
             # 크리테오는 차원에 따라 캠페인명을 줄 때도 있고 안 줄 때도 있다.
             # 없으면 빈 값으로 두고, 화면에서는 GA의 utm_campaign으로 물러난다.
-            "campaign": str(d.get("CampaignName") or d.get("campaignName") or "").strip(),
+            "campaign": str(d.get("Campaign") or d.get("CampaignName") or d.get("campaignName")
+                            or "").strip(),
+            "adset": str(d.get("Adset") or d.get("AdSet") or "").strip(),
             "impressions": _f("Displays", "displays"),
             "clicks": _f("Clicks", "clicks"),
             # 크리테오 AdvertiserCost는 VAT 제외 — 광고비 페처(fetch_criteo_spend)처럼 1.1을 곱한다.
@@ -11822,7 +11829,10 @@ def _creative_frame(rows: list) -> pd.DataFrame:
     if "adset" not in out.columns:
         out["adset"] = ""
     out["adset"] = out["adset"].fillna("").astype(str).str.strip()
-    _protect = out["source"].isin(["media_report", "meta_api"]) & ~out["adset"].map(_precise_creative_key)
+    _protect = (out["source"].isin(["media_report", "meta_api", "criteo_api"])
+                & ~out["adset"].map(_precise_creative_key)
+                # 크리테오는 광고세트를 받은 줄만(예전 방식 줄은 빈 값 그대로)
+                & ((out["source"] != "criteo_api") | (out["adset"] != "")))
     out.loc[_protect, "adset"] = [
         _campaign_adset_key(cp, ads)
         for cp, ads in zip(out.loc[_protect, "campaign"], out.loc[_protect, "adset"])]
@@ -17489,13 +17499,13 @@ def fetch_creative_status() -> tuple:
             end_d = kst_today() - timedelta(days=1)
             vers = ([str(c["api_version"]).strip()] if c.get("api_version") else []) + \
                 CRITEO_VERSION_CANDIDATES
-            ad2set, sets = {}, {}
+            ad2set, sets, _rep, ad_stat = {}, {}, [], {}
             for v in vers:
                 adv = str(c.get("advertiser_id", "") or "").strip() or _criteo_advertiser_ids(token, v)
                 if not adv:
                     continue
                 r = _criteo_post(f"/{v}/statistics/report", token, {
-                    "advertiserIds": adv, "dimensions": ["Ad", "AdsetId", "Adset"],
+                    "advertiserIds": adv, "dimensions": ["AdId", "Ad", "AdsetId", "Adset", "Campaign"],
                     "metrics": ["Displays"], "currency": "KRW",
                     "startDate": str(end_d - timedelta(days=45)), "endDate": str(end_d),
                     "format": "json"})
@@ -17505,12 +17515,42 @@ def fetch_creative_status() -> tuple:
                     errs.append(f"크리테오(광고-광고세트): {r.text[:100]}")
                     break
                 p = r.json()
+                _rep = []
                 for row in (p.get("Rows") or p.get("rows") or []) if isinstance(p, dict) else []:
-                    nm = _creative_image_key(str(row.get("Ad") or "").strip())
-                    if nm:
+                    _an = str(row.get("Ad") or "").strip()
+                    nm = _creative_image_key(_an)
+                    if nm and _an.lower() != "unknown":
                         ad2set.setdefault(nm, set()).add(
                             (str(row.get("AdsetId") or ""), str(row.get("Adset") or "")))
+                        _rep.append((_an, nm, str(row.get("AdId") or ""), str(row.get("AdsetId") or ""),
+                                     str(row.get("Adset") or ""), str(row.get("Campaign") or "")))
                 import requests as _rq
+                # 광고(Ad) 하나하나의 집행 상태 — ads 목록의 adDeliveryStatus(진단으로 확인한 키).
+                # 광고세트가 켜져 있어도 광고를 따로 꺼둘 수 있어서, 둘 다 켜져야 ON으로 본다.
+                ad_stat = {}
+                try:
+                    for _a1 in [x.strip() for x in adv.split(",") if x.strip()]:
+                        _off = 0
+                        for _pg in range(30):
+                            ra = _rq.get(f"{CRITEO_BASE}/{v}/marketing-solutions/advertisers/{_a1}/ads",
+                                         headers={"Authorization": f"Bearer {token}",
+                                                  "Accept": "application/json"},
+                                         params={"limit": 100, "offset": _off}, timeout=60)
+                            if ra.status_code >= 400:
+                                errs.append(f"크리테오(광고 상태): {ra.status_code}")
+                                break
+                            _dat = (ra.json() or {}).get("data") or []
+                            for it in _dat:
+                                at = it.get("attributes") or {}
+                                ad_stat[str(it.get("id") or at.get("id") or "")] = (
+                                    str(at.get("adDeliveryStatus") or ""), at.get("endDate"))
+                            if len(_dat) < 100:
+                                break
+                            _off += len(_dat)
+                except Exception as _e:
+                    errs.append(f"크리테오(광고 상태): {str(_e)[:80]}")
+                out[("__criteo_ad_status_values__", tab)] = sorted(
+                    {s for s, _ in ad_stat.values()}) if ad_stat else []
                 rs = _rq.post(f"{CRITEO_BASE}/{v}/marketing-solutions/ad-sets/search",
                               headers={"Authorization": f"Bearer {token}",
                                        "Content-Type": "application/json"},
@@ -17528,11 +17568,36 @@ def fetch_creative_status() -> tuple:
                 else:
                     errs.append(f"크리테오(광고세트 상태): {rs.status_code}")
                 break
-            for nm, pairs in ad2set.items():
-                for sid, sname in pairs:
-                    on = sets.get(sid, sets.get("name:" + sname))
-                    if on is not None:
-                        out.setdefault((tab, nm), []).append((sname, on))
+            def _ad_on(aid):
+                s, e = ad_stat.get(aid, ("", None))
+                s = str(s or "").strip().lower().replace("_", "").replace(" ", "")
+                if s in ("live", "active", "running", "on", "delivering", "eligible"):
+                    on_ = True
+                elif s in ("paused", "inactive", "off", "archived", "ended", "notlive",
+                           "draft", "stopped", "deleted", "notdelivering", "expired"):
+                    on_ = False
+                else:
+                    on_ = None            # 모르는 값이면 광고세트 상태만 본다
+                try:
+                    if e and pd.to_datetime(e, utc=True).date() < kst_today():
+                        on_ = False       # 종료일이 지난 광고
+                except Exception:
+                    pass
+                return on_
+            _seen = set()
+            for _an, nm, aid, sid, sname, camp in _rep:
+                s_on = sets.get(sid, sets.get("name:" + sname))
+                a_on = _ad_on(aid)
+                on = (bool(s_on) and a_on is not False) if s_on is not None else a_on
+                if on is None:
+                    continue
+                out.setdefault((tab, nm), []).append((sname, on))
+                if (aid, sid) in _seen:
+                    continue
+                _seen.add((aid, sid))
+                out.setdefault(("__ads__", tab), []).append(dict(
+                    ch="크리테오", name=_an, adset=sname, on=on, campaign=camp or sname,
+                    created_time=None))
         except Exception as e:
             errs.append(f"크리테오: {str(e)[:120]}")
     return out, errs
@@ -19063,6 +19128,23 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         st.session_state["gc_criteo_probe2_result"] = probe_criteo_status()
                     except Exception as _e:
                         st.session_state["gc_criteo_probe2_result"] = [("(오류)", "", "", str(_e)[:300])]
+            if st.button("크리테오 소재 최근 30일 다시 받기 (캠페인·광고세트별)", key="gc_criteo_refill"):
+                with st.status("크리테오 소재를 받는 중...", expanded=True) as _st6:
+                    _n6, _sv6, _er6 = sync_ad_creative(
+                        ad_creative, only=["크리테오"], unlimited=True, progress=st.write,
+                        start=kst_today() - timedelta(days=AD_SPEND_LOOKBACK_DAYS),
+                        end=kst_today() - timedelta(days=1))
+                    _st6.update(label=f"완료 — {_n6:,}행" if not _er6 else "실패",
+                                state="complete" if not _er6 else "error")
+                for _k6, _v6 in (_er6 or {}).items():
+                    st.error(f"{_k6} — {_v6}")
+                if not _er6:
+                    try:
+                        fetch_creative_status.clear()
+                    except Exception:
+                        pass
+                    st.cache_data.clear()
+                    st.rerun()
             _pr2 = st.session_state.get("gc_criteo_probe2_result")
             if _pr2:
                 for _lab, _res, _keys, _ex in _pr2:
