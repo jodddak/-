@@ -15880,14 +15880,27 @@ def _gc_pick_image(row, img_map: dict, store_idx: dict):
     리포트 이미지는 Storage에 아직 없는 소재의 **대체재**로만 쓴다.
     """
     keys = _gc_image_keys(row)
-    if store_idx:
-        for k in keys:
-            hit = store_idx.get(_safe_storage_name(k))
-            if hit:
-                return hit
+    # 끝 번호 표기만 다른 이름도 같은 소재로 본다 — 광고명은 '261014_고객감사제2'인데
+    # 이미지 파일은 '261014_고객감사제v2.jpg'로 올려서 이미지가 안 붙었다(2026-10-20).
+    # 정확히 같은 이름을 먼저 보고, 없을 때만 'v2' ↔ '2'를 바꿔 본다.
+    _alt = []
     for k in keys:
-        if k in img_map:
-            return img_map[k]
+        m = re.match(r"^(.*\D)v(\d{1,2})$", k, flags=re.I)
+        if m:
+            _alt.append(m.group(1) + m.group(2))
+            continue
+        m = re.match(r"^(.*[^\dv_])(\d{1,2})$", k, flags=re.I)
+        if m and not re.match(r"^\d+$", k):
+            _alt.append(m.group(1) + "v" + m.group(2))
+    for ks in (keys, [a for a in _alt if a not in keys]):
+        if store_idx:
+            for k in ks:
+                hit = store_idx.get(_safe_storage_name(k))
+                if hit:
+                    return hit
+        for k in ks:
+            if k in img_map:
+                return img_map[k]
     return None
 
 
