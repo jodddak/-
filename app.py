@@ -11578,6 +11578,95 @@ def probe_criteo_dimensions(start: date, end: date) -> list:
     return out
 
 
+def probe_criteo_status() -> list:
+    """크리테오 상태·구조 진단 — 광고세트·광고·크리에이티브 목록 API와 리포트 차원을 한 번씩
+    불러 (호출, 결과, 응답 키, 예시)를 돌려준다. 추측으로 ON/OFF를 고치지 않으려고 만든다.
+    값은 이름·상태·날짜만 보여준다(토큰·비밀값 없음)."""
+    import requests
+    cfg = _secrets_section("criteo")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return [("(설정 없음)", "", "", "Secrets에 [criteo]가 없습니다")]
+    token = _criteo_token(cfg)
+    H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+         "Accept": "application/json"}
+    vers = ([str(cfg["api_version"]).strip()] if cfg.get("api_version") else []) \
+        + CRITEO_VERSION_CANDIDATES
+    adv = str(cfg.get("advertiser_id", "") or "").strip()
+    end_d = kst_today() - timedelta(days=1)
+    live = None
+    for v in vers:
+        a = adv or _criteo_advertiser_ids(token, v)
+        r = _criteo_post(f"/{v}/statistics/report", token, {
+            "advertiserIds": a, "dimensions": ["Day"], "metrics": ["Displays"],
+            "currency": "KRW", "startDate": str(end_d), "endDate": str(end_d), "format": "json"})
+        if r is not None and r.status_code < 400:
+            live, adv = v, a
+            break
+    if not live:
+        return [("(버전 없음)", "", "", "살아 있는 API 버전을 못 찾았습니다")]
+    a1 = adv.split(",")[0].strip()
+    out = []
+
+    def _show(label, r):
+        if r is None:
+            out.append((label, "응답 없음", "", ""))
+            return
+        try:
+            p = r.json()
+        except Exception:
+            out.append((label, f"{r.status_code}", "", r.text[:200]))
+            return
+        data = p.get("data") if isinstance(p, dict) else None
+        if data is None and isinstance(p, dict):
+            data = p.get("Rows") or p.get("rows")
+        if isinstance(data, dict):
+            data = [data]
+        keys, ex = "", []
+        if isinstance(data, list) and data:
+            d0 = data[0] if isinstance(data[0], dict) else {}
+            at = d0.get("attributes") if isinstance(d0.get("attributes"), dict) else None
+            keys = ", ".join(sorted(d0.keys())) + ((" | attributes: " + ", ".join(sorted(at.keys())))
+                                                     if at else "")
+            for it in data[:40]:
+                if not isinstance(it, dict):
+                    continue
+                atr = it.get("attributes") if isinstance(it.get("attributes"), dict) else it
+                sch = atr.get("schedule") if isinstance(atr.get("schedule"), dict) else {}
+                bits = [str(atr.get(k)) for k in ("name", "Ad", "Adset", "Campaign", "status",
+                                                  "creativeId", "adSetId", "startDate", "endDate",
+                                                  "AdId", "AdsetId", "CampaignId", "Displays")
+                        if atr.get(k) not in (None, "")]
+                if sch:
+                    bits += [f"{k}={sch.get(k)}" for k in ("activationStatus", "deliveryStatus",
+                                                           "startDate", "endDate") if sch.get(k)]
+                ex.append(" / ".join(bits)[:160])
+        out.append((label, f"{r.status_code} · {len(data) if isinstance(data, list) else 0}건",
+                    keys[:300], "\n".join(ex)[:3000] or str(p)[:300]))
+
+    B = f"{CRITEO_BASE}/{live}/marketing-solutions"
+    tries = [
+        ("광고세트 search", lambda: requests.post(f"{B}/ad-sets/search", headers=H, timeout=60,
+                                                 json={"filters": {"advertiserIds": [x.strip() for x in adv.split(",")]}})),
+        ("캠페인 search", lambda: requests.post(f"{B}/campaigns/search", headers=H, timeout=60,
+                                              json={"filters": {"advertiserIds": [x.strip() for x in adv.split(",")]}})),
+        ("광고 목록 GET advertisers/{id}/ads", lambda: requests.get(
+            f"{B}/advertisers/{a1}/ads", headers=H, timeout=60, params={"limit": 100})),
+        ("크리에이티브 목록 GET advertisers/{id}/creatives", lambda: requests.get(
+            f"{B}/advertisers/{a1}/creatives", headers=H, timeout=60, params={"limit": 100})),
+        ("리포트 Ad·Adset·Campaign (30일)", lambda: _criteo_post(f"/{live}/statistics/report", token, {
+            "advertiserIds": adv, "dimensions": ["AdId", "Ad", "AdsetId", "Adset", "CampaignId", "Campaign"],
+            "metrics": ["Displays", "Clicks", "AdvertiserCost"], "currency": "KRW",
+            "startDate": str(end_d - timedelta(days=29)), "endDate": str(end_d), "format": "json"})),
+    ]
+    for lab, fn in tries:
+        try:
+            _show(f"{lab} [{live}]", fn())
+        except Exception as e:
+            out.append((lab, "호출 실패", "", str(e)[:200]))
+        time.sleep(1.2)
+    return out
+
+
 def fetch_criteo_creative(start: date, end: date) -> pd.DataFrame:
     """크리테오 크리에이티브(광고) 단위 일별 실적."""
     cfg = _secrets_section("criteo")
@@ -18968,6 +19057,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         st.session_state.pop("gc_synced", None)   # 자동 동기화가 다시 돌게
                         st.cache_data.clear()
                         st.rerun()
+            if st.button("상태·구조 진단 (광고세트·광고·크리에이티브 ON/OFF)", key="gc_criteo_probe2"):
+                with st.spinner("크리테오 상태 API를 확인하는 중..."):
+                    try:
+                        st.session_state["gc_criteo_probe2_result"] = probe_criteo_status()
+                    except Exception as _e:
+                        st.session_state["gc_criteo_probe2_result"] = [("(오류)", "", "", str(_e)[:300])]
+            _pr2 = st.session_state.get("gc_criteo_probe2_result")
+            if _pr2:
+                for _lab, _res, _keys, _ex in _pr2:
+                    st.markdown(f"**{_lab}** — {_res}")
+                    if _keys:
+                        st.caption("키: " + _keys)
+                    if _ex:
+                        st.code(_ex, language=None)
             _used = st.session_state.get("gc_criteo_used")
             if _used:
                 st.success(f"마지막 동기화에서 크리테오 소재를 받은 경로 — **{_used}**")
