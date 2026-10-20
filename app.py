@@ -11905,7 +11905,20 @@ def _auto_sync_ga_creative() -> str:
         _yday = kst_today() - timedelta(days=1)
         last = (pd.to_datetime(cre["report_date"], errors="coerce").max().date()
                 if cre is not None and not cre.empty and "report_date" in cre.columns else None)
-        if last is not None and last >= _yday:
+        # 어제 날짜가 있어도 **밤사이(오늘 10시 전)에 받은 것**이면 다시 받는다 — GA4는 어제
+        # 구매를 다음날 오전까지 채워 넣는다. 00시에 받은 값이 그대로 남아 애드부스트 3건
+        # 34.5만원·메타 39만원이 소재별 성과에서만 빠졌다(2026-10-20).
+        _early = False
+        if last is not None and last >= _yday and "uploaded_at" in cre.columns:
+            _now_kst = datetime.utcnow() + timedelta(hours=9)
+            _cut = datetime.combine(kst_today(), datetime.min.time()) + timedelta(hours=10)
+            if _now_kst >= _cut:
+                _yd = cre[pd.to_datetime(cre["report_date"], errors="coerce").dt.date == _yday]
+                _up = pd.to_datetime(_yd["uploaded_at"], errors="coerce", utc=True).max()
+                if pd.notna(_up):
+                    _up_kst = _up.tz_convert(None).to_pydatetime() + timedelta(hours=9)
+                    _early = _up_kst < _cut
+        if last is not None and last >= _yday and not _early:
             return ""
         if get_ga4_client()[0] is None:
             return ""
