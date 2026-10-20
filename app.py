@@ -11578,6 +11578,55 @@ def probe_criteo_dimensions(start: date, end: date) -> list:
     return out
 
 
+def _criteo_ad_statuses(token: str, ver: str, adv: str, ad_ids: list) -> dict:
+    """크리테오 광고 ID → (adDeliveryStatus, endDate).
+    ① 광고 하나씩(GET ads/{id}) — 확실하다. ② 안 되면 광고주 광고 목록을 넘겨가며(offset)
+    받는다. 목록이 offset을 무시하고 같은 쪽만 주면(같은 ID가 다시 나오면) 멈춘다."""
+    import requests
+    H = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    out = {}
+    for aid in dict.fromkeys(str(a) for a in ad_ids if str(a).strip()):
+        try:
+            r = requests.get(f"{CRITEO_BASE}/{ver}/marketing-solutions/ads/{aid}",
+                             headers=H, timeout=30)
+        except Exception:
+            continue
+        if r.status_code == 429:
+            time.sleep(3)
+            continue
+        if r.status_code >= 400:
+            continue
+        try:
+            d = (r.json() or {}).get("data") or {}
+        except Exception:
+            continue
+        if isinstance(d, list):
+            d = d[0] if d else {}
+        at = d.get("attributes") or {}
+        out[str(d.get("id") or aid)] = (str(at.get("adDeliveryStatus") or ""), at.get("endDate"))
+    if all(str(a) in out for a in ad_ids):
+        return out
+    for a1 in [x.strip() for x in str(adv).split(",") if x.strip()]:
+        off, seen_first = 0, set()
+        for _ in range(30):
+            r = requests.get(f"{CRITEO_BASE}/{ver}/marketing-solutions/advertisers/{a1}/ads",
+                             headers=H, params={"limit": 100, "offset": off}, timeout=60)
+            if r.status_code >= 400:
+                break
+            dat = (r.json() or {}).get("data") or []
+            if not dat or str(dat[0].get("id")) in seen_first:
+                break
+            seen_first.add(str(dat[0].get("id")))
+            for it in dat:
+                at = it.get("attributes") or {}
+                out.setdefault(str(it.get("id") or at.get("id") or ""),
+                               (str(at.get("adDeliveryStatus") or ""), at.get("endDate")))
+            if len(dat) < 100:
+                break
+            off += len(dat)
+    return out
+
+
 def probe_criteo_status() -> list:
     """크리테오 상태·구조 진단 — 광고세트·광고·크리에이티브 목록 API와 리포트 차원을 한 번씩
     불러 (호출, 결과, 응답 키, 예시)를 돌려준다. 추측으로 ON/OFF를 고치지 않으려고 만든다.
@@ -11665,6 +11714,22 @@ def probe_criteo_status() -> list:
         except Exception as e:
             out.append((lab, "호출 실패", "", str(e)[:200]))
         time.sleep(1.2)
+    # 최근 30일 집행 광고 하나하나의 실제 상태 — 대시보드 ON/OFF가 이것과 같아야 한다
+    try:
+        r = _criteo_post(f"/{live}/statistics/report", token, {
+            "advertiserIds": adv, "dimensions": ["AdId", "Ad", "Adset"], "metrics": ["Displays"],
+            "currency": "KRW", "startDate": str(end_d - timedelta(days=29)),
+            "endDate": str(end_d), "format": "json"})
+        rows = (r.json() or {}).get("Rows") or [] if r is not None and r.status_code < 400 else []
+        ids = [str(x.get("AdId")) for x in rows if str(x.get("AdId") or "-1") != "-1"]
+        stt = _criteo_ad_statuses(token, live, adv, ids)
+        lines = [f"{x.get('Ad')} / {x.get('Adset')} / {x.get('AdId')} → "
+                 f"{(stt.get(str(x.get('AdId'))) or ('(못 찾음)',))[0]}"
+                 for x in rows if str(x.get("AdId") or "-1") != "-1"]
+        out.append(("최근 30일 집행 광고별 상태", f"{len(stt)}/{len(set(ids))}개 확인", "",
+                    "\n".join(lines)[:3000]))
+    except Exception as e:
+        out.append(("최근 30일 집행 광고별 상태", "실패", "", str(e)[:200]))
     return out
 
 
@@ -17529,24 +17594,8 @@ def fetch_creative_status() -> tuple:
                 # 광고세트가 켜져 있어도 광고를 따로 꺼둘 수 있어서, 둘 다 켜져야 ON으로 본다.
                 ad_stat = {}
                 try:
-                    for _a1 in [x.strip() for x in adv.split(",") if x.strip()]:
-                        _off = 0
-                        for _pg in range(30):
-                            ra = _rq.get(f"{CRITEO_BASE}/{v}/marketing-solutions/advertisers/{_a1}/ads",
-                                         headers={"Authorization": f"Bearer {token}",
-                                                  "Accept": "application/json"},
-                                         params={"limit": 100, "offset": _off}, timeout=60)
-                            if ra.status_code >= 400:
-                                errs.append(f"크리테오(광고 상태): {ra.status_code}")
-                                break
-                            _dat = (ra.json() or {}).get("data") or []
-                            for it in _dat:
-                                at = it.get("attributes") or {}
-                                ad_stat[str(it.get("id") or at.get("id") or "")] = (
-                                    str(at.get("adDeliveryStatus") or ""), at.get("endDate"))
-                            if len(_dat) < 100:
-                                break
-                            _off += len(_dat)
+                    ad_stat = _criteo_ad_statuses(token, v, adv,
+                                                  [x[2] for x in _rep if x[2] and x[2] != "-1"])
                 except Exception as _e:
                     errs.append(f"크리테오(광고 상태): {str(_e)[:80]}")
                 out[("__criteo_ad_status_values__", tab)] = sorted(
