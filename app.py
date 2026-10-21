@@ -11482,7 +11482,10 @@ def _criteo_post(path: str, token: str, body: dict, tries: int = 3):
     return last
 
 
-CRITEO_TIMEZONE = "Asia/Seoul"
+# 크리테오 관리자 화면(보고서)은 이 계정에서 **UTC**로 하루를 자른다(2026-10-21 확인:
+# 'Oct 1 – Oct 20, 2026 UTC'). 서울 시간으로 받으면 관리자와 9시간씩 어긋나 광고비가
+# 0.2~1.2% 달랐다 — 관리자 숫자와 맞추는 게 우선이라 UTC로 받는다.
+CRITEO_TIMEZONE = "UTC"
 # 이 이름들은 '묶음' 단위다 — 성공해도 소재로 쓰면 안 된다.
 CRITEO_ADSET_DIMS = {"adset", "adsetname", "adsetid", "campaign", "campaignname", "campaignid"}
 
@@ -12103,7 +12106,7 @@ def _auto_sync_ga_creative() -> str:
 
 
 def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
-                  progress=None):
+                  progress=None, force_start: date = None):
     """매체별로 일별 광고비를 받아 ad_spend_daily에 upsert한다. 한 매체가 실패해도 나머지는
     계속 진행한다 — 하나 막히면 전체가 서는 구조를 만들지 않기 위함."""
     today = kst_today()
@@ -12178,6 +12181,8 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
         if only and label not in only:
             continue
         start = _start_for(label)
+        if force_start is not None:
+            start = min(start, force_start)
         if start > end:
             continue
         # unlimited=True면 사용자가 버튼으로 직접 요청한 것이라 끝까지 기다린다.
@@ -21688,6 +21693,30 @@ def render_ga_channel_funnel_page(
                             st.error(f"{k}: {v}")
                         st.cache_data.clear()
                         st.rerun()
+            # 해외 매체는 며칠 뒤까지 수치가 바뀐다(무효 트래픽 정리·크리테오 7일 귀속). 평소엔
+            # 최근 8일만 다시 받으니, 관리자 화면과 맞추려면 이번 달 전체를 한 번 다시 받는다.
+            if st.button("🌐 메타·구글·크리테오 이번 달 전체 다시 받기 (광고비 + 소재)",
+                         key="fv4_foreign_refetch"):
+                _fs = kst_today().replace(day=1)
+                if (kst_today() - _fs).days < 7:
+                    _fs = kst_today() - timedelta(days=AD_SPEND_LOOKBACK_DAYS)
+                with st.status("메타·구글·크리테오 다시 받는 중...", expanded=True) as _sf:
+                    _n1, _sv1, _er1 = sync_ad_spend(ad_spend, only=["메타", "구글", "크리테오"],
+                                                    unlimited=True, progress=st.write, force_start=_fs)
+                    try:
+                        _cre0 = load_table("ad_creative_daily")
+                    except Exception:
+                        _cre0 = None
+                    _n2, _sv2, _er2 = sync_ad_creative(
+                        _cre0, only=["메타", "구글", "크리테오"], unlimited=True, progress=st.write,
+                        start=_fs, end=kst_today() - timedelta(days=1))
+                    _sf.update(label=f"완료 — 광고비 {_n1:,}행 · 소재 {_n2:,}행",
+                               state="complete" if not (_er1 or _er2) else "error")
+                for k, v in {**(_er1 or {}), **(_er2 or {})}.items():
+                    st.error(f"{k}: {v}")
+                if not (_er1 or _er2):
+                    st.cache_data.clear()
+                    st.rerun()
             if st.button("광고비 진단 실행", key="fv4_spend_diag_btn"):
                 with st.spinner("확인 중..."):
                     st.code(diagnose_ad_spend_setup(), language=None)
