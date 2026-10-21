@@ -21197,6 +21197,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         r.style.display=show?'':'none';
         if(show){im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
       if(sumr){
+        // 걸러 볼 때는 TOTAL이 '보이는 줄 합계'라 매체 관리자 합계와 다르다 — 이름표로 분명히 적는다
+        //  (ON만 눌러둔 채로 보면 관리자 광고세트 합계보다 작아 '안 맞는다'로 보였다, 2026-10-21)
+        var c0=sumr.cells[0];
+        if(c0){if(!c0.hasAttribute('data-orig0')) c0.setAttribute('data-orig0',c0.innerHTML);
+          c0.innerHTML=filt?('TOTAL<div style="font-size:11px;font-weight:700;color:#F4C95D;margin-top:3px">'
+            +(OF==='on'?'지금 ON인 소재만':OF==='off'?'OFF 소재만':OF==='unk'?'상태 미확인만':'판정 필터')
+            +' · 관리자 합계는 [전체]</div>'):c0.getAttribute('data-orig0');}
         if(!filt){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&cq.hasAttribute('data-orig')) cq.innerHTML=cq.getAttribute('data-orig');}}
         else{var set=function(n,x){var c=cE(sumr,n); if(c) c.innerHTML=x;};
           set(11,im?fmt(im):'-'); set(10,ck?fmt(ck):'-'); set(9,im?(ck/im*100).toFixed(2)+'%':'-');
