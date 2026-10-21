@@ -10251,6 +10251,42 @@ def _naver_campaigns(cfg: dict) -> list:
     return out
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_naver_shopping_purchase(start: date, end: date) -> dict:
+    """네이버 쇼핑검색광고(외부몰) **구매완료** 전환수·전환매출액 — 광고 시스템 숫자 그대로.
+    {매체명: {"conv": 구매완료 전환수, "rev": 구매완료 전환매출액}}.
+
+    스마트스토어로 보내는 광고라 GA4에 매출이 안 잡혀 대시보드가 0원이었다. 네이버 /stats의
+    purchaseCcnt·purchaseConvAmt(=관리자 '구매완료 전환수·구매완료 전환매출액')를 쓴다.
+    ccnt·convAmt는 장바구니 등 모든 전환을 합친 값이라 쓰지 않는다(2026-10-21 확인: 10월
+    MO 전체 전환 695건 · 1.26억 vs 구매완료 145건 · 1,211만)."""
+    cfg = _secrets_section("naver_searchad")
+    need = ["api_key", "secret_key", "customer_id"]
+    if not cfg or any(not cfg.get(k) for k in need):
+        return {}
+    import requests, json as _json
+    try:
+        shop = [(cid, ch) for cid, ch in _naver_campaigns(cfg)
+                if ch == NAVER_CAMPAIGN_TYPE_CHANNEL.get("SHOPPING")]
+    except Exception:
+        return {}
+    out = {}
+    for cid, ch in shop:
+        path = "/stats"
+        r = requests.get(NAVER_API_BASE + path, headers=_naver_headers("GET", path, cfg), params={
+            "id": cid,
+            "fields": _json.dumps(["purchaseCcnt", "purchaseConvAmt"]),
+            "timeRange": _json.dumps({"since": str(start), "until": str(end)}),
+        }, timeout=60)
+        if r.status_code >= 400:
+            continue
+        for item in (r.json() or {}).get("data", []):
+            o = out.setdefault(ch, {"conv": 0.0, "rev": 0.0})
+            o["conv"] += float(item.get("purchaseCcnt") or 0)
+            o["rev"] += float(item.get("purchaseConvAmt") or 0)
+    return out
+
+
 def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
     """네이버 검색광고 일별 광고비.
 
@@ -14237,6 +14273,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             for _c, _sub in _a.groupby("_canon"):
                 _ext_media_perf[_c] = {"conv": float(_sub["conversions"].sum()),
                                        "rev": float(_sub["revenue"].sum())}
+    # 네이버 쇼핑검색광고(외부몰)는 네이버 광고 시스템의 **구매완료** 전환수·전환매출액
+    try:
+        for _ch, _v in (fetch_naver_shopping_purchase(start, min(end, kst_today())) or {}).items():
+            _ext_media_perf[_v4_canon_channel(_ch)] = dict(_v)
+    except Exception:
+        pass
 
     recs = []
     for _, r in mst.iterrows():
@@ -14380,7 +14422,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     if n_months > 1:
         _bud_sub += f"~{_last_m.year}년 {_last_m.month}월"
     ext_note = ('<div class="cp-note" style="margin:-6px 0 12px">'
-                '· 외부몰 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 ROAS는 0으로 나옵니다.'
+                '· 외부몰 매출은 GA4에 안 잡혀 <b>매체가 신고한 값</b>으로 봅니다 — 네이버 쇼핑검색광고는 네이버 광고 시스템의 <b>구매완료 전환수·구매완료 전환매출액</b>입니다.'
                 '</div>') if scope_f == "외부몰" else (
         ('<div class="cp-note" style="margin:-6px 0 12px">'
          '· 제로라운지(메타 STCO_코디갤러리 계정) — GA4에서 '
@@ -14559,7 +14601,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         '매체 자체 전환수는 매체마다 집계 기준이 달라 서로 더할 수 없어 쓰지 않습니다.<br>'
         '· 네이버 브랜드검색은 정액(보장형) 상품이라 API가 집행액을 안 줍니다 — 노출·클릭만 API에서 오고 '
         '광고비는 위 칸에서 직접 넣습니다.<br>'
-        '· 외부몰(쇼핑검색·맨즈탭 외부몰) 매출은 GA4에 안 잡힙니다 — 스마트스토어 연동 전까지 0으로 표시됩니다.'
+        '· 외부몰 매출은 GA4에 안 잡힙니다 — 네이버 쇼핑검색광고는 네이버 광고 시스템의 <b>구매완료 전환수·구매완료 전환매출액·광고수익률</b>, GFA·메타 외부몰은 매체 신고값을 씁니다(맨즈탭 외부몰은 0).'
         + ('<br>· <b>합계·위 KPI의 구매·매출은 GA 기준만</b> 더했습니다 — 외부몰 줄의 매체 신고 매출은 '
            '기준이 달라 빼고, 광고비는 포함합니다(아침 메일과 같은 계산). 외부몰만 보려면 위 구분에서 '
            '\'외부몰\'을 고르세요.' if _mixed_out else '')
