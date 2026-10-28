@@ -14057,6 +14057,61 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
     return out
 
 
+# GFA 외부몰은 GA로 구매를 못 잡아 '매체 신고 구매·매출'(업로드한 GFA 리포트의 구매완료)을 쓴다.
+# 그래서 하위 줄(PC/MO · 신규/리타겟)도 **업로드한 리포트 숫자 그대로** 나눈다(GA 표를 안 본다).
+GFA_EXT_MEDIA = "GFA_외부몰"
+
+
+def _cp_ext_report_split(parent: dict, dim: str, start: date, end: date) -> list:
+    """GFA_외부몰 한 줄을 PC/MO(dim='dev') 또는 신규/리타겟(dim='seg') 하위 줄로 펼친다.
+    노출·클릭·광고비·구매·매출 모두 ad_creative_daily(GFA 외부몰 리포트)의 비중으로 합계 줄을 나눠
+    하위 줄 합 = 합계 줄. 신규/리타겟은 광고그룹 이름으로 가른다(패션관심타겟=신규, 방문자180일=리타겟)."""
+    try:
+        acd = _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+    except Exception:
+        return []
+    if acd is None or acd.empty or "channel" not in acd.columns:
+        return []
+    a = acd.copy()
+    a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
+    a = a[(a["_d"] >= start) & (a["_d"] <= end)]
+    a["_tab"] = a["channel"].map(_gc_channel)
+    a = a[a["_tab"].isin([GFA_PC_EXT, GFA_MO_EXT])]
+    if a.empty:
+        return []
+    if "adset" in a.columns:   # 채널 성과 합계 줄과 같은 정리(광고세트별 행이 있으면 합친 행은 뺀다)
+        _ad = a["adset"].fillna("").astype(str).str.strip()
+        _has = a.assign(_x=_ad.ne("")).groupby(["_d", "channel", "creative"])["_x"].transform("any")
+        a = a[~(_has & _ad.eq(""))]
+    cols = ("impressions", "clicks", "cost_incl_vat", "conversions", "revenue")
+    for c in cols:
+        a[c] = pd.to_numeric(a.get(c), errors="coerce").fillna(0)
+    if dim == "dev":
+        names = ["PC", "MO"]
+        a["_k"] = a["_tab"].map(lambda t: "PC" if t == GFA_PC_EXT else "MO")
+    else:
+        names = ["신규", "리타겟"]
+        _m = {GC_SEG_NEW: "신규", GC_SEG_RT: "리타겟"}
+        a["_k"] = [_m.get(_gc_target_group({"target": _creative_adset_label(ad), "campaign": cp}), "구분 없음")
+                   for ad, cp in zip(a.get("adset", ""), a.get("campaign", ""))]
+        if (a["_k"] == "구분 없음").any():
+            names.append("구분 없음")
+    keys = (("impressions", "노출"), ("clicks", "클릭"), ("cost_incl_vat", "비용"),
+            ("conversions", "GA구매"), ("revenue", "GA매출"))
+    out = []
+    for nm in names:
+        rec = {"매체": nm, "_approx": False}
+        for col, key in keys:
+            tot = float(a[col].sum())
+            part = float(a.loc[a["_k"] == nm, col].sum())
+            pv = float(parent.get(key) or 0)
+            rec[key] = (pv * part / tot) if tot > 0 else (0.0 if key in ("GA구매", "GA매출") else None)
+        cost = rec["비용"]
+        rec["GA ROAS"] = (rec["GA매출"] / cost * 100) if cost and cost > 0 else None
+        out.append(rec)
+    return out
+
+
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
@@ -14530,6 +14585,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 _gfa_approx = any(s.get("_approx") for s in _subs)
     except Exception as _e:
         st.caption(f"GFA PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
+    # GFA_외부몰도 자사몰처럼 PC/MO · 신규/리타겟으로 펼친다(업로드한 GFA 리포트 기준)
+    try:
+        _ge = view[view["매체"] == GFA_EXT_MEDIA]
+        if not _ge.empty:
+            _es = _cp_ext_report_split(_ge.iloc[0].to_dict(), "dev", start, end)
+            if _es:
+                _gfa_subs[GFA_EXT_MEDIA] = _es
+    except Exception as _e:
+        st.caption(f"GFA 외부몰 PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
     # 신규/리타겟 하위 줄 — GFA_자사몰 · GFA_애드부스트 · 메타
     _seg_subs = {}
     for _sm in list(CP_SEG_MEDIA) + list(CP_SEG_CUSTOM):
@@ -14547,6 +14611,14 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                                    f"{st.session_state.get('cp_criteo_adset_keys')}")
         except Exception as _e:
             st.caption(f"{_sm} 신규/리타겟 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
+    try:
+        _ge = view[view["매체"] == GFA_EXT_MEDIA]
+        if not _ge.empty:
+            _es = _cp_ext_report_split(_ge.iloc[0].to_dict(), "seg", start, end)
+            if _es:
+                _seg_subs[GFA_EXT_MEDIA] = _es
+    except Exception as _e:
+        st.caption(f"GFA 외부몰 신규/리타겟 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
 
     def _sub_rows_html(parent_name, subs, kind="dev"):
         mute = '<span class="cp-mute">—</span>'
