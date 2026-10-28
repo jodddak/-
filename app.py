@@ -21311,15 +21311,24 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         r.style.display=show?'':'none';
         if(show){im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
       if(sumr){
-        // 걸러 볼 때는 TOTAL이 '보이는 줄 합계'라 매체 관리자 합계와 다르다 — 이름표로 분명히 적는다
-        //  (ON만 눌러둔 채로 보면 관리자 광고세트 합계보다 작아 '안 맞는다'로 보였다, 2026-10-21)
-        var c0=sumr.cells[0];
-        if(c0){if(!c0.hasAttribute('data-orig0')) c0.setAttribute('data-orig0',c0.innerHTML);
-          c0.innerHTML=filt?('TOTAL<div style="font-size:11px;font-weight:700;color:#F4C95D;margin-top:3px">'
-            +(OF==='on'?'지금 ON인 소재만':OF==='off'?'OFF 소재만':OF==='unk'?'상태 미확인만':'판정 필터')
-            +' · 관리자 합계는 [전체]</div>'):c0.getAttribute('data-orig0');}
-        if(!filt){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&cq.hasAttribute('data-orig')) cq.innerHTML=cq.getAttribute('data-orig');}}
-        else{var set=function(n,x){var c=cE(sumr,n); if(c) c.innerHTML=x;};
+        // TOTAL은 **항상 전체(= 매체 관리자 광고세트 합계)** 그대로 둔다. 걸러 볼 때는 그 바로 아래에
+        // '보이는 줄 합계' 줄을 따로 붙인다 — TOTAL을 ON 소재 합계로 바꿔치기하니, 이름표를 달아도
+        // ON을 눌러둔 채로 관리자와 비교해 '데이터 안 맞음'으로 보였다(2026-10-21, 10-28 GFA PC 아우터).
+        var subr=tb.querySelector('tr.gc-filt-sum');
+        if(!filt){if(subr) subr.style.display='none';}
+        else{
+          if(!subr){subr=sumr.cloneNode(true); subr.classList.remove('fv4-sum-row'); subr.classList.add('gc-filt-sum');
+            subr.removeAttribute('id');
+            Array.prototype.forEach.call(subr.cells,function(c){c.style.setProperty('background','#2B3140','important');
+              c.style.setProperty('color','#F3F1EC','important'); c.removeAttribute('data-orig');});
+            sumr.parentNode.insertBefore(subr,sumr.nextSibling);}
+          subr.style.display='';
+          var c0=subr.cells[0];
+          if(c0) c0.innerHTML='<div style="font-size:12px;font-weight:800;color:#F4C95D">'
+            +(OF==='on'?'지금 ON인 소재 합계':OF==='off'?'OFF 소재 합계':OF==='unk'?'상태 미확인 합계':'판정 필터 합계')
+            +'</div><div style="font-size:10.5px;font-weight:600;color:#C9CED8;margin-top:2px">관리자 합계는 위 TOTAL</div>';
+          for(var z=1;z<subr.cells.length-11;z++){if(subr.cells[z]) subr.cells[z].innerHTML='';}
+          var set=function(n,x){var c=cE(subr,n); if(c) c.innerHTML=x;};
           set(11,im?fmt(im):'-'); set(10,ck?fmt(ck):'-'); set(9,im?(ck/im*100).toFixed(2)+'%':'-');
           set(8,ck&&co?fmt(co/ck)+'원':'-'); set(7,co?fmt(co)+'원':'-'); set(6,fmt(cv));
           set(5,rv?fmt(rv)+'원':'0원'); set(4,cv&&rv?fmt(rv/cv)+'원':'-');
