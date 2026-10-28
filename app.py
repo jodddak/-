@@ -17580,9 +17580,9 @@ def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
     return first, last, ch_max
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _gc_status_auto() -> tuple:
-    """(상태 맵, 오류, 조회 시각 'MM/DD HH:MM') — 페이지 열 때 자동 조회용(15분 캐시)."""
+    """(상태 맵, 오류, 조회 시각 'MM/DD HH:MM') — 페이지 열 때 자동 조회용(5분 캐시 — 담당자가 광고를 켜고 끈 게 빨리 보이게)."""
     fetch_creative_status.clear()
     ss, se = fetch_creative_status()
     return ss, se, (datetime.utcnow() + timedelta(hours=9)).strftime("%m/%d %H:%M")
