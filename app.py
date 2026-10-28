@@ -14078,6 +14078,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 # 지난달 말일~오늘로 두 달 예산이 합쳐졌다. 지난달 전체를 보여준다.
                 f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
             return today.replace(day=1), today - timedelta(days=1)
+        if name == "어제":
+            e = today - timedelta(days=1); return e, e
         if name == "최근 7일":
             e = today - timedelta(days=1); return e - timedelta(days=6), e
         if name == "최근 30일":
@@ -14094,7 +14096,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         b1, b2, b3, b4, b5, b6 = st.columns([1.05, 1.05, 0.12, 1.05, 0.5, 1.15])
         with b1:
             preset = st.selectbox("조회 기간",
-                                  ["이번 달", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
+                                  ["이번 달", "어제", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
                                   key="cp_preset")
         d0, d1 = _range_for(preset)
         with b2:
