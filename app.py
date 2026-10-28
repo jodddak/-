@@ -16966,10 +16966,16 @@ def _gc_detail_target_label(row):
         _md = row.get("_media") if isinstance(row.get("_media"), dict) else {}
         _cands = [campaign] + list(_md.get("campaigns") or []) + list(row.get("camp_list") or [])
         _cands = [str(c or "") for c in _cands if str(c or "").strip()]
+        # 품목이 실제로 베스트/고객감사제로 잡힌 줄만 — '시즌베스트 + 아우터_전환'처럼 옛 캠페인이
+        # 섞인 GA 줄(품목은 아우터)에 '· 베스트'가 붙으면 안 된다.
+        try:
+            _it = _gc_item_group(row)
+        except Exception:
+            _it = None
         if not any("외부몰" in c or "제로라운지" in c or _gc_is_ab(c) for c in _cands):
-            if any("베스트" in c or "best" in c.lower() for c in _cands):
+            if _it == GC_ITEM_BEST and any("베스트" in c or "best" in c.lower() for c in _cands):
                 _ev = " · 베스트"
-            elif any("감사제" in c for c in _cands):
+            elif _it == GC_ITEM_EVENT and any("감사제" in c for c in _cands):
                 _ev = " · 고객감사제"
     return pretty + (f" ({suffix})" if suffix else "") + _ev + (" - OFF" if historical else "")
 
@@ -19250,7 +19256,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _status_map, _status_errs = st.session_state.get("gc_status_snapshot", ({}, []))
     if st.session_state.get("gc_status_snapshot_at"):
         st.caption("광고 ON/OFF 기준: 매체 API " + st.session_state["gc_status_snapshot_at"]
-                   + " 조회 (15분마다 자동 갱신)"
+                   + " 조회 (5분마다 자동 갱신)"
                    + (" · 일부 매체 조회 실패: " + "; ".join(map(str, _status_errs))[:200] if _status_errs else ""))
     else:
         st.caption("광고 상태를 매체에서 못 받아 최근 집행일로 추정합니다.")
