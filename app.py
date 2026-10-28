@@ -12246,6 +12246,54 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
     return total, saved, errors
 
 
+def _auto_resync_early_spend() -> str:
+    """어제 광고비가 **오늘 10시(KST) 전에** 받아진 매체만 세션당 한 번 다시 받는다.
+
+    크리테오는 관리자 화면이 UTC 기준이라 어제 하루가 오늘 09:00 KST에야 끝난다. 09:04에
+    받은 값이 그대로 남아, 채널 성과의 크리테오 행만 관리자보다 노출 1,041·클릭 1·
+    광고비 378원 모자랐다(2026-10-28). 메타·구글도 밤사이 받은 값은 무효 트래픽 보정 전이다.
+    채널 퍼널에서만 돌던 광고비 동기화를 기다리지 않고, 광고비를 쓰는 화면 어디서든 고친다."""
+    if st.session_state.get("spend_early_resynced"):
+        return ""
+    st.session_state["spend_early_resynced"] = True
+    try:
+        _now_kst = datetime.utcnow() + timedelta(hours=9)
+        _cut = datetime.combine(kst_today(), datetime.min.time()) + timedelta(hours=10)
+        if _now_kst < _cut:
+            return ""
+        sp = load_table("ad_spend_daily")
+        if sp is None or sp.empty or not {"report_date", "source", "uploaded_at"} <= set(sp.columns):
+            return ""
+        _yday = kst_today() - timedelta(days=1)
+        yd = sp[pd.to_datetime(sp["report_date"], errors="coerce").dt.date == _yday]
+        labels = []
+        for label, src in AD_SPEND_FETCHER_SOURCE.items():
+            if label not in ("메타", "구글", "크리테오"):
+                continue
+            rows = yd[yd["source"].astype(str) == src]
+            if rows.empty:
+                continue
+            _up = pd.to_datetime(rows["uploaded_at"], errors="coerce", utc=True).max()
+            if pd.isna(_up):
+                continue
+            if _up.tz_convert(None).to_pydatetime() + timedelta(hours=9) < _cut:
+                labels.append(label)
+        if not labels:
+            return ""
+        n, saved, errs = _run_bounded(lambda: sync_ad_spend(sp, only=labels), 300)
+        if n:
+            try:
+                _load_table_raw.clear("ad_spend_daily")
+            except Exception:
+                st.cache_data.clear()
+            return "광고비 재동기화(오전 이른 수집분) " + ", ".join(f"{k} {v}행" for k, v in saved.items())
+        if errs:
+            return "광고비 재동기화 실패 — " + "; ".join(f"{k}: {v[:60]}" for k, v in errs.items())
+        return ""
+    except Exception as _e:
+        return f"광고비 재동기화 건너뜀 — {str(_e)[:120]}"
+
+
 def _spend_zero_fill(df, label: str, start: date, end: date, existing_keys: set = None):
     """API가 성공했는데 행이 없는 날(그날 꺼져 있었음)을 **광고비 0원 행**으로 채운다.
 
@@ -23205,6 +23253,12 @@ def main():
     to_date(monthly, "report_month")
 
     page = render_nav()  # ← st.tabs() 대신 사이드바 그룹 네비게이션
+
+    # 광고비를 쓰는 화면은 그리기 전에 '오전 이른 수집분'을 한 번 다시 받는다(크리테오 UTC 등).
+    if page in ("채널 퍼널 리포트", "채널 성과", "예산 관리", "소재별 성과"):
+        _sp_note = _auto_resync_early_spend()
+        if _sp_note and "실패" in _sp_note:
+            st.caption("⚠️ " + _sp_note)
 
     # 종합·매체별·운영 코멘트도 다른 화면처럼 GA4 API 데이터를 쓴다(없을 때만 옛 엑셀 업로드분).
     # 예전엔 이 세 화면만 엑셀 표(ga_channel_inflow)를 읽어서, 엑셀을 안 올린 최근 기간은
