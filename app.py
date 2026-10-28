@@ -17636,7 +17636,7 @@ def fetch_creative_status() -> tuple:
                     # 메타 API는 이때도 effective_status를 ACTIVE로 줘서, 10/22에 끝난 제로라운지
                     # 261013 광고세트 소재가 계속 ON으로 보였다(2026-10-28).
                     if on:
-                        _now_utc = pd.Timestamp.utcnow()
+                        _now_utc = pd.Timestamp.now("UTC")
                         for _et in ((ad.get("adset") or {}).get("end_time"),
                                     (ad.get("campaign") or {}).get("stop_time")):
                             _t = pd.to_datetime(_et, errors="coerce", utc=True) if _et else pd.NaT
@@ -21633,6 +21633,38 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _render_tools()
 
 
+def _synced_within(df, minutes: int = 60, sources=None) -> bool:
+    """표가 최근 N분 안에 받아졌는지. sources를 주면 **그 출처 각각**이 N분 안에 받아졌을 때만 True.
+
+    대시보드를 새로 열 때마다 GA4·광고비를 매체에서 다시 받느라 첫 화면이 1~2분씩 걸렸다.
+    방금(1시간 안) 받은 데이터는 다시 받지 않는다 — 매체 숫자는 그 사이 거의 안 바뀐다."""
+    try:
+        if df is None or df.empty or "uploaded_at" not in df.columns:
+            return False
+        up = pd.to_datetime(df["uploaded_at"], errors="coerce", utc=True)
+        cut = pd.Timestamp.now("UTC") - pd.Timedelta(minutes=minutes)
+        if not sources:
+            m = up.max()
+            return bool(pd.notna(m) and m >= cut)
+        if "source" not in df.columns:
+            return False
+        src = df["source"].astype(str)
+        # 지금 실제로 받고 있는 출처만 본다(최근 3일 안 날짜가 있는 출처). 끊긴 지 오래된 출처까지
+        # 보면 그 하나 때문에 매번 다시 받게 돼 빨라지지 않는다.
+        _d = pd.to_datetime(df.get("report_date"), errors="coerce")
+        _recent = kst_today() - timedelta(days=3)
+        have = [x for x in sources if ((src == x) & (_d.dt.date >= _recent)).any()]
+        if not have:
+            return False
+        for x in have:
+            m = up[src == x].max()
+            if pd.isna(m) or m < cut:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def render_ga_channel_funnel_page(
     audience: pd.DataFrame,
     ga_channel_inflow,          # DataFrame 또는 필요할 때 읽어오는 함수
@@ -21656,6 +21688,8 @@ def render_ga_channel_funnel_page(
     ga_daily = ga_daily if ga_daily is not None else pd.DataFrame()
     lookup = build_utm_channel_lookup(utm_map) if utm_map is not None and not utm_map.empty else {}
     sync_note, sync_err = "", None
+    if "fv4_synced" not in st.session_state and _synced_within(ga_daily, 60):
+        st.session_state["fv4_synced"] = True   # 1시간 안에 받은 GA4 — 다시 안 받는다
     if "fv4_synced" not in st.session_state:
         # 플래그를 먼저 세운다. 동기화가 멈췄을 때 새로고침하면 또 같은 데서 멈추는
         # 무한 로딩을 막기 위함 — 한 번 시도했으면 그걸로 끝내고 화면을 띄운다.
@@ -21676,6 +21710,10 @@ def render_ga_channel_funnel_page(
     # 광고비도 같은 시점에 동기화한다(매체별로 실패해도 나머지는 계속 진행).
     ad_spend = ad_spend if ad_spend is not None else pd.DataFrame()
     spend_sync_note, spend_errors = "", {}
+    if "fv4_spend_synced" not in st.session_state and _synced_within(
+            ad_spend, 60, sources=[v for k, v in AD_SPEND_FETCHER_SOURCE.items()
+                                   if k in {lab for lab, _f in AD_SPEND_FETCHERS}]):
+        st.session_state["fv4_spend_synced"] = True   # 매체 전부 1시간 안에 받음 — 다시 안 받는다
     if "fv4_spend_synced" not in st.session_state:
         st.session_state["fv4_spend_synced"] = True
         # 매체를 하나씩 받으면서 어디까지 왔는지 보여준다. 예전엔 아무 표시가 없어서
