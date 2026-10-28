@@ -16959,6 +16959,18 @@ def _gc_detail_target_label(row):
             and not campaign.casefold().startswith("pmax") and "애드부스트" not in campaign \
             and "리텐션" not in campaign:
         _ev = " · " + re.sub(r"_(PC|MO)$", "", re.sub(r"_전환", "", re.sub(r"^STCO_(자사몰_)?", "", campaign.split(" · ")[0].strip())))
+    # 캠페인 칸이 GA 표기(베스트_전환 등)라 위 조건에 안 걸려도, 매체 캠페인·GA 캠페인 중 하나가
+    # 베스트/고객감사제면 같은 행사 버튼으로 묶는다. 안 그러면 STCO_베스트 '방문자180일'이
+    # '방문자 180일 (리타겟팅)'과 '방문자 180일 (리타겟팅) · 베스트' 두 버튼으로 갈라졌다(2026-10-28).
+    if not _ev:
+        _md = row.get("_media") if isinstance(row.get("_media"), dict) else {}
+        _cands = [campaign] + list(_md.get("campaigns") or []) + list(row.get("camp_list") or [])
+        _cands = [str(c or "") for c in _cands if str(c or "").strip()]
+        if not any("외부몰" in c or "제로라운지" in c or _gc_is_ab(c) for c in _cands):
+            if any("베스트" in c or "best" in c.lower() for c in _cands):
+                _ev = " · 베스트"
+            elif any("감사제" in c for c in _cands):
+                _ev = " · 고객감사제"
     return pretty + (f" ({suffix})" if suffix else "") + _ev + (" - OFF" if historical else "")
 
 
