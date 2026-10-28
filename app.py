@@ -20608,7 +20608,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
                 _target_options = ["전체"] + sorted(_groups,
-                    key=lambda x: (" - OFF" in x, "패션 관심타겟" in x, "리타겟팅" in x, x == "그룹 미확인", x))
+                    key=lambda x: (" - OFF" in x, "리타겟팅" in x, "패션 관심타겟" in x, x == "그룹 미확인", x))
                 _detail_counts = {choice: (
                     sum(_row_label(r) == choice for _, r in rows.iterrows())
                     + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
