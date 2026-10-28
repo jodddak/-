@@ -12219,6 +12219,12 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
         start = _start_for(label)
         if force_start is not None:
             start = min(start, force_start)
+        # 크리테오는 일별 1회 호출이라 가볍다 → 매번 이번 달 1일부터 다시 받아 관리자와 통째로 맞춘다.
+        # 8일 꼬리만 다시 받다 보니 시간대(KST→UTC) 바꾸기 전 10/1~10/19 값이 그대로 남아,
+        # 채널 성과 크리테오가 관리자보다 노출 1,041·클릭 1 적었다(2026-10-28).
+        if label == "크리테오":
+            _m1 = end.replace(day=1)
+            start = min(start, _m1 if (end - _m1).days >= 7 else end - timedelta(days=AD_SPEND_LOOKBACK_DAYS - 1))
         if start > end:
             continue
         # unlimited=True면 사용자가 버튼으로 직접 요청한 것이라 끝까지 기다린다.
