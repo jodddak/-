@@ -17610,7 +17610,7 @@ def fetch_creative_status() -> tuple:
         tab = _gc_channel(ch)
         url = f"https://graph.facebook.com/{ver}/{acct}/ads"
         params = {
-            "fields": "name,effective_status,created_time,adset{name},campaign{name}",
+            "fields": "name,effective_status,created_time,adset{name,end_time},campaign{name,stop_time}",
             "limit": 500,
             "access_token": cfg.get("access_token"),
             "effective_status": _json.dumps(
@@ -17632,6 +17632,17 @@ def fetch_creative_status() -> tuple:
                         continue
                     stt = str(ad.get("effective_status") or "")
                     on = stt in ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "PREAPPROVED")
+                    # 광고세트·캠페인 **종료일이 지난** 광고는 스위치가 켜져 있어도 안 나간다.
+                    # 메타 API는 이때도 effective_status를 ACTIVE로 줘서, 10/22에 끝난 제로라운지
+                    # 261013 광고세트 소재가 계속 ON으로 보였다(2026-10-28).
+                    if on:
+                        _now_utc = pd.Timestamp.utcnow()
+                        for _et in ((ad.get("adset") or {}).get("end_time"),
+                                    (ad.get("campaign") or {}).get("stop_time")):
+                            _t = pd.to_datetime(_et, errors="coerce", utc=True) if _et else pd.NaT
+                            if pd.notna(_t) and _t <= _now_utc:
+                                on = False
+                                break
                     grp = str((ad.get("adset") or {}).get("name") or "")
                     out.setdefault((tab, nm), []).append((grp, on))
                     # 광고 목록 그대로(실적 0인 켜진 광고를 표에 넣을 때 쓴다)
