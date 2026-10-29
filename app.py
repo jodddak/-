@@ -19690,8 +19690,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # GFA는 utm_campaign의 _PC/_MO로 기기를 갈라 탭을 따로 둔다.
     if "campaign" not in d.columns:
         d["campaign"] = "(미설정)"
-    d["_gc_ch"] = [(_gc_ga_channel(ch, cp) if pd.notna(ch) and str(ch).strip() else None)
-                   for ch, cp in zip(d["channel"], d["campaign"])]
+    # 줄마다 부르면 GA 전체 기간(수만 줄)을 다 돈다 — (매체, 캠페인) 조합별로 한 번씩만 계산한다
+    _chcp = {}
+    _gc_col = []
+    for ch, cp in zip(d["channel"], d["campaign"]):
+        _k = (ch if pd.notna(ch) else None, cp if pd.notna(cp) else None)
+        if _k not in _chcp:
+            _chcp[_k] = (_gc_ga_channel(ch, cp) if pd.notna(ch) and str(ch).strip() else None)
+        _gc_col.append(_chcp[_k])
+    d["_gc_ch"] = _gc_col
+    _pm("GA 매체 판정")
     # Google GA scope: session campaign must belong to the online-team PMax family.
     _google_rows = d["_gc_ch"].eq("구글")
     _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
@@ -19713,8 +19721,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         pass
     d = d[~_google_rows | _online_pmax].copy()
     ad_creative = _gc_latest_gfa_snapshots(ad_creative)
+    _pm("GFA 스냅샷")
     ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
+    _pm("구글 캠페인명")
     ad_creative = _gc_merge_renamed_adsets(ad_creative, _status_map)
+    _pm("이름 바뀐 광고세트")
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
     # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
@@ -20447,8 +20458,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         m["_media_basis"] = True
             _matched = set()
             if not rows.empty:
+                _pm("탭 필터")
                 rows["_media"] = _gc_attach_media(rows, media_map, _matched)
                 rows = _gc_expand_actual_groups(rows)
+                _pm("실적 붙이기")
             else:
                 rows["_media"] = pd.Series([], dtype=object)
 
@@ -21171,6 +21184,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _cr_items.append((str(r["_name"]), _m["_rule"][0], _m["_rule"][2],
                                       float(r["_cost"]), float(r["_roas"]), float(r["conv"] or 0)))
                 rows["_media"] = _new_media
+                _pm("ON/OFF·판정")
 
             # (미설정) 비중 경고 — 이 탭에 해당하는 것만
             sub = per[per["_gc_ch"] == label]
@@ -21294,6 +21308,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 except Exception:
                     cmt = None
 
+            _pm("코멘트")
             body = []
             recs = []          # 엑셀용 — 화면 표와 같은 값을 같은 순서로 쌓는다
             for _, r in rows.iterrows():
