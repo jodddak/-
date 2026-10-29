@@ -1560,12 +1560,17 @@ def _load_table_uncached(name: str) -> pd.DataFrame:
 
 # 캐시를 비우면 실행 안 메모도 같이 비운다(새로 저장한 데이터가 바로 보이게).
 def _wrap_clear(obj):
+    # 이 파일은 화면을 다시 그릴 때마다 처음부터 다시 실행된다. st.cache_data는 그대로 남아 있어서
+    # 매번 감싸면 감싼 게 겹겹이 쌓인다 — 이미 감쌌으면 건너뛴다.
     try:
+        if getattr(obj.clear, "_lt_wrapped", False):
+            return
         _orig = obj.clear
 
         def _clr(*a, **k):
             _lt_memo_reset()
             return _orig(*a, **k)
+        _clr._lt_wrapped = True
         obj.clear = _clr
     except Exception:
         pass
@@ -17756,9 +17761,13 @@ def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
 # 마지막으로 받은 상태를 바로 보여주고, 5분이 지났으면 **뒤에서** 새로 받아 다음 화면부터 쓴다.
 # '🔄 광고 상태·신규 소재 다시 확인' 버튼은 지금 바로(기다려서) 새로 받는다.
 import threading as _gs_threading
-_GC_STATUS_STORE = {"data": None, "at": 0.0, "running": False}
-_GC_STATUS_LOCK = _gs_threading.Lock()
 GC_STATUS_REFRESH_SEC = 300
+
+
+@st.cache_resource(show_spinner=False)
+def _gc_status_holder() -> dict:
+    """화면을 다시 그려도(파일이 다시 실행돼도) 남아 있는 상태 보관함 — 모든 사용자가 같이 쓴다."""
+    return {"data": None, "at": 0.0, "running": False, "lock": _gs_threading.Lock()}
 
 
 def _gc_status_fetch_now() -> tuple:
@@ -17768,7 +17777,8 @@ def _gc_status_fetch_now() -> tuple:
 
 
 def _gc_status_get(force: bool = False) -> tuple:
-    g = _GC_STATUS_STORE
+    g = _gc_status_holder()
+    _GC_STATUS_LOCK = g["lock"]
     if force or g["data"] is None:
         data = _gc_status_fetch_now()
         with _GC_STATUS_LOCK:
