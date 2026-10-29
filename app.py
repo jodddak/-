@@ -13796,7 +13796,7 @@ def _cp_gfa_device_split(master: pd.DataFrame, parent: dict, start: date, end: d
         a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
         a = a[(a["_d"] >= start) & (a["_d"] <= end)]
         if not a.empty:
-            a["_tab"] = a["channel"].map(_gc_channel)
+            a["_tab"] = _umap(a["channel"], _gc_channel)
             a = a[a["_tab"].isin([GFA_PC_OWN, GFA_MO_OWN])]
             for col in ("impressions", "clicks", "cost_incl_vat"):
                 a[col] = pd.to_numeric(a.get(col), errors="coerce").fillna(0)
@@ -14014,7 +14014,7 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
         a = acd.copy()
         a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
         a = a[(a["_d"] >= start) & (a["_d"] <= end)]
-        a = a[a["channel"].map(_gc_channel).isin(tabs)]
+        a = a[_umap(a["channel"], _gc_channel).isin(tabs)]
         if not a.empty:
             for col in ("impressions", "clicks", "cost_incl_vat"):
                 a[col] = pd.to_numeric(a.get(col), errors="coerce").fillna(0)
@@ -14149,7 +14149,7 @@ def _cp_ext_report_split(parent: dict, dim: str, start: date, end: date) -> list
     a = acd.copy()
     a["_d"] = pd.to_datetime(a.get("report_date"), errors="coerce").dt.date
     a = a[(a["_d"] >= start) & (a["_d"] <= end)]
-    a["_tab"] = a["channel"].map(_gc_channel)
+    a["_tab"] = _umap(a["channel"], _gc_channel)
     a = a[a["_tab"].isin([GFA_PC_EXT, GFA_MO_EXT])]
     if a.empty:
         return []
@@ -16771,9 +16771,11 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     names = (status_snapshot or {}).get(("__campaign_names__", "구글"), {})
     source = ad_creative.copy() if ad_creative is not None else None
     aliases = {}
-    for index, record in (source.iterrows() if source is not None and not source.empty else []):
-        if _gc_channel(record.get("channel")) != "구글":
-            continue
+    # 구글 줄만 돈다 — 예전엔 소재 표 전체(모든 매체·전 기간)를 한 줄씩 돌아 1초 넘게 걸렸다
+    _g_iter = []
+    if source is not None and not source.empty and "channel" in source.columns:
+        _g_iter = source[_umap(source["channel"], _gc_channel).eq("구글")].iterrows()
+    for index, record in _g_iter:
         old = str(record.get("campaign") or "").strip()
         source.at[index, "campaign"] = confirmed.get(old, old)
         key = str(record.get("adset") or "")
@@ -16796,13 +16798,13 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     # 수트만이 아니라 **아우터·셔츠·리타겟팅도** 같은 규칙으로 맞춘다(옛 묶음 캠페인 → 품목별 새 캠페인).
     _cur = set(str(v).strip() for v in names.values() if str(v or "").strip())
     if source is not None and not source.empty and "campaign" in source.columns:
-        _gm = source["channel"].map(_gc_channel).eq("구글")
+        _gm = _umap(source["channel"], _gc_channel).eq("구글")
         _cur |= set(source.loc[_gm, "campaign"].dropna().astype(str).str.strip())
     # 소재 이름에 품목 단어가 없는 소재(260929_해리스트위드·260930_울라이크트러커)는 그 소재가
     # 들어 있는 **지금 품목 캠페인**(아우터_260930 등)으로 품목을 정한다.
     _cre_word = {}
     if source is not None and not source.empty and "campaign" in source.columns:
-        _gm = source["channel"].map(_gc_channel).eq("구글")
+        _gm = _umap(source["channel"], _gc_channel).eq("구글")
         _sets = {}
         for cr, cp in set(zip(source.loc[_gm, "creative"].astype(str), source.loc[_gm, "campaign"].astype(str))):
             it = _gc_item_of_campaign(cp)
@@ -16819,7 +16821,7 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
     # 그 소재가 **지금 들어 있는 캠페인**이 있으면 그쪽이 정답이다(해리스트위드 → 아우터_이전).
     _cre_camps = {}
     if source is not None and not source.empty and "campaign" in source.columns:
-        _gm2 = source["channel"].map(_gc_channel).eq("구글")
+        _gm2 = _umap(source["channel"], _gc_channel).eq("구글")
         for cr, cp in zip(source.loc[_gm2, "creative"], source.loc[_gm2, "campaign"]):
             cp = str(cp or "").strip()
             _lo = cp.replace(" ", "").lower()
@@ -16857,7 +16859,7 @@ def _gc_current_google_campaign_names(ad_creative, ga_rows, status_snapshot):
         ws = {w for k, w in _cre_word.items() if k and _ck and (k == _ck or k in _ck or _ck in k)}
         return next(iter(ws)) if len(ws) == 1 else cr
     if source is not None and not source.empty and "campaign" in source.columns:
-        _gm = source["channel"].map(_gc_channel).eq("구글")
+        _gm = _umap(source["channel"], _gc_channel).eq("구글")
         for idx in source.index[_gm]:
             new = _map_old(source.at[idx, "campaign"], source.at[idx, "creative"])
             if new:
@@ -16941,6 +16943,15 @@ def _gc_pick_version_part(parts, original):
                                    float(parts[i].get("cost", 0) or 0)))
 
 
+def _umap(series: pd.Series, fn) -> pd.Series:
+    """series.map(fn)과 같지만 **다른 값마다 한 번만** fn을 부른다(수만 줄에 같은 값이 반복될 때 빠름)."""
+    try:
+        u = {v: fn(v) for v in pd.unique(series)}
+        return series.map(u)
+    except Exception:
+        return series.map(fn)
+
+
 def _gc_merge_renamed_adsets(ad_creative, status_map=None):
     """메타·GFA 광고세트 개편(2026-10) — 옛 이름(의류관심타겟·방문자180일·쇼핑관심타겟)은
     이름만 바뀌어 '…_이전'이 됐다. 같은 매체·같은 캠페인에 '옛이름_이전'이 있으면 옛 이름으로
@@ -16952,8 +16963,8 @@ def _gc_merge_renamed_adsets(ad_creative, status_map=None):
     camp = (c["campaign"].fillna("").astype(str).str.strip() if "campaign" in c.columns
             else pd.Series("", index=c.index))
     raw = c["adset"].fillna("").astype(str)
-    lbl = raw.map(_creative_adset_label)
-    norm = lbl.map(_gc_tgt_norm)
+    lbl = _umap(raw, _creative_adset_label)
+    norm = _umap(lbl, _gc_tgt_norm)
     have = {}
     dts = pd.to_datetime(c.get("report_date"), errors="coerce").dt.date
     _old_days, _old_max = {}, {}
@@ -17727,7 +17738,7 @@ def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
     c = c[c["cost_incl_vat"] > 0]
     if c.empty:
         return first, last, ch_max
-    c["_tab"] = c["channel"].map(_gc_channel)
+    c["_tab"] = _umap(c["channel"], _gc_channel)
     for t, d1 in c.groupby("_tab")["report_date"].max().items():
         ch_max[t] = d1
     g = c.groupby(["_tab", "creative"])["report_date"].agg(["min", "max"])
@@ -19878,7 +19889,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         if not _c.empty:
             for _col in ("conversions", "revenue"):
                 _c[_col] = pd.to_numeric(_c.get(_col), errors="coerce").fillna(0)
-            _c["_t"] = _c["channel"].map(_gc_channel)
+            _c["_t"] = _umap(_c["channel"], _gc_channel)
             for _t, _sub in _c.groupby("_t"):
                 _chan_rev[_t] = float(_sub["revenue"].sum())
                 _chan_conv[_t] = float(_sub["conversions"].sum())
@@ -20696,7 +20707,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         _google_campaign_names.update(c for c in (_m.get("campaigns") or []) if c)
                         _google_campaign_names.update(c for c in (_m.get("_by_campaign") or {}) if c)
                 if ad_creative is not None and not ad_creative.empty and "campaign" in ad_creative.columns:
-                    _ga_cp = ad_creative[ad_creative["channel"].map(_gc_channel) == "구글"]
+                    _ga_cp = ad_creative[_umap(ad_creative["channel"], _gc_channel) == "구글"]
                     _google_campaign_names.update(str(c).strip() for c in _ga_cp["campaign"].dropna()
                                                   if str(c).strip())
 
@@ -21793,7 +21804,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         _ac = ad_creative.copy()
                         _ac["_d"] = pd.to_datetime(_ac["report_date"], errors="coerce").dt.date
                         _ac = _ac[(_ac["_d"] >= start) & (_ac["_d"] <= end)]
-                        _ac = _ac[_ac["channel"].map(_gc_channel) == label]
+                        _ac = _ac[_umap(_ac["channel"], _gc_channel) == label]
                         _ac = _ac[_ac["creative"].map(_creative_image_key) == _creative_image_key(_pick)]
                         if _ac.empty:
                             st.caption("이 기간에 저장된 원본이 없습니다(대행사 리포트로 채워진 소재일 수 있습니다).")
