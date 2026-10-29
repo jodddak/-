@@ -11687,25 +11687,36 @@ def _criteo_ad_statuses(token: str, ver: str, adv: str, ad_ids: list) -> dict:
     import requests
     H = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     out = {}
-    for aid in dict.fromkeys(str(a) for a in ad_ids if str(a).strip()):
-        try:
-            r = requests.get(f"{CRITEO_BASE}/{ver}/marketing-solutions/ads/{aid}",
-                             headers=H, timeout=30)
-        except Exception:
-            continue
-        if r.status_code == 429:
-            time.sleep(3)
-            continue
-        if r.status_code >= 400:
-            continue
-        try:
-            d = (r.json() or {}).get("data") or {}
-        except Exception:
-            continue
-        if isinstance(d, list):
-            d = d[0] if d else {}
-        at = d.get("attributes") or {}
-        out[str(d.get("id") or aid)] = (str(at.get("adDeliveryStatus") or ""), at.get("endDate"))
+
+    # 광고 하나씩 차례로 부르면 수십 번 왕복이라 화면이 오래 막혔다 — 동시에(최대 8개) 부른다.
+    def _one(aid):
+        for _try in range(2):
+            try:
+                r = requests.get(f"{CRITEO_BASE}/{ver}/marketing-solutions/ads/{aid}",
+                                 headers=H, timeout=30)
+            except Exception:
+                return None
+            if r.status_code == 429:
+                time.sleep(2 + _try * 2)
+                continue
+            if r.status_code >= 400:
+                return None
+            try:
+                d = (r.json() or {}).get("data") or {}
+            except Exception:
+                return None
+            if isinstance(d, list):
+                d = d[0] if d else {}
+            at = d.get("attributes") or {}
+            return str(d.get("id") or aid), (str(at.get("adDeliveryStatus") or ""), at.get("endDate"))
+        return None
+    from concurrent.futures import ThreadPoolExecutor
+    _ids = list(dict.fromkeys(str(a) for a in ad_ids if str(a).strip()))
+    if _ids:
+        with ThreadPoolExecutor(max_workers=min(8, len(_ids))) as _ex:
+            for _res in _ex.map(_one, _ids):
+                if _res:
+                    out[_res[0]] = _res[1]
     if all(str(a) in out for a in ad_ids):
         return out
     for a1 in [x.strip() for x in str(adv).split(",") if x.strip()]:
@@ -17729,6 +17740,48 @@ def _gc_spend_dates(ad_creative: pd.DataFrame) -> tuple:
     return first, last, ch_max
 
 
+# ── 광고 ON/OFF: 기다리지 않게(stale-while-revalidate) ──
+# 매체 API(특히 크리테오 광고별 조회)가 느려서 화면을 열 때마다 최대 40초씩 막혔다.
+# 마지막으로 받은 상태를 바로 보여주고, 5분이 지났으면 **뒤에서** 새로 받아 다음 화면부터 쓴다.
+# '🔄 광고 상태·신규 소재 다시 확인' 버튼은 지금 바로(기다려서) 새로 받는다.
+import threading as _gs_threading
+_GC_STATUS_STORE = {"data": None, "at": 0.0, "running": False}
+_GC_STATUS_LOCK = _gs_threading.Lock()
+GC_STATUS_REFRESH_SEC = 300
+
+
+def _gc_status_fetch_now() -> tuple:
+    fetch_creative_status.clear()
+    ss, se = fetch_creative_status()
+    return ss, se, (datetime.utcnow() + timedelta(hours=9)).strftime("%m/%d %H:%M")
+
+
+def _gc_status_get(force: bool = False) -> tuple:
+    g = _GC_STATUS_STORE
+    if force or g["data"] is None:
+        data = _gc_status_fetch_now()
+        with _GC_STATUS_LOCK:
+            g["data"], g["at"] = data, time.time()
+        return data
+    if time.time() - g["at"] > GC_STATUS_REFRESH_SEC:
+        with _GC_STATUS_LOCK:
+            start_bg = not g["running"]
+            if start_bg:
+                g["running"] = True
+        if start_bg:
+            def _bg():
+                try:
+                    d = _gc_status_fetch_now()
+                    with _GC_STATUS_LOCK:
+                        g["data"], g["at"] = d, time.time()
+                except Exception:
+                    pass
+                finally:
+                    g["running"] = False
+            _gs_threading.Thread(target=_bg, daemon=True).start()
+    return g["data"]
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _gc_status_auto() -> tuple:
     """(상태 맵, 오류, 조회 시각 'MM/DD HH:MM') — 페이지 열 때 자동 조회용(5분 캐시 — 담당자가 광고를 켜고 끈 게 빨리 보이게)."""
@@ -19423,13 +19476,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # 광고 ON/OFF는 매체 API에서 **자동으로** 받아온다(15분 캐시). 예전엔 버튼을 눌러야만
     # 받아와서, 안 누르면 '최근 집행일 추정'으로 꺼진 캠페인 소재도 ON으로 보였다.
+    _pm("동기화 확인")
     _force = st.button("🔄 광고 상태·신규 소재 다시 확인", key="gc_refresh_status")
-    if _force:
-        fetch_creative_status.clear()
-        _gc_status_auto.clear()
     try:
         with st.spinner("매체에서 현재 광고 ON/OFF를 받아오는 중..."):
-            _ss, _se, _sat = _gc_status_auto()
+            _ss, _se, _sat = _gc_status_get(force=bool(_force))
         st.session_state["gc_status_snapshot"] = (_ss, _se)
         st.session_state["gc_status_snapshot_at"] = _sat
     except Exception as _e:
@@ -19438,7 +19489,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _status_map, _status_errs = st.session_state.get("gc_status_snapshot", ({}, []))
     if st.session_state.get("gc_status_snapshot_at"):
         st.caption("광고 ON/OFF 기준: 매체 API " + st.session_state["gc_status_snapshot_at"]
-                   + " 조회 (5분마다 자동 갱신)"
+                   + " 조회 (5분 지나면 뒤에서 새로 받아 다음 화면부터 반영 · 바로 보려면 위 버튼)"
                    + (" · 일부 매체 조회 실패: " + "; ".join(map(str, _status_errs))[:200] if _status_errs else ""))
     else:
         st.caption("광고 상태를 매체에서 못 받아 최근 집행일로 추정합니다.")
