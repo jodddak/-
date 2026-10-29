@@ -19256,6 +19256,26 @@ def _render_meta_refetch_button(label, start, end, existing, key):
     st.rerun()
 
 
+def _pm(label: str):
+    """화면 계산 시간 재기(어디가 느린지 찾으려고). 실행마다 새로 잰다."""
+    try:
+        now = time.monotonic()
+        m = _lt_memo().setdefault("__pm", [])
+        if label == "시작":
+            m.clear()
+        m.append((label, now))
+    except Exception:
+        pass
+
+
+def _pm_report() -> str:
+    m = _lt_memo().get("__pm") or []
+    if len(m) < 2:
+        return ""
+    parts = [f"{m[i][0]} {m[i][1] - m[i - 1][1]:.1f}초" for i in range(1, len(m))]
+    return f"계산 {m[-1][1] - m[0][1]:.1f}초 — " + " · ".join(parts)
+
+
 def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                             utm_map: pd.DataFrame = None,
                             creative_perf: pd.DataFrame = None,
@@ -19295,6 +19315,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         _load_table_raw.clear()
         st.rerun()
 
+    _pm("시작")
     _prev_err = st.session_state.pop("gc_sync_errors", None)
     _prev_ga_err = st.session_state.pop("gc_sync_ga_error", None)
     if _prev_ga_err:
@@ -19413,6 +19434,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         st.session_state["gc_status_snapshot_at"] = _sat
     except Exception as _e:
         st.warning(f"광고 상태 조회 실패 — {str(_e)[:160]}")
+    _pm("자동동기화·광고상태")
     _status_map, _status_errs = st.session_state.get("gc_status_snapshot", ({}, []))
     if st.session_state.get("gc_status_snapshot_at"):
         st.caption("광고 ON/OFF 기준: 매체 API " + st.session_state["gc_status_snapshot_at"]
@@ -19566,6 +19588,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         _render_tools()
         return
 
+    _pm("상단 패널")
     d = cre.copy()
     d["report_date"] = pd.to_datetime(d["report_date"], errors="coerce").dt.date
     d = d.dropna(subset=["report_date"])
@@ -19594,6 +19617,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 대행사 리포트 엑셀에 박혀 올라간 이미지를 먼저 쓴다. UTM 작명(타겟팅_날짜_소재명)의
     # 뒤 두 조각이 리포트 소재명(날짜_소재명)과 같은 꼴이라 그대로 붙는다.
     # 리포트에 없던 소재(GFA 신규 등)만 아래 업로더로 채우면 된다.
+    _pm("GA 정리")
     img_map = dict(_gc_image_lookup(creative_perf))
     img_map.update(st.session_state.get("gc_img_extra", {}))
     # 직접 올린 이미지는 Storage에서 다시 읽는다 — 세션에만 두면 다음 접속에 사라진다.
@@ -19648,6 +19672,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
     # ── 광고비 배분 ── 매체 광고비를 그 매체 안에서 방문 비중대로 나눈다.
     # (탭 구성보다 먼저 구해둔다 — '지금 집행 중인가'로 숨김 여부를 판단해야 해서.)
+    _pm("이미지 목록")
     spend = _cp_spend_by_channel(ad_spend, start, end) if ad_spend is not None else pd.DataFrame()
     spend_by_ch, spend_row_by_ch = {}, {}
     if spend is not None and not spend.empty:
@@ -19700,6 +19725,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 매체 API 우선, 없으면 대행사 리포트 순으로 본다. API는 매일 들어와 신규 소재가
     # 바로 잡히고 리포트는 주 단위라 일주일씩 밀린다. GFA는 네이버가 API를 안 열어줘서
     # 리포트만 있으므로 폴백이 반드시 필요하다.
+    _pm("매체 정리")
     _report_map = _gc_media_by_key(creative_perf, start, end)     # 대행사 리포트
     # 켜져 있는데 이 기간 실적이 0인 광고(메타)는 API 실적에 아예 안 내려와 표에서 빠졌다
     # (260909_텐셀플루이드셔츠 — 광고 관리자엔 켜져 있는데 대시보드엔 없음).
@@ -19764,6 +19790,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _v["_first"] = _first_map[_k]
     # 지금 켜져 있는지 — 매체 API(메타·구글), 없으면 최근 집행일로 추정
     # The snapshot is refreshed explicitly above, so opening a tab never waits on status APIs.
+    _pm("소재 실적 묶기")
     _manual_status = load_manual_status()
     if _status_errs:
         st.caption("ON/OFF 상태를 일부 못 받았습니다(그 매체는 최근 집행일로 추정) — "
@@ -19946,6 +19973,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 "이 차이와는 무관합니다. 위 표는 빼기 전 원본 기준입니다."
             )
 
+    _pm("채널 차이 계산")
     _ga_ch = {c for c in _in_period["_gc_ch"].dropna().unique()}
     _media_ch = {k[0] for k in media_map}
 
@@ -20357,6 +20385,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 다시 합친다. 예전엔 타겟팅·캠페인 줄마다 '매체 전체 광고비'를 그대로 넣어서, 캠페인
     # 3개면 광고비가 3배로 보이고 ROAS는 전부 실제보다 낮게 나왔다. 소재 단위에서 붙인
     # 실적을 합치면 어느 단위로 봐도 합계가 소재 탭과 똑같이 떨어진다.
+    _pm("탭 목록·진단")
     rows_all = _gc_rows(d, start, end, "소재", exclude=hidden, alias=alias)
 
     # ── 지금 돌리지 않는 옛 소재 걸러내기 ──
@@ -20364,6 +20393,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 계속 찍힌다. 그게 이번 달 표에 섞이면 '어떤 소재를 끌지' 판단할 때 눈이 분산된다.
     # 광고비도 0이고 구매도 0이면 이번 기간에 집행한 소재가 아니라고 보고 접어둔다.
     # (광고비가 있으면 지금 돌리는 것이고, 구매가 있으면 매출을 만든 것이라 둘 다 남긴다.)
+    _pm("소재 줄 만들기")
     for ti, label in enumerate(tab_labels):
         if label != _sel_tab and not _gc_render_all:
             continue
@@ -21769,6 +21799,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                        "**구매완료**만 씁니다." if _media_basis else "")
                 )
 
+    _pm("표 그리기")
     # ── 엑셀 내보내기 ──────────────────────────────────────────
     # 위에서 자리만 잡아둔 export_slot을 이제 채운다.
     # 이미지를 받아오는 데 시간이 걸려서 화면을 열 때마다 만들지는 않는다 —
@@ -21824,12 +21855,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 key="gc_xlsx_dl", use_container_width=True, type="primary")
         else:
             _c2.caption(
-                f"매체별 시트 · 이미지 포함 (30초~1분) — **{level}** 단위 · **{start}~{end}** · "
+                f"매체별 시트 · 이미지 포함 (30초–1분) — **{level}** 단위 · **{start} – {end}** · "
                 f"화면 필터와 상관없이 매체별 전체 소재."
             )
 
     # 진단·설정 패널은 전부 맨 아래에서 그린다.
     _render_tools()
+    _pm("엑셀·진단")
+    _r = _pm_report()
+    if _r:
+        st.caption("⏱ " + _r)
 
 
 def _synced_within(df, minutes: int = 60, sources=None) -> bool:
