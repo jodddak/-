@@ -1485,7 +1485,46 @@ def _ga_sm_excluded(sm) -> bool:
     return s.split("/")[0].strip() in _ga_excluded_sources()
 
 
+# ── 한 번 실행(rerun) 안에서 같은 표를 여러 번 읽을 때 재사용한다 ──
+# 화면 하나가 ad_creative_daily 같은 큰 표를 10번 넘게 읽는데, st.cache_data는 꺼낼 때마다
+# 통째로 복원(언피클)해서 그 자체로 수 초가 걸렸다. 실행 한 번 동안은 한 벌만 들고 있다가
+# 복사본을 준다. 캐시를 비우는 곳(동기화·저장 버튼)에서는 이 메모도 같이 비운다.
+import threading as _lt_threading
+_LT_LOCAL = _lt_threading.local()   # 실행(스레드)마다 따로 — 여러 사람이 동시에 봐도 안 섞이게
+
+
+def _lt_memo() -> dict:
+    m = getattr(_LT_LOCAL, "memo", None)
+    if m is None:
+        m = {}
+        _LT_LOCAL.memo = m
+    return m
+
+
+def _lt_memo_reset():
+    _lt_memo().clear()
+
+
+def _in_st_run() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 def load_table(name: str) -> pd.DataFrame:
+    if not _in_st_run():
+        return _load_table_uncached(name)
+    memo = _lt_memo()
+    hit = memo.get(name)
+    if hit is None:
+        hit = _load_table_uncached(name)
+        memo[name] = hit
+    return hit.copy() if hit is not None else hit
+
+
+def _load_table_uncached(name: str) -> pd.DataFrame:
     """테이블을 읽되, GA 표에서는 **다른 팀 소스를 통째로 걷어낸다.**
 
     거르는 자리를 여기 하나로 둔 이유: GA 데이터를 읽는 화면이 채널 성과·소재별·퍼널·
@@ -1519,6 +1558,23 @@ def load_table(name: str) -> pd.DataFrame:
             df = df[keep].copy()
     return df
 
+# 캐시를 비우면 실행 안 메모도 같이 비운다(새로 저장한 데이터가 바로 보이게).
+def _wrap_clear(obj):
+    try:
+        _orig = obj.clear
+
+        def _clr(*a, **k):
+            _lt_memo_reset()
+            return _orig(*a, **k)
+        obj.clear = _clr
+    except Exception:
+        pass
+
+
+_wrap_clear(_load_table_raw)
+_wrap_clear(st.cache_data)
+
+
 def delete_ad_creative_for_channel(channel: str) -> bool:
     """ad_creative_daily에서 한 매체 행을 통째로 지운다.
 
@@ -1545,6 +1601,7 @@ def delete_ga_rows_in_range(table: str, start, end) -> bool:
     실제로 그래서 GA에는 없는 '260709_썸머울수트 1건 78,563원'이 화면에만 남아 있었다.
     다시 받기 전에 그 구간을 비우고 넣어야 화면이 GA와 같아진다.
     """
+    _lt_memo().pop(table, None)
     client = get_supabase_client()
     if client is None:
         store = _local_store()
@@ -1604,6 +1661,12 @@ _SAVE_ERRORS = {}      # 표별 마지막 저장 오류(백그라운드 동기�
 
 
 def save_table(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
+    _lt_memo().pop(name, None)
+    _lt_memo().pop("__acd_latest", None)
+    return _save_table_impl(name, df, on_conflict, source_file)
+
+
+def _save_table_impl(name: str, df: pd.DataFrame, on_conflict: str, source_file: str):
     if df is None or df.empty:
         return 0
     df = df.copy()
@@ -13714,7 +13777,7 @@ def _cp_gfa_device_split(master: pd.DataFrame, parent: dict, start: date, end: d
         # 같은 날짜를 리포트로 여러 번 올리면 옛 업로드 행이 남는다(이름이 바뀐 광고세트 등은
         # 덮어써지지 않음). 소재별 성과처럼 날짜·캠페인마다 **가장 최근 업로드**만 쓴다 —
         # 안 그러면 PC/MO 비중이 옛 행만큼 틀어져 소재별 성과와 숫자가 달랐다(2026-10-15).
-        acd = _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+        acd = _acd_latest()
     except Exception:
         acd = None
     if acd is not None and not acd.empty and "channel" in acd.columns:
@@ -13933,7 +13996,7 @@ def _cp_seg_split(master: pd.DataFrame, parent: dict, media: str, start: date, e
                     share[col][k if k in share[col] else "기타"] += float(v.get(col) or 0)
     else:
         try:
-            acd = _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+            acd = _acd_latest()
         except Exception:
             acd = None
     if acd is not None and not acd.empty and "channel" in acd.columns:
@@ -14067,7 +14130,7 @@ def _cp_ext_report_split(parent: dict, dim: str, start: date, end: date) -> list
     노출·클릭·광고비·구매·매출 모두 ad_creative_daily(GFA 외부몰 리포트)의 비중으로 합계 줄을 나눠
     하위 줄 합 = 합계 줄. 신규/리타겟은 광고그룹 이름으로 가른다(패션관심타겟=신규, 방문자180일=리타겟)."""
     try:
-        acd = _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+        acd = _acd_latest()
     except Exception:
         return []
     if acd is None or acd.empty or "channel" not in acd.columns:
@@ -14359,7 +14422,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 기준이 GA와 달라 자사몰 숫자와 그대로 더하면 안 되므로 표에 출처를 따로 적는다.
     _ext_media_perf = {}
     try:
-        _acd = _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+        _acd = _acd_latest()
     except Exception:
         _acd = None
     if _acd is not None and not _acd.empty:
@@ -16659,6 +16722,18 @@ def _gc_has_performance(row=None, media=None):
     return False
 
 
+def _acd_latest() -> pd.DataFrame:
+    """_gc_latest_gfa_snapshots(load_table("ad_creative_daily"))를 실행 한 번에 한 번만 계산한다
+    (채널 성과가 PC/MO·신규/리타겟 하위 줄마다 이 큰 표를 다시 정리하느라 느렸다)."""
+    if not _in_st_run():
+        return _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+    memo = _lt_memo()
+    if "__acd_latest" not in memo:
+        memo["__acd_latest"] = _gc_latest_gfa_snapshots(load_table("ad_creative_daily"))
+    v = memo["__acd_latest"]
+    return v.copy() if v is not None else v
+
+
 def _gc_latest_gfa_snapshots(frame):
     """Use one uploaded daily campaign snapshot; retain older dates and other campaigns."""
     if frame is None or frame.empty or not {"uploaded_at", "source", "campaign", "channel", "report_date"}.issubset(frame.columns):
@@ -18520,7 +18595,7 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     img_td = ""
     if show_img:
         if img_url:
-            img_td = (f'<td class="gc-img"><img src="{img_url}" loading="eager" '
+            img_td = (f'<td class="gc-img"><img src="{img_url}" loading="lazy" '
                       f'decoding="async" width="132" height="132"></td>')
         elif "nosort" in extra_cls:
             img_td = '<td class="gc-img"></td>'
@@ -19964,7 +20039,35 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     export_sheets = {}
     export_views = {}       # 탭별로 고른 타겟팅·품목 — 엑셀 2행에 적는다
     export_notes = {}       # 탭별 코멘트(번호 매긴 문장) — 엑셀 맨 위에 적는다
-    tabs = st.tabs(tab_labels)
+    # 매체 탭 — 예전엔 st.tabs로 14개 매체 표를 **전부** 만들어 한꺼번에 보냈다(이미지 1,300장).
+    # 탭을 눌러도 이미 다 그려져 있어 빨라 보였지만, 화면을 열거나 필터를 바꿀 때마다 14개를
+    # 다 다시 계산해서 몇십 초씩 걸렸다. 이제 **고른 매체 하나만** 계산·표시한다.
+    # (엑셀 내보내기를 누를 때만 전체 매체를 한 번 계산한다)
+    _GC_TAB_KEY = "gc_media_tab"
+    if st.session_state.get(_GC_TAB_KEY) not in tab_labels:
+        st.session_state[_GC_TAB_KEY] = tab_labels[0]
+    if hasattr(st, "segmented_control"):
+        _sel_tab = st.segmented_control("매체", tab_labels, key=_GC_TAB_KEY,
+                                        selection_mode="single", label_visibility="collapsed")
+    else:
+        _sel_tab = st.radio("매체", tab_labels, key=_GC_TAB_KEY, horizontal=True,
+                            label_visibility="collapsed")
+    if _sel_tab not in tab_labels:          # 같은 버튼을 다시 눌러 선택이 풀린 경우
+        _sel_tab = tab_labels[0]
+    _gc_render_all = st.session_state.get("gc_xlsx_full_pending") is not None
+
+    from contextlib import contextmanager as _ctxmgr
+
+    @_ctxmgr
+    def _gc_tab_ctx(_lbl):
+        if _lbl == _sel_tab:
+            with st.container():
+                yield
+        else:                                 # 엑셀용으로만 계산 — 화면에서는 바로 지운다
+            _ph = st.empty()
+            with _ph.container():
+                yield
+            _ph.empty()
 
     def _folded_panel():
         _non_cre = [c for c in GC_NON_CREATIVE if c in hidden]
@@ -20262,7 +20365,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 광고비도 0이고 구매도 0이면 이번 기간에 집행한 소재가 아니라고 보고 접어둔다.
     # (광고비가 있으면 지금 돌리는 것이고, 구매가 있으면 매출을 만든 것이라 둘 다 남긴다.)
     for ti, label in enumerate(tab_labels):
-        with tabs[ti]:
+        if label != _sel_tab and not _gc_render_all:
+            continue
+        with _gc_tab_ctx(label):
             _render_gfa_inventory_form(label, start, end, key=f"gc_inventory_{ti}")
             # TOTAL은 '평소에 같이 보는 매체'의 합이다. 맨즈탭처럼 별도 시트로 관리하는
             # 매체를 섞으면 다른 리포트와 숫자가 안 맞아서, 자기 탭에서만 보이게 한다.
@@ -21389,12 +21494,34 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
       Array.prototype.forEach.call(document.querySelectorAll('[data-ofn]'),function(e){var k=e.getAttribute('data-ofn'); e.textContent=n[k];
         if(k==='unk') e.parentNode.style.display=n.unk?'':'none';});
       Array.prototype.forEach.call(document.querySelectorAll('[data-jfn]'),function(e){e.textContent=m[e.getAttribute('data-jfn')];});}
+    // ── 나눠 보기 ── 소재가 수백 개라 한 번에 다 펼치면 스크롤이 끝없이 길고 이미지도 다 받느라 느렸다.
+    //  처음엔 PAGE개만 보이고 '더 보기'로 늘린다. 합계·필터 숫자는 언제나 걸러진 **전체** 기준이다.
+    var PAGE=20, LIM=PAGE, more=null;
+    function moreBar(){
+      if(more) return more;
+      more=document.createElement('div'); more.className='gc-more';
+      more.style.cssText='display:none;align-items:center;justify-content:center;gap:10px;padding:14px 0 6px;font-family:inherit';
+      var box=t.parentNode; box.parentNode.insertBefore(more, box.nextSibling);
+      more.onclick=function(e){var b=e.target.closest('button'); if(!b) return;
+        var a=b.getAttribute('data-more'); LIM=(a==='all')?1e9:(a==='fold'?PAGE:LIM+PAGE); apply();
+        if(a==='fold'){t.scrollIntoView({block:'start'});}};
+      return more;}
     function apply(){
-      var im=0,ck=0,co=0,cv=0,rv=0, filt=!!(OF||JFk);
+      var im=0,ck=0,co=0,cv=0,rv=0, filt=!!(OF||JFk), shown=0;
       rows().forEach(function(r){var o=onOf(r), k=jcat(jOf(r));
         var show=(!OF||o===OF) && (!JFk||(JFk==='all'?!!k:k===JFk));
-        r.style.display=show?'':'none';
-        if(show){im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
+        r.style.display=(show&&shown<LIM)?'':'none';
+        if(show){shown++;im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
+      (function(){var mb=moreBar(), left=shown-Math.min(shown,LIM);
+        var css='height:38px;padding:0 18px;border-radius:10px;border:1.5px solid #D9D3C3;background:#fff;'
+          +'font-size:13.5px;font-weight:800;cursor:pointer;font-family:inherit;color:#14181F';
+        if(left>0){mb.style.display='flex';
+          mb.innerHTML='<span style="font-size:13px;color:#6B6B60">'+Math.min(shown,LIM)+' / '+shown+'개 표시</span>'
+            +'<button type="button" data-more="next" style="'+css+'">▼ '+Math.min(PAGE,left)+'개 더 보기</button>'
+            +'<button type="button" data-more="all" style="'+css+'">전체 보기 ('+shown+'개)</button>';}
+        else if(LIM>PAGE&&shown>PAGE){mb.style.display='flex';
+          mb.innerHTML='<button type="button" data-more="fold" style="'+css+'">▲ 처음 '+PAGE+'개만 보기</button>';}
+        else{mb.style.display='none'; mb.innerHTML='';}})();
       if(sumr){
         // TOTAL은 **항상 전체(= 매체 관리자 광고세트 합계)** 그대로 둔다. 걸러 볼 때는 그 바로 아래에
         // '보이는 줄 합계' 줄을 따로 붙인다 — TOTAL을 ON 소재 합계로 바꿔치기하니, 이름표를 달아도
@@ -21492,6 +21619,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         return asc?String(x).localeCompare(String(y),'ko')
                   :String(y).localeCompare(String(x),'ko');});
       fixed.concat(mov).forEach(function(r){tb.appendChild(r);});
+      if(window.__gcRefresh) window.__gcRefresh();   // 정렬한 순서로 다시 처음 N개
     };})(i);}
 })();
 </script>""".replace("__TID__", tid)
@@ -21657,18 +21785,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         _c1, _c2 = st.columns([1.3, 2.7])
         _n_rows = sum(len(v) for v in export_sheets.values())
         _n_imgs = sum(1 for v in export_sheets.values() for r in v if r.get("_img"))
-        _clicked = _c1.button(f"📗 엑셀로 내보내기 ({len(export_sheets)}개 매체)",
+        _clicked = _c1.button(f"📗 엑셀로 내보내기 ({len(tab_labels)}개 탭 전체)",
                               key="gc_xlsx_make", use_container_width=True)
         if _clicked and _full_pending is None:
+            # 화면에는 고른 매체 하나만 그려서, 엑셀은 필터를 풀고 **전체 매체**를 한 번 더 계산해 만든다
             _saved = {k: v for k, v in st.session_state.items()
                       if str(k).startswith(_GC_FILTER_KEYS)}
-            _busy = {k: v for k, v in _saved.items() if v not in (None, GC_SEG_ALL, GC_ITEM_ALL, "전체")}
-            if _busy:
-                # 필터가 걸려 있다 — 풀고 한 번 더 그린 다음 거기서 만든다
-                st.session_state["gc_xlsx_full_pending"] = _saved
-                for _k in _saved:
-                    st.session_state.pop(_k, None)
-                st.rerun()
+            st.session_state["gc_xlsx_full_pending"] = _saved
+            for _k in _saved:
+                st.session_state.pop(_k, None)
+            st.rerun()
         if _clicked or _full_pending is not None:
             _bar = _c2.progress(0.0, text="소재 이미지를 받아 줄이는 중…")
             try:
@@ -21698,8 +21824,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 key="gc_xlsx_dl", use_container_width=True, type="primary")
         else:
             _c2.caption(
-                f"매체별 시트 · 총 {_n_rows:,}줄 · 이미지 {_n_imgs:,}장 "
-                f"(2~3MB · 10~30초) — **{level}** 단위 · **{start}~{end}** · "
+                f"매체별 시트 · 이미지 포함 (30초~1분) — **{level}** 단위 · **{start}~{end}** · "
                 f"화면 필터와 상관없이 매체별 전체 소재."
             )
 
@@ -23371,6 +23496,7 @@ def render_operation_comment_page(
 # 메인
 # ──────────────────────────────────────────────────────────────
 def main():
+    _lt_memo_reset()   # 실행마다 표를 새로 한 번씩만 읽는다
     # st.title()은 raw HTML(이미지)을 못 받아서, 이모지(📊) 대신 커스텀 아이콘을 쓰려면
     # 직접 <h1>을 그려야 한다. inject_theme()의 전역 h1 스타일(글자크기/굵기/색)은
     # 태그 자체를 그대로 쓰기 때문에 동일하게 적용된다.
