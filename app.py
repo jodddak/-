@@ -400,6 +400,9 @@ NAV_ICON_OPERATIONS_B64 = (
     "ZXN1bHQ9ImVmZmVjdDNfaW5uZXJTaGFkb3dfNzYxXzQxNzg3Ii8+CjwvZmlsdGVyPgo8L2RlZnM+Cjwvc3ZnPgo="
 )
 
+# 설정(톱니바퀴) 그룹 아이콘
+NAV_ICON_SETTINGS_B64 = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0QzhERjYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMTIuMjIgMmgtLjQ0YTIgMiAwIDAgMC0yIDJ2LjE4YTIgMiAwIDAgMS0xIDEuNzNsLS40My4yNWEyIDIgMCAwIDEtMiAwbC0uMTUtLjA4YTIgMiAwIDAgMC0yLjczLjczbC0uMjIuMzhhMiAyIDAgMCAwIC43MyAyLjczbC4xNS4xYTIgMiAwIDAgMSAxIDEuNzJ2LjUxYTIgMiAwIDAgMS0xIDEuNzRsLS4xNS4wOWEyIDIgMCAwIDAtLjczIDIuNzNsLjIyLjM4YTIgMiAwIDAgMCAyLjczLjczbC4xNS0uMDhhMiAyIDAgMCAxIDIgMGwuNDMuMjVhMiAyIDAgMCAxIDEgMS43M1YyMGEyIDIgMCAwIDAgMiAyaC40NGEyIDIgMCAwIDAgMi0ydi0uMThhMiAyIDAgMCAxIDEtMS43M2wuNDMtLjI1YTIgMiAwIDAgMSAyIDBsLjE1LjA4YTIgMiAwIDAgMCAyLjczLS43M2wuMjItLjM5YTIgMiAwIDAgMC0uNzMtMi43M2wtLjE1LS4wOGEyIDIgMCAwIDEtMS0xLjc0di0uNWEyIDIgMCAwIDEgMS0xLjc0bC4xNS0uMDlhMiAyIDAgMCAwIC43My0yLjczbC0uMjItLjM4YTIgMiAwIDAgMC0yLjczLS43M2wtLjE1LjA4YTIgMiAwIDAgMS0yIDBsLS40My0uMjVhMiAyIDAgMCAxLTEtMS43M1Y0YTIgMiAwIDAgMC0yLTJ6Ii8+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMyIvPjwvc3ZnPg=="
+
 NAV_ICON_GUIDE_B64 = (
     "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgZmlsbD0ibm9u"
     "ZSI+PGcgY2xpcC1wYXRoPSJ1cmwoI2EpIj48ZyBmaWx0ZXI9InVybCgjYikiPjxwYXRoIGZpbGw9IiNGRERBOEEiIGQ9Ik02"
@@ -865,6 +868,9 @@ def inject_theme():
         }}
         div.st-key-navgrp_guide div[data-testid="stExpander"] summary {{
             background-image: url("data:image/svg+xml;base64,{NAV_ICON_GUIDE_B64}") !important;
+        }}
+        div.st-key-navgrp_settings div[data-testid="stExpander"] summary {{
+            background-image: url("data:image/svg+xml;base64,{NAV_ICON_SETTINGS_B64}") !important;
         }}
         /* ★ 하위 항목 정렬 — expander 본문 '안쪽 전부'의 좌우 여백을 0으로 눕힌다.
            Streamlit이 본문 안에 감싸는 div가 버전마다 다르고 각자 여백을 갖고 있어서,
@@ -6381,7 +6387,18 @@ NAV_GROUP_KEYS = {
     "성과 리포트": "report",
     "GA 유입 리포트": None,
     "운영 도구": "ops",
+    "설정": "settings",
 }
+
+# '설정' 그룹은 마스터에게만 보인다(render_nav가 붙인다).
+NAV_ADMIN_GROUPS = {"설정": ["계정 관리"]}
+
+
+def _nav_groups() -> dict:
+    g = dict(NAV_GROUPS)
+    if _au_is_admin():
+        g.update(NAV_ADMIN_GROUPS)
+    return g
 
 # 아직 실제 데이터/로직이 없는 페이지들 — main()의 페이지 분기에서 이 목록에 있으면
 # render_coming_soon()으로 "준비 중" 안내만 보여준다. 나중에 진짜 렌더 함수가 생기면
@@ -6616,7 +6633,10 @@ def render_nav() -> str:
         # 그룹은 접이식(expander)이다. 지금 보고 있는 페이지가 속한 그룹만 펼쳐두고
         # 나머지는 접어서, 사이드바가 길어지지 않게 한다.
         # 현재 페이지는 왼쪽 파란 막대 + 파란 배경으로 표시한다(inject_theme의 CSS).
-        for group, pages in NAV_GROUPS.items():
+        _groups = _nav_groups()
+        if not any(st.session_state["nav_page"] in ps for ps in _groups.values()):
+            st.session_state["nav_page"] = default_page
+        for group, pages in _groups.items():
             is_active_group = st.session_state["nav_page"] in pages
             # 그룹마다 다른 아이콘을 쓰려면 CSS가 그룹을 구분할 수 있어야 하는데, Streamlit은
             # 위젯마다 별도 컨테이너로 감싸서 :nth-of-type으로는 구분이 안 된다.
@@ -23617,8 +23637,515 @@ def render_operation_comment_page(
 # ──────────────────────────────────────────────────────────────
 # 메인
 # ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# 로그인·권한 — 마스터 1명 + 읽기 전용 멤버
+# ──────────────────────────────────────────────────────────────
+# · 마스터 계정은 Streamlit Secrets의 [auth]에만 있다. 화면·DB 어디에서도 바꿀 수 없으므로
+#   누구도 마스터 권한을 가져가거나 바꿀 수 없다(바꾸려면 Streamlit 앱 소유자가 Secrets를 고쳐야 함).
+# · 멤버는 마스터만 '설정 > 계정 관리'에서 추가·해제·비밀번호 재설정한다. DB의 role 값과 상관없이
+#   DB에서 온 계정은 무조건 '읽기 전용'으로 취급한다(누가 DB를 고쳐도 마스터가 될 수 없게).
+# · 읽기 전용은 저장·동기화·업로드·편집 버튼을 전부 잠근다(아래 _au_install_ro). 새 버튼이 생겨도
+#   기본이 '잠금'이라, 읽기 전용에 열어둘 버튼만 _AU_RO_ALLOW_KEYS에 적는다.
+# · Secrets에 [auth]가 없으면 예전처럼 로그인 없이 열린다(설정 전에 다들 잠기는 걸 막으려고).
+import hmac as _au_hmac
+import secrets as _au_secrets
+
+AUTH_TABLE = "dashboard_users"
+AUTH_COOKIE = "stco_auth"
+AUTH_COOKIE_DAYS = 30          # '로그인 유지' 기간. 들어올 때마다 다시 30일로 늘어난다.
+AUTH_RECHECK_SEC = 300         # 로그인한 사람이 해제됐는지 5분마다 다시 확인
+AUTH_MAX_FAILS = 5             # 같은 아이디로 5번 틀리면
+AUTH_LOCK_SEC = 300            # 5분 잠금
+
+AUTH_TABLE_SQL = f"""create table if not exists public.{AUTH_TABLE} (
+  user_id    text primary key,
+  name       text not null default '',
+  role       text not null default 'viewer',
+  pw_hash    text not null,
+  salt       text not null,
+  created_at timestamptz not null default now(),
+  last_login timestamptz
+);"""
+
+
+def _auth_cfg():
+    sec = _secrets_section("auth") or {}
+    mid = str(sec.get("master_id") or "").strip().lower()
+    mpw = str(sec.get("master_password") or "")
+    if not mid or not mpw:
+        return None
+    secret = str(sec.get("cookie_secret") or "") or hashlib.sha256(
+        (mpw + "|" + str(_secrets_get("SUPABASE_KEY", ""))).encode()).hexdigest()
+    return {"master_id": mid, "master_pw": mpw,
+            "master_name": str(sec.get("master_name") or "마스터").strip(), "secret": secret}
+
+
+def _au_role() -> str:
+    """'master' | 'viewer' | 'open'(로그인 미설정) | ''(로그인 전)"""
+    try:
+        return str(st.session_state.get("au_role") or "")
+    except Exception:
+        return ""
+
+
+def _au_is_admin() -> bool:
+    return _au_role() in ("master", "open")
+
+
+def _au_hash(pw: str, salt_hex: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt_hex), 200_000).hex()
+
+
+def _au_norm_id(uid) -> str:
+    return str(uid or "").strip().lower()
+
+
+def _au_users():
+    """(계정 목록, 오류문구). 표가 없거나 연결이 안 되면 오류문구를 돌려준다."""
+    client = get_supabase_client()
+    if client is None:
+        return [], "Supabase 연결이 없습니다."
+    try:
+        res = client.table(AUTH_TABLE).select("*").execute()
+        return list(res.data or []), None
+    except Exception as e:
+        return [], str(e)[:300]
+
+
+def _au_user(uid: str):
+    client = get_supabase_client()
+    if client is None:
+        return None
+    try:
+        res = client.table(AUTH_TABLE).select("*").eq("user_id", _au_norm_id(uid)).execute()
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _au_tag(cfg, uid: str, row=None):
+    """비밀번호가 바뀌거나 계정이 해제되면 저장된 '로그인 유지'가 바로 무효가 되도록 쓰는 꼬리표."""
+    if uid == cfg["master_id"]:
+        return hashlib.sha256(cfg["master_pw"].encode()).hexdigest()[:16]
+    row = row if row is not None else _au_user(uid)
+    return str(row["pw_hash"])[:16] if row else None
+
+
+def _au_sign(cfg, uid: str, exp: int, tag: str) -> str:
+    return _au_hmac.new(cfg["secret"].encode(), f"{uid}|{exp}|{tag}".encode(),
+                        hashlib.sha256).hexdigest()[:40]
+
+
+def _au_make_token(cfg, uid: str, tag: str) -> str:
+    exp = int(time.time()) + AUTH_COOKIE_DAYS * 86400
+    raw = f"{uid}|{exp}|{_au_sign(cfg, uid, exp, tag)}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _au_read_token(cfg, tok: str):
+    """쿠키 → (아이디, 만료시각) 또는 None"""
+    try:
+        raw = base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)).decode()
+        uid, exp_s, sig = raw.rsplit("|", 2)
+        exp = int(exp_s)
+    except Exception:
+        return None
+    if exp < time.time():
+        return None
+    tag = _au_tag(cfg, uid)
+    if not tag or not _au_hmac.compare_digest(sig, _au_sign(cfg, uid, exp, tag)):
+        return None
+    return uid, exp
+
+
+@st.cache_resource(show_spinner=False)
+def _au_fail_box() -> dict:
+    return {}
+
+
+def _au_locked(uid: str) -> int:
+    f = _au_fail_box().get(uid)
+    if f and f[0] >= AUTH_MAX_FAILS and f[1] > time.time():
+        return int(f[1] - time.time())
+    return 0
+
+
+def _au_fail(uid: str):
+    box = _au_fail_box()
+    n, until = box.get(uid, (0, 0))
+    if until and until < time.time():
+        n = 0
+    n += 1
+    box[uid] = (n, time.time() + AUTH_LOCK_SEC)
+
+
+def _au_check_login(cfg, uid: str, pw: str):
+    """맞으면 (역할, 이름, 꼬리표), 틀리면 None"""
+    if uid == cfg["master_id"]:
+        if _au_hmac.compare_digest(pw.encode(), cfg["master_pw"].encode()):
+            return "master", cfg["master_name"], _au_tag(cfg, uid)
+        return None
+    row = _au_user(uid)
+    if not row:
+        return None
+    try:
+        ok = _au_hmac.compare_digest(_au_hash(pw, str(row["salt"])), str(row["pw_hash"]))
+    except Exception:
+        ok = False
+    if not ok:
+        return None
+    return "viewer", str(row.get("name") or uid), str(row["pw_hash"])[:16]
+
+
+def _au_touch_login(uid: str):
+    client = get_supabase_client()
+    if client is None:
+        return
+    try:
+        client.table(AUTH_TABLE).update({"last_login": datetime.utcnow().isoformat()}) \
+            .eq("user_id", uid).execute()
+    except Exception:
+        pass
+
+
+def _au_set_session(uid, role, name, tag):
+    st.session_state.update({"au_uid": uid, "au_role": role, "au_name": name,
+                             "au_tag": tag, "au_checked": time.time()})
+
+
+def _au_clear_session():
+    for k in ("au_uid", "au_role", "au_name", "au_tag", "au_checked"):
+        st.session_state.pop(k, None)
+
+
+def _au_cookie_js(value: str, days: int):
+    # components.html의 iframe은 같은 출처라 부모 문서의 쿠키를 쓸 수 있다.
+    max_age = days * 86400
+    components.html(
+        "<script>try{parent.document.cookie='" + AUTH_COOKIE + "=" + value
+        + "; path=/; max-age=" + str(max_age) + "; SameSite=Lax; Secure';}catch(e){}</script>",
+        height=0,
+    )
+
+
+def _au_flush_cookie_ops():
+    tok = st.session_state.pop("au_cookie_set", None)
+    if tok:
+        _au_cookie_js(tok, AUTH_COOKIE_DAYS)
+    if st.session_state.pop("au_cookie_clear", False):
+        _au_cookie_js("", 0)
+
+
+def _au_login_page(cfg):
+    st.markdown(f"""
+    <style>
+    section[data-testid="stSidebar"], [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] {{ display:none !important; }}
+    .stApp {{ background:{THEME_COLORS["surface"]} !important; }}
+    .block-container {{ max-width:520px !important; padding-top:12vh !important; }}
+    .au-title {{ text-align:center; font-size:26px; font-weight:700; color:{THEME_COLORS["foreground"]};
+                margin:0 0 22px 0; letter-spacing:-0.3px; }}
+    div[data-testid="stForm"] {{ background:#fff !important; border:1px solid {THEME_COLORS["border"]} !important;
+                border-radius:14px !important; padding:34px 40px 30px 40px !important; }}
+    div[data-testid="stForm"] [data-testid="stTextInputRootElement"],
+    div[data-testid="stForm"] [data-testid="stTextInputRootElement"] div,
+    div[data-testid="stForm"] [data-testid="stTextInputRootElement"] input,
+    div[data-testid="stForm"] [data-testid="stTextInputRootElement"] button {{
+        background:transparent !important; background-color:transparent !important;
+        border:none !important; box-shadow:none !important; }}
+    div[data-testid="stForm"] [data-testid="stTextInputRootElement"] {{
+        border-radius:0 !important; border-bottom:1.5px solid #cfd4da !important; }}
+    div[data-testid="stForm"] [data-testid="stTextInputRootElement"]:focus-within {{
+        border-bottom-color:{THEME_COLORS["primary"]} !important; }}
+    div[data-testid="stForm"] input {{ font-size:17px !important; padding-left:2px !important; }}
+    div[data-testid="stForm"] input::placeholder {{ color:#9aa3ad !important; }}
+    div[data-testid="stForm"] [data-testid="stCheckbox"] label > div:first-of-type,
+    div[data-testid="stForm"] label[data-baseweb="checkbox"] > span:first-child {{
+        background-color:{THEME_COLORS["primary"]} !important; border-color:{THEME_COLORS["primary"]} !important; }}
+    div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button {{
+        width:100% !important; background:{THEME_COLORS["primary"]} !important;
+        border:none !important; border-radius:10px !important; padding:13px 0 !important; margin-top:6px; }}
+    div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:hover {{
+        background:{THEME_COLORS["primary_hover"]} !important; }}
+    div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button p {{
+        color:#fff !important; font-size:16px !important; font-weight:700 !important; }}
+    .au-foot {{ text-align:center; color:{THEME_COLORS["muted"]}; font-size:13px; margin-top:14px; }}
+    </style>
+    <div class="au-title">STCO 광고 성과 대시보드</div>
+    """, unsafe_allow_html=True)
+    with st.form("au_login_form", clear_on_submit=False):
+        uid = st.text_input("아이디", key="au_login_id", placeholder="아이디(이메일 주소)",
+                            label_visibility="collapsed")
+        pw = st.text_input("비밀번호", key="au_login_pw", type="password", placeholder="비밀번호",
+                           label_visibility="collapsed")
+        keep = st.checkbox(f"로그인 유지 ({AUTH_COOKIE_DAYS}일)", value=True, key="au_login_keep")
+        go = st.form_submit_button("로그인", use_container_width=True)
+    st.markdown('<div class="au-foot">계정이 필요하면 관리자(마스터)에게 요청하세요.</div>',
+                unsafe_allow_html=True)
+    if not go:
+        return
+    uid_n = _au_norm_id(uid)
+    if not uid_n or not pw:
+        st.error("아이디와 비밀번호를 입력해주세요.")
+        return
+    left = _au_locked(uid_n)
+    if left:
+        st.error(f"비밀번호를 여러 번 틀려서 잠겼습니다. {left // 60 + 1}분 뒤에 다시 시도해주세요.")
+        return
+    res = _au_check_login(cfg, uid_n, pw)
+    if not res:
+        _au_fail(uid_n)
+        st.error("아이디 또는 비밀번호가 맞지 않습니다.")
+        return
+    _au_fail_box().pop(uid_n, None)
+    role, name, tag = res
+    _au_set_session(uid_n, role, name, tag)
+    st.session_state.pop("au_logged_out", None)
+    if role == "viewer":
+        _au_touch_login(uid_n)
+    if keep:
+        st.session_state["au_cookie_set"] = _au_make_token(cfg, uid_n, tag)
+    st.rerun()
+
+
+def _auth_gate() -> bool:
+    """로그인돼 있으면 True. 아니면 로그인 화면을 그리고 False."""
+    cfg = _auth_cfg()
+    if cfg is None:
+        st.session_state["au_role"] = "open"
+        return True
+    if _au_role() == "open":
+        _au_clear_session()
+    _au_flush_cookie_ops()
+
+    if _au_role() in ("master", "viewer"):
+        # 해제·비밀번호 변경을 5분 안에 반영
+        if time.time() - float(st.session_state.get("au_checked") or 0) > AUTH_RECHECK_SEC:
+            uid = st.session_state.get("au_uid")
+            if _au_tag(cfg, uid) != st.session_state.get("au_tag"):
+                _au_clear_session()
+                st.session_state["au_cookie_clear"] = True
+                st.rerun()
+            st.session_state["au_checked"] = time.time()
+        return True
+
+    # 저장된 '로그인 유지' 쿠키로 자동 로그인 (방금 로그아웃한 창은 제외)
+    if not st.session_state.get("au_logged_out"):
+        try:
+            tok = st.context.cookies.get(AUTH_COOKIE)
+        except Exception:
+            tok = None
+        got = _au_read_token(cfg, tok) if tok else None
+        if got:
+            uid, exp = got
+            if uid == cfg["master_id"]:
+                _au_set_session(uid, "master", cfg["master_name"], _au_tag(cfg, uid))
+            else:
+                row = _au_user(uid)
+                if row:
+                    _au_set_session(uid, "viewer", str(row.get("name") or uid), str(row["pw_hash"])[:16])
+            if _au_role():
+                if exp - time.time() < (AUTH_COOKIE_DAYS - 1) * 86400:   # 하루 지나면 30일로 다시 연장
+                    _au_cookie_js(_au_make_token(cfg, uid, st.session_state["au_tag"]), AUTH_COOKIE_DAYS)
+                return True
+
+    _au_login_page(cfg)
+    return False
+
+
+def render_auth_sidebar():
+    role = _au_role()
+    if role == "open":
+        st.sidebar.caption("🔓 로그인 미설정 — 지금은 누구나 들어올 수 있습니다. '설정 > 계정 관리'를 확인하세요.")
+        return
+    if role not in ("master", "viewer"):
+        return
+    badge = "마스터" if role == "master" else "읽기 전용"
+    st.sidebar.markdown(
+        f'<div style="padding:8px 2px 4px;color:{SIDEBAR["text"]};font-size:13px">'
+        f'👤 <b style="color:{SIDEBAR["text_on"]}">{html_escape(st.session_state.get("au_name") or "")}</b>'
+        f' · {badge}</div>', unsafe_allow_html=True)
+    if st.sidebar.button("로그아웃", key="au_logout", use_container_width=True):
+        _au_clear_session()
+        st.session_state["au_logged_out"] = True
+        st.session_state["au_cookie_clear"] = True
+        st.rerun()
+
+
+def html_escape(s) -> str:
+    import html as _h
+    return _h.escape(str(s or ""))
+
+
+# ── 읽기 전용 잠금 ────────────────────────────────────────────────
+# 읽기 전용 계정에서 눌러도 되는 버튼·입력만 적는다(보기·기간·정렬·내보내기·진단).
+_AU_RO_ALLOW_KEYS = re.compile(
+    r"^(nav_|au_|.*_preset_opt_\d+$|.*_prev$|.*_next$|.*_p\d+$|cp_apply$|fv4_btn_(new|re)$|"
+    r"fv4_visit_chk$|ga4_signup_check$|gc_xlsx_make$|mu_go$|mu_file$|gc_criteo_probe2?$|"
+    r"fv4_diag_btn$|fv4_spend_diag_btn$)"
+)
+_AU_RO_ALLOW_LABELS = {"확인"}     # 기간 직접 지정 폼의 '확인'
+
+
+def _au_ro_wrap(orig, kind: str, is_method: bool):
+    def _w(*a, **kw):
+        if _au_role() == "viewer":
+            args = a[1:] if is_method else a
+            label = args[0] if args else kw.get("label", "")
+            key = kw.get("key")
+            allowed = (key is not None and _AU_RO_ALLOW_KEYS.match(str(key))) or (
+                kind in ("button", "form_submit_button") and str(label).strip() in _AU_RO_ALLOW_LABELS)
+            if not allowed:
+                kw["disabled"] = True
+                if kind in ("button", "form_submit_button") and not kw.get("help"):
+                    kw["help"] = "읽기 전용 계정은 데이터를 바꿀 수 없습니다."
+        return orig(*a, **kw)
+    _w._au_ro = True
+    return _w
+
+
+def _au_install_ro():
+    try:
+        from streamlit.delta_generator import DeltaGenerator as _DG
+    except Exception:
+        _DG = None
+    for kind in ("button", "form_submit_button", "file_uploader", "data_editor"):
+        if _DG is not None:
+            f = getattr(_DG, kind, None)
+            if f is not None and not getattr(f, "_au_ro", False):
+                setattr(_DG, kind, _au_ro_wrap(f, kind, True))
+        g = getattr(st, kind, None)
+        if g is not None and not getattr(g, "_au_ro", False):
+            setattr(st, kind, _au_ro_wrap(g, kind, False))
+
+
+_au_install_ro()
+
+
+# ── 설정 > 계정 관리 (마스터만) ───────────────────────────────────
+def _au_fmt_ts(v) -> str:
+    if not v:
+        return "-"
+    try:
+        t = pd.to_datetime(v, utc=True).tz_convert("Asia/Seoul")
+        return t.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(v)[:16]
+
+
+def render_account_page():
+    st.subheader("계정 관리")
+    cfg = _auth_cfg()
+    if cfg is None:
+        st.warning("아직 로그인이 설정되지 않아 누구나 대시보드에 들어올 수 있습니다.")
+        st.markdown(
+            "Streamlit 앱 화면 오른쪽 아래 **Manage app → ⋮ → Settings → Secrets** 맨 아래에 "
+            "아래 3줄을 붙여 넣고 **Save**를 누르면, 그때부터 로그인해야 들어올 수 있습니다. "
+            "이 계정이 **마스터**이고, 화면에서는 누구도 바꿀 수 없습니다.")
+        st.code('[auth]\nmaster_id = "마스터 아이디(이메일)"\nmaster_password = "마스터 비밀번호"\n'
+                'master_name = "이름"', language="toml")
+        return
+    if _au_role() != "master":
+        st.error("마스터만 볼 수 있는 화면입니다.")
+        return
+
+    users, err = _au_users()
+    if err:
+        st.error(f"계정 표({AUTH_TABLE})를 읽지 못했습니다 — {err}")
+        st.caption("Supabase SQL Editor에서 아래를 한 번 실행하면 됩니다.")
+        st.code(AUTH_TABLE_SQL, language="sql")
+        return
+    users = sorted(users, key=lambda r: str(r.get("created_at") or ""))
+    _fl = st.session_state.pop("au_flash", None)
+    if _fl:
+        st.success(_fl)
+
+    st.markdown(f"#### 멤버 <span style='color:{THEME_COLORS['primary']}'>{len(users) + 1}명</span>",
+                unsafe_allow_html=True)
+    rows = [{"아이디": f"{cfg['master_id']} (나)", "이름": cfg["master_name"], "권한": "마스터",
+             "추가일": "-", "마지막 로그인": "-"}]
+    for r in users:
+        rows.append({"아이디": r.get("user_id"), "이름": r.get("name") or "", "권한": "읽기 전용",
+                     "추가일": _au_fmt_ts(r.get("created_at")),
+                     "마지막 로그인": _au_fmt_ts(r.get("last_login"))})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.caption("마스터는 Secrets에만 있는 계정이라 화면에서 바꾸거나 넘길 수 없습니다. "
+               "추가한 멤버는 모두 **읽기 전용**(보기·기간 선택·엑셀 내보내기만 가능)입니다.")
+
+    client = get_supabase_client()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### ➕ 멤버 초대")
+        with st.form("au_add_form", clear_on_submit=True):
+            n_id = st.text_input("아이디 (이메일 주소)")
+            n_name = st.text_input("이름")
+            n_pw = st.text_input("비밀번호 (8자 이상)", type="password")
+            n_pw2 = st.text_input("비밀번호 확인", type="password")
+            add = st.form_submit_button("초대", type="primary", use_container_width=True)
+        if add:
+            uid = _au_norm_id(n_id)
+            if not uid or not n_name.strip():
+                st.error("아이디와 이름을 입력해주세요.")
+            elif uid == cfg["master_id"]:
+                st.error("마스터 아이디와 같은 아이디는 만들 수 없습니다.")
+            elif any(_au_norm_id(r.get("user_id")) == uid for r in users):
+                st.error("이미 있는 아이디입니다.")
+            elif len(n_pw) < 8:
+                st.error("비밀번호는 8자 이상이어야 합니다.")
+            elif n_pw != n_pw2:
+                st.error("비밀번호 확인이 다릅니다.")
+            else:
+                salt = _au_secrets.token_hex(16)
+                try:
+                    client.table(AUTH_TABLE).insert({
+                        "user_id": uid, "name": n_name.strip(), "role": "viewer",
+                        "pw_hash": _au_hash(n_pw, salt), "salt": salt}).execute()
+                    st.session_state["au_flash"] = (f"{n_name.strip()}({uid}) 계정을 만들었습니다. "
+                                                    "아이디·비밀번호를 전달해주세요.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"계정 추가 실패 — {str(e)[:200]}")
+
+    with c2:
+        st.markdown("##### 🔧 멤버 해제 · 비밀번호 재설정")
+        if not users:
+            st.caption("아직 추가한 멤버가 없습니다.")
+        else:
+            opts = [str(r.get("user_id")) for r in users]
+            names = {str(r.get("user_id")): str(r.get("name") or "") for r in users}
+            sel = st.selectbox("멤버", opts, format_func=lambda u: f"{names.get(u, '')} ({u})",
+                               key="au_sel")
+            with st.form("au_reset_form", clear_on_submit=True):
+                r_pw = st.text_input("새 비밀번호 (8자 이상)", type="password")
+                reset = st.form_submit_button("비밀번호 재설정", use_container_width=True)
+            if reset:
+                if len(r_pw) < 8:
+                    st.error("비밀번호는 8자 이상이어야 합니다.")
+                else:
+                    salt = _au_secrets.token_hex(16)
+                    try:
+                        client.table(AUTH_TABLE).update({"pw_hash": _au_hash(r_pw, salt), "salt": salt}) \
+                            .eq("user_id", sel).execute()
+                        st.success("비밀번호를 바꿨습니다. 그 멤버는 5분 안에 로그아웃되고 새 비밀번호로 들어와야 합니다.")
+                    except Exception as e:
+                        st.error(f"재설정 실패 — {str(e)[:200]}")
+            sure = st.checkbox(f"{names.get(sel, '')}({sel}) 계정을 해제합니다", key="au_del_sure")
+            if st.button("해제", key="au_del_btn", disabled=not sure, use_container_width=True):
+                try:
+                    client.table(AUTH_TABLE).delete().eq("user_id", sel).execute()
+                    st.session_state.pop("au_del_sure", None)
+                    st.session_state["au_flash"] = f"{names.get(sel, '')}({sel}) 계정을 해제했습니다. 5분 안에 로그아웃됩니다."
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"해제 실패 — {str(e)[:200]}")
+
+
+
 def main():
     _lt_memo_reset()   # 실행마다 표를 새로 한 번씩만 읽는다
+    if not _auth_gate():   # 로그인 전이면 로그인 화면만 보여준다
+        return
     # st.title()은 raw HTML(이미지)을 못 받아서, 이모지(📊) 대신 커스텀 아이콘을 쓰려면
     # 직접 <h1>을 그려야 한다. inject_theme()의 전역 h1 스타일(글자크기/굵기/색)은
     # 태그 자체를 그대로 쓰기 때문에 동일하게 적용된다.
@@ -23635,7 +24162,11 @@ def main():
         '<h1 style="margin:0 0 0.5rem 0;line-height:1.15;">온라인사업팀 광고 성과 대시보드</h1>',
         unsafe_allow_html=True,
     )
-    render_upload_panel()
+    if _au_is_admin():
+        render_upload_panel()          # 업로드·저장은 마스터만
+    else:
+        render_sidebar_brand()
+    render_auth_sidebar()
 
     # 어느 페이지를 보든 모든 테이블을 다 불러오면 화면 전환·정렬·날짜 변경 같은 사소한 조작마다
     # 수십 번의 DB 왕복이 생긴다(Streamlit은 조작할 때마다 스크립트를 처음부터 다시 실행한다).
@@ -23733,6 +24264,8 @@ def main():
     elif page == "UTM 빌더":
         render_utm_builder_page(T("utm_channel_map"), master=T("media_master"),
                                 cre=T("ga_creative_daily"))
+    elif page == "계정 관리":
+        render_account_page()
     elif page in NAV_PAGES_COMING_SOON:
         render_coming_soon(page)
 
