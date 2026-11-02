@@ -23843,11 +23843,11 @@ def _au_login_page(cfg):
     section[data-testid="stSidebar"], [data-testid="collapsedControl"],
     [data-testid="stSidebarCollapsedControl"] {{ display:none !important; }}
     .stApp {{ background:{THEME_COLORS["surface"]} !important; }}
-    .block-container {{ max-width:520px !important; padding-top:12vh !important; }}
-    .au-title {{ text-align:center; font-size:26px; font-weight:700; color:{THEME_COLORS["foreground"]};
-                margin:0 0 22px 0; letter-spacing:-0.3px; }}
+    .block-container {{ max-width:680px !important; padding-top:10vh !important; }}
+    .au-title {{ text-align:center; font-size:34px; font-weight:700; color:{THEME_COLORS["foreground"]};
+                margin:0 0 28px 0; letter-spacing:-0.3px; }}
     div[data-testid="stForm"] {{ background:#fff !important; border:1px solid {THEME_COLORS["border"]} !important;
-                border-radius:14px !important; padding:34px 40px 30px 40px !important; }}
+                border-radius:16px !important; padding:48px 56px 42px 56px !important; }}
     div[data-testid="stForm"] [data-testid="stTextInputRootElement"],
     div[data-testid="stForm"] [data-testid="stTextInputRootElement"] div,
     div[data-testid="stForm"] [data-testid="stTextInputRootElement"] input,
@@ -23858,19 +23858,20 @@ def _au_login_page(cfg):
         border-radius:0 !important; border-bottom:1.5px solid #cfd4da !important; }}
     div[data-testid="stForm"] [data-testid="stTextInputRootElement"]:focus-within {{
         border-bottom-color:{THEME_COLORS["primary"]} !important; }}
-    div[data-testid="stForm"] input {{ font-size:17px !important; padding-left:2px !important; }}
+    div[data-testid="stForm"] input {{ font-size:20px !important; padding:10px 2px !important; }}
+    div[data-testid="stForm"] [data-testid="stCheckbox"] p {{ font-size:16px !important; }}
     div[data-testid="stForm"] input::placeholder {{ color:#9aa3ad !important; }}
     div[data-testid="stForm"] [data-testid="stCheckbox"] label > div:first-of-type,
     div[data-testid="stForm"] label[data-baseweb="checkbox"] > span:first-child {{
         background-color:{THEME_COLORS["primary"]} !important; border-color:{THEME_COLORS["primary"]} !important; }}
     div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button {{
         width:100% !important; background:{THEME_COLORS["primary"]} !important;
-        border:none !important; border-radius:10px !important; padding:13px 0 !important; margin-top:6px; }}
+        border:none !important; border-radius:12px !important; padding:17px 0 !important; margin-top:10px; }}
     div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:hover {{
         background:{THEME_COLORS["primary_hover"]} !important; }}
     div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button p {{
-        color:#fff !important; font-size:16px !important; font-weight:700 !important; }}
-    .au-foot {{ text-align:center; color:{THEME_COLORS["muted"]}; font-size:13px; margin-top:14px; }}
+        color:#fff !important; font-size:19px !important; font-weight:700 !important; }}
+    .au-foot {{ text-align:center; color:{THEME_COLORS["muted"]}; font-size:15px; margin-top:18px; }}
     </style>
     <div class="au-title">STCO 광고 성과 대시보드</div>
     """, unsafe_allow_html=True)
