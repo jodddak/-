@@ -23951,7 +23951,14 @@ def _auth_gate() -> bool:
                     _au_cookie_js(_au_make_token(cfg, uid, st.session_state["au_tag"]), AUTH_COOKIE_DAYS)
                 return True
 
+    try:
+        _ck = dict(st.context.cookies)
+        _tk = _ck.get(AUTH_COOKIE)
+        st.session_state["au_diag"] = f"c{len(_ck)}{'+' if _tk else '-'}{'v' if (_tk and _au_read_token(cfg, _tk)) else 'x'}"
+    except Exception as _e:
+        st.session_state["au_diag"] = "err:" + type(_e).__name__
     _au_login_page(cfg)
+    st.caption(st.session_state.get("au_diag", ""))
     return False
 
 
