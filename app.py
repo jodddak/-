@@ -24078,7 +24078,13 @@ def _au_fmt_ts(v) -> str:
 
 
 def _au_my_password_box(cfg):
-    """로그인한 본인 비밀번호 변경 — 마스터·뷰어 모두."""
+    """로그인한 본인 비밀번호 변경 — 마스터·뷰어 모두. 화면 폭의 절반만 쓴다."""
+    _col, _ = st.columns(2)
+    with _col:
+        _au_my_password_box_inner(cfg)
+
+
+def _au_my_password_box_inner(cfg):
     uid = st.session_state.get("au_uid")
     role = _au_role()
     st.markdown("##### 🔑 내 비밀번호 변경")
