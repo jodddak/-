@@ -23962,7 +23962,7 @@ def render_auth_sidebar():
         return
     if role not in ("master", "viewer"):
         return
-    badge = "마스터" if role == "master" else "읽기 전용"
+    badge = "마스터" if role == "master" else "뷰어"
     st.sidebar.markdown(
         f'<div style="padding:8px 2px 4px;color:{SIDEBAR["text"]};font-size:13px">'
         f'👤 <b style="color:{SIDEBAR["text_on"]}">{html_escape(st.session_state.get("au_name") or "")}</b>'
@@ -24000,7 +24000,7 @@ def _au_ro_wrap(orig, kind: str, is_method: bool):
             if not allowed:
                 kw["disabled"] = True
                 if kind in ("button", "form_submit_button") and not kw.get("help"):
-                    kw["help"] = "읽기 전용 계정은 데이터를 바꿀 수 없습니다."
+                    kw["help"] = "뷰어 계정은 업로드·저장·수정을 할 수 없습니다(보기 전용)."
         return orig(*a, **kw)
     _w._au_ro = True
     return _w
@@ -24067,17 +24067,18 @@ def render_account_page():
     rows = [{"아이디": f"{cfg['master_id']} (나)", "이름": cfg["master_name"], "권한": "마스터",
              "추가일": "-", "마지막 로그인": "-"}]
     for r in users:
-        rows.append({"아이디": r.get("user_id"), "이름": r.get("name") or "", "권한": "읽기 전용",
+        rows.append({"아이디": r.get("user_id"), "이름": r.get("name") or "", "권한": "뷰어",
                      "추가일": _au_fmt_ts(r.get("created_at")),
                      "마지막 로그인": _au_fmt_ts(r.get("last_login"))})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     st.caption("마스터는 Secrets에만 있는 계정이라 화면에서 바꾸거나 넘길 수 없습니다. "
-               "추가한 멤버는 모두 **읽기 전용**(보기·기간 선택·엑셀 내보내기만 가능)입니다.")
+               "초대한 멤버는 모두 **뷰어**입니다 — 화면 보기·기간 선택·엑셀 내보내기만 되고, "
+               "파일 업로드·저장·동기화·수정·코멘트 기록 같은 변경은 할 수 없습니다.")
 
     client = get_supabase_client()
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("##### ➕ 멤버 초대")
+        st.markdown("##### ➕ 멤버 초대 (뷰어)")
         with st.form("au_add_form", clear_on_submit=True):
             n_id = st.text_input("아이디 (이메일 주소)")
             n_name = st.text_input("이름")
