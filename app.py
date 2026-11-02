@@ -6396,7 +6396,7 @@ NAV_ADMIN_GROUPS = {"설정": ["계정 관리"]}
 
 def _nav_groups() -> dict:
     g = dict(NAV_GROUPS)
-    if _au_is_admin():
+    if _au_role() in ("master", "viewer", "open"):   # 뷰어는 '내 비밀번호 변경'만 보인다
         g.update(NAV_ADMIN_GROUPS)
     return g
 
@@ -23724,10 +23724,18 @@ def _au_user(uid: str):
         return None
 
 
+AUTH_MASTER_ROW = "__master__"   # 마스터가 화면에서 바꾼 비밀번호(해시)만 담는 줄. 권한은 Secrets 고정.
+
+
 def _au_tag(cfg, uid: str, row=None):
     """비밀번호가 바뀌거나 계정이 해제되면 저장된 '로그인 유지'가 바로 무효가 되도록 쓰는 꼬리표."""
     if uid == cfg["master_id"]:
+        mrow = _au_user(AUTH_MASTER_ROW)
+        if mrow:
+            return str(mrow["pw_hash"])[:16]
         return hashlib.sha256(cfg["master_pw"].encode()).hexdigest()[:16]
+    if uid.startswith("__"):
+        return None
     row = row if row is not None else _au_user(uid)
     return str(row["pw_hash"])[:16] if row else None
 
@@ -23783,8 +23791,16 @@ def _au_fail(uid: str):
 def _au_check_login(cfg, uid: str, pw: str):
     """맞으면 (역할, 이름, 꼬리표), 틀리면 None"""
     if uid == cfg["master_id"]:
-        if _au_hmac.compare_digest(pw.encode(), cfg["master_pw"].encode()):
-            return "master", cfg["master_name"], _au_tag(cfg, uid)
+        mrow = _au_user(AUTH_MASTER_ROW)
+        if mrow:   # 화면에서 비밀번호를 바꾼 뒤면 그 비밀번호로만 들어온다
+            try:
+                ok = _au_hmac.compare_digest(_au_hash(pw, str(mrow["salt"])), str(mrow["pw_hash"]))
+            except Exception:
+                ok = False
+        else:
+            ok = _au_hmac.compare_digest(pw.encode(), cfg["master_pw"].encode())
+        return ("master", cfg["master_name"], _au_tag(cfg, uid)) if ok else None
+    if uid.startswith("__"):
         return None
     row = _au_user(uid)
     if not row:
@@ -23819,14 +23835,14 @@ def _au_clear_session():
         st.session_state.pop(k, None)
 
 
-def _au_cookie_js(value: str, days: int):
+def _au_cookie_js(value, days: int):
     # components.html의 iframe은 같은 출처라 부모 문서의 쿠키를 쓸 수 있다.
-    max_age = days * 86400
-    components.html(
-        "<script>try{parent.document.cookie='" + AUTH_COOKIE + "=" + value
-        + "; path=/; max-age=" + str(max_age) + "; SameSite=Lax; Secure';}catch(e){}</script>",
-        height=0,
-    )
+    # value=None이면 쿠키는 그대로 두고 '자동 로그인 시도' 표시만 지운다.
+    js = "parent.sessionStorage.removeItem('au_try');"
+    if value is not None:
+        js += ("parent.document.cookie='" + AUTH_COOKIE + "=" + value + "; path=/; max-age="
+               + str(days * 86400) + "; SameSite=Lax; Secure';")
+    components.html("<script>try{" + js + "}catch(e){}</script>", height=0)
 
 
 def _au_flush_cookie_ops():
@@ -23933,10 +23949,18 @@ def _auth_gate() -> bool:
 
     # 저장된 '로그인 유지' 쿠키로 자동 로그인 (방금 로그아웃한 창은 제외)
     if not st.session_state.get("au_logged_out"):
+        tok = None
         try:
-            tok = st.context.cookies.get(AUTH_COOKIE)
+            tok = st.query_params.get("au")
+            if tok:
+                del st.query_params["au"]
         except Exception:
             tok = None
+        if not tok:
+            try:
+                tok = st.context.cookies.get(AUTH_COOKIE)
+            except Exception:
+                tok = None
         got = _au_read_token(cfg, tok) if tok else None
         if got:
             uid, exp = got
@@ -23949,16 +23973,27 @@ def _auth_gate() -> bool:
             if _au_role():
                 if exp - time.time() < (AUTH_COOKIE_DAYS - 1) * 86400:   # 하루 지나면 30일로 다시 연장
                     _au_cookie_js(_au_make_token(cfg, uid, st.session_state["au_tag"]), AUTH_COOKIE_DAYS)
+                else:
+                    _au_cookie_js(None, 0)
                 return True
+        elif tok:
+            st.session_state["au_cookie_clear"] = True     # 무효(해제·비번 변경·만료)면 지운다
+            _au_flush_cookie_ops()
 
-    try:
-        _ck = dict(st.context.cookies)
-        _tk = _ck.get(AUTH_COOKIE)
-        st.session_state["au_diag"] = f"c{len(_ck)}{'+' if _tk else '-'}{'v' if (_tk and _au_read_token(cfg, _tk)) else 'x'}"
-    except Exception as _e:
-        st.session_state["au_diag"] = "err:" + type(_e).__name__
+    if not st.session_state.get("au_logged_out"):
+        # Streamlit Cloud는 우리 쿠키를 서버로 안 넘겨준다(st.context.cookies에 안 보임).
+        # 그래서 브라우저가 쿠키를 읽어 주소 ?au=… 로 한 번 넘겨주고, 서버가 확인 즉시 주소에서 지운다.
+        # sessionStorage 표시로 같은 탭에서 무한 새로고침이 생기지 않게 막는다.
+        # iframe(샌드박스) 안에서는 부모 창 주소를 못 바꿔서, 부모 문서에 스크립트를 넣어 거기서 실행한다.
+        _js = ("try{var m=document.cookie.match(/(?:^|; )" + AUTH_COOKIE + "=([^;]+)/),"
+               "u=new URL(location.href);"
+               "if(m&&!u.searchParams.has('au')&&!sessionStorage.getItem('au_try')){"
+               "sessionStorage.setItem('au_try','1');u.searchParams.set('au',m[1]);"
+               "location.replace(u.toString());}}catch(e){}")
+        components.html(
+            "<script>try{var d=parent.document,s=d.createElement('script');s.textContent="
+            + json.dumps(_js) + ";d.body.appendChild(s);}catch(e){}</script>", height=0)
     _au_login_page(cfg)
-    st.caption(st.session_state.get("au_diag", ""))
     return False
 
 
@@ -23993,7 +24028,7 @@ _AU_RO_ALLOW_KEYS = re.compile(
     r"fv4_visit_chk$|ga4_signup_check$|gc_xlsx_make$|mu_go$|mu_file$|gc_criteo_probe2?$|"
     r"fv4_diag_btn$|fv4_spend_diag_btn$)"
 )
-_AU_RO_ALLOW_LABELS = {"확인"}     # 기간 직접 지정 폼의 '확인'
+_AU_RO_ALLOW_LABELS = {"확인", "비밀번호 변경"}     # 기간 직접 지정 폼의 '확인', 내 비밀번호 변경
 
 
 def _au_ro_wrap(orig, kind: str, is_method: bool):
@@ -24042,8 +24077,54 @@ def _au_fmt_ts(v) -> str:
         return str(v)[:16]
 
 
+def _au_my_password_box(cfg):
+    """로그인한 본인 비밀번호 변경 — 마스터·뷰어 모두."""
+    uid = st.session_state.get("au_uid")
+    role = _au_role()
+    st.markdown("##### 🔑 내 비밀번호 변경")
+    st.caption(f"{st.session_state.get('au_name') or ''} ({uid}) · {'마스터' if role == 'master' else '뷰어'}")
+    _fl = st.session_state.pop("au_pw_flash", None)
+    if _fl:
+        st.success(_fl)
+    with st.form("au_mypw_form", clear_on_submit=True):
+        cur = st.text_input("현재 비밀번호", type="password")
+        new1 = st.text_input("새 비밀번호 (8자 이상)", type="password")
+        new2 = st.text_input("새 비밀번호 확인", type="password")
+        go = st.form_submit_button("비밀번호 변경", use_container_width=True)
+    if not go:
+        return
+    if not _au_check_login(cfg, uid, cur):
+        st.error("현재 비밀번호가 맞지 않습니다.")
+        return
+    if len(new1) < 8:
+        st.error("새 비밀번호는 8자 이상이어야 합니다.")
+        return
+    if new1 != new2:
+        st.error("새 비밀번호 확인이 다릅니다.")
+        return
+    client = get_supabase_client()
+    salt = _au_secrets.token_hex(16)
+    h = _au_hash(new1, salt)
+    try:
+        if role == "master":
+            client.table(AUTH_TABLE).upsert({"user_id": AUTH_MASTER_ROW, "name": "(master password)",
+                                              "role": "master_pw", "pw_hash": h, "salt": salt},
+                                             on_conflict="user_id").execute()
+        else:
+            client.table(AUTH_TABLE).update({"pw_hash": h, "salt": salt}).eq("user_id", uid).execute()
+    except Exception as e:
+        st.error(f"변경 실패 — {str(e)[:200]}")
+        return
+    # 이 창은 로그인 유지 — 새 비밀번호 기준으로 꼬리표·쿠키를 다시 만든다(다른 기기는 로그아웃됨)
+    st.session_state["au_tag"] = h[:16]
+    st.session_state["au_checked"] = time.time()
+    st.session_state["au_cookie_set"] = _au_make_token(cfg, uid, h[:16])
+    st.session_state["au_pw_flash"] = "비밀번호를 바꿨습니다. 다음 로그인부터 새 비밀번호를 쓰세요."
+    st.rerun()
+
+
 def render_account_page():
-    st.subheader("계정 관리")
+    st.subheader("계정 관리" if _au_role() != "viewer" else "내 계정")
     cfg = _auth_cfg()
     if cfg is None:
         st.warning("아직 로그인이 설정되지 않아 누구나 대시보드에 들어올 수 있습니다.")
@@ -24054,8 +24135,14 @@ def render_account_page():
         st.code('[auth]\nmaster_id = "마스터 아이디(이메일)"\nmaster_password = "마스터 비밀번호"\n'
                 'master_name = "이름"', language="toml")
         return
+    st.markdown(f"""<style>
+    div[data-testid="stFormSubmitButton"] button {{ background:{THEME_COLORS["primary"]} !important;
+        border:none !important; border-radius:10px !important; }}
+    div[data-testid="stFormSubmitButton"] button:hover {{ background:{THEME_COLORS["primary_hover"]} !important; }}
+    div[data-testid="stFormSubmitButton"] button p {{ color:#fff !important; font-weight:700 !important; }}
+    </style>""", unsafe_allow_html=True)
     if _au_role() != "master":
-        st.error("마스터만 볼 수 있는 화면입니다.")
+        _au_my_password_box(cfg)
         return
 
     users, err = _au_users()
@@ -24065,6 +24152,7 @@ def render_account_page():
         st.code(AUTH_TABLE_SQL, language="sql")
         return
     users = sorted(users, key=lambda r: str(r.get("created_at") or ""))
+    users = [r for r in users if not str(r.get("user_id") or "").startswith("__")]   # 마스터 비밀번호 줄 제외
     _fl = st.session_state.pop("au_flash", None)
     if _fl:
         st.success(_fl)
@@ -24096,7 +24184,7 @@ def render_account_page():
             uid = _au_norm_id(n_id)
             if not uid or not n_name.strip():
                 st.error("아이디와 이름을 입력해주세요.")
-            elif uid == cfg["master_id"]:
+            elif uid == cfg["master_id"] or uid.startswith("__"):
                 st.error("마스터 아이디와 같은 아이디는 만들 수 없습니다.")
             elif any(_au_norm_id(r.get("user_id")) == uid for r in users):
                 st.error("이미 있는 아이디입니다.")
@@ -24126,7 +24214,7 @@ def render_account_page():
             sel = st.selectbox("멤버", opts, format_func=lambda u: f"{names.get(u, '')} ({u})",
                                key="au_sel")
             with st.form("au_reset_form", clear_on_submit=True):
-                r_pw = st.text_input("새 비밀번호 (8자 이상)", type="password")
+                r_pw = st.text_input("멤버의 새 비밀번호 (8자 이상)", type="password")
                 reset = st.form_submit_button("비밀번호 재설정", use_container_width=True)
             if reset:
                 if len(r_pw) < 8:
@@ -24148,6 +24236,9 @@ def render_account_page():
                     st.rerun()
                 except Exception as e:
                     st.error(f"해제 실패 — {str(e)[:200]}")
+
+    st.markdown("---")
+    _au_my_password_box(cfg)
 
 
 
