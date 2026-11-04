@@ -20713,8 +20713,24 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         if isinstance(_k, tuple) and len(_k) == 2 and _k[0] == "__ads__"
                         and (label == "TOTAL" or _k[1] == label)
                         for a in (_v or []) if isinstance(a, dict)]
-            _item_off = {_it for _it in (GC_ITEM_EVENT, GC_ITEM_AB) if _it in _item_cnt and not any(
-                a.get("on") and _gc_item_of_campaign(a.get("campaign")) == _it for a in _ads_for)}
+            # 켜진 광고들의 품목(캠페인 이름 → 없으면 광고 이름으로)
+            _on_items = {(_gc_item_of_campaign(a.get("campaign")) or _gc_item_of_text(a.get("name")))
+                         for a in _ads_for if a.get("on")}
+            _item_off = set()
+            for _it in _item_cnt:
+                if label == GFA_PC_OWN:
+                    # GFA는 상태 API가 없다 — 담당자 확인(2026-11-04): PC 자사몰은 베스트만 켜짐
+                    _off = _it != GC_ITEM_BEST
+                elif _it in (GC_ITEM_EVENT, GC_ITEM_AB):
+                    _off = _it not in _on_items
+                elif label == "TOTAL" or not _ads_for or None in _on_items:
+                    # 상태를 모르는 매체(GFA MO·애드부스트 등)가 섞였거나 품목을 못 가린 켜진 광고가
+                    # 있으면 일반 품목은 회색으로 만들지 않는다(켜진 걸 꺼졌다고 보이면 더 위험)
+                    _off = False
+                else:
+                    _off = _it not in _on_items
+                if _off:
+                    _item_off.add(_it)
             if len(_item_cnt) >= 2:    # 품목이 하나뿐이면 고를 게 없다
                 _ic1, _ic2 = st.columns([0.09, 0.91])
                 _ic1.markdown('<div class="gc-flt-lbl">품목</div>', unsafe_allow_html=True)
@@ -20887,6 +20903,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _GFA_ON = {"쇼핑관심타겟", "방문자180일"}
 
             def _ads_state(lab):
+                if label == GFA_PC_OWN:
+                    # 2026-11-04 담당자: PC 자사몰은 베스트 캠페인만 켜 두고 나머지는 전부 끔
+                    return "베스트" in str(lab) or any("베스트" in str(c) for c in _lab_camps.get(lab, set()))
                 if label in (GFA_PC_OWN, GFA_MO_OWN):
                     _base = re.sub(r"\s*-\s*OFF$", "", str(lab))
                     if " · " in _base:
@@ -20939,6 +20958,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 if label not in (GFA_PC_OWN, GFA_MO_OWN):
                     return _l
                 _c = str(_camp or "").split(" · ")[0]
+                if label == GFA_PC_OWN:
+                    _b = re.sub(r"\s*-\s*OFF$", "", str(_l))
+                    if _b in ("그룹 미확인", "캠페인 미확인"):
+                        return _l
+                    return _b if ("베스트" in _b or "베스트" in str(_camp or "")) else _b + " - OFF"
                 if _gc_is_ab(_c) or "감사제" in _c:
                     return _l
                 _b = re.sub(r"\s*-\s*OFF$", "", str(_l))
