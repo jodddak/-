@@ -17228,7 +17228,21 @@ _GC_ITEM_WORDS = [
 ]
 
 
-def _gc_choice(label: str, options: list, key: str, counts: dict = None) -> str:
+def _gc_paint_off():
+    """' - OFF'가 붙은 선택 버튼을 회색·점선으로 칠한다(버튼이 Streamlit 부품이라 글자로 골라 칠함).
+    화면이 바뀌어도 다시 칠하도록 감시를 붙인다."""
+    st.components.v1.html("""<script>
+(function(){var d=window.parent.document;
+ function paint(){d.querySelectorAll('[data-testid="stButtonGroup"] button').forEach(function(b){
+  var off=b.innerText.indexOf(' - OFF')>=0;
+  if(off){b.style.background='#ECEBE7';b.style.color='#9A968C';b.style.borderStyle='dashed';}
+  else if(b.style.borderStyle==='dashed'){b.style.background='';b.style.color='';b.style.borderStyle='';}
+ });}
+ paint(); new MutationObserver(function(){paint();}).observe(d.body,{childList:true,subtree:true,characterData:true});
+})();</script>""", height=0)
+
+
+def _gc_choice(label: str, options: list, key: str, counts: dict = None, off=None) -> str:
     """버튼처럼 생긴 한 줄 선택. Streamlit 기본 segmented_control(1.40+)을 쓰고, 없으면 라디오.
 
     라디오를 CSS로 버튼처럼 꾸며 썼는데, Streamlit 버전이 바뀌면서 꾸밈이 일부만 먹어
@@ -17237,7 +17251,9 @@ def _gc_choice(label: str, options: list, key: str, counts: dict = None) -> str:
     """
     # 개수는 '보여주기'로만 붙인다(format_func). 값에 넣으면 타겟팅을 바꿔 개수가 달라질 때
     # 고른 품목이 '없는 값'이 되어 전체로 풀려버린다.
-    fmt = (lambda o: f"{o} ({counts[o]})" if counts and o in counts else o)
+    off = set(off or ())
+    fmt = (lambda o: (f"{o} - OFF" if o in off else str(o))
+           + (f" ({counts[o]})" if counts and o in counts else ""))
     if hasattr(st, "segmented_control"):
         v = st.segmented_control(label, options, default=options[0], key=key, format_func=fmt,
                                  selection_mode="single", label_visibility="collapsed")
@@ -20690,12 +20706,25 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     for e in v if isinstance(e, tuple) and e)
                 if _ab_live:
                     _item_cnt[GC_ITEM_AB] = 0
+            # 지금 안 돌리는 행사·테스트 묶음(고객감사제·A/B테스트)은 ' - OFF' + 회색으로 맨 뒤에.
+            # 매체 API에 켜진 광고가 하나라도 있으면 그대로 둔다(다시 켜면 자동으로 원래대로).
+            # GFA처럼 광고별 ON/OFF를 API로 못 받는 매체는 켜진 광고가 없는 것으로 보아 회색이다.
+            _ads_for = [a for _k, _v in (_status_map or {}).items()
+                        if isinstance(_k, tuple) and len(_k) == 2 and _k[0] == "__ads__"
+                        and (label == "TOTAL" or _k[1] == label)
+                        for a in (_v or []) if isinstance(a, dict)]
+            _item_off = {_it for _it in (GC_ITEM_EVENT, GC_ITEM_AB) if _it in _item_cnt and not any(
+                a.get("on") and _gc_item_of_campaign(a.get("campaign")) == _it for a in _ads_for)}
             if len(_item_cnt) >= 2:    # 품목이 하나뿐이면 고를 게 없다
                 _ic1, _ic2 = st.columns([0.09, 0.91])
                 _ic1.markdown('<div class="gc-flt-lbl">품목</div>', unsafe_allow_html=True)
+                _item_opts = ([i for i in _item_cnt if i not in _item_off]
+                              + [i for i in _item_cnt if i in _item_off])
                 with _ic2:
-                    item = _gc_choice("품목", [GC_ITEM_ALL] + list(_item_cnt),
-                                      key=f"gc_item_{ti}", counts=_item_cnt)
+                    item = _gc_choice("품목", [GC_ITEM_ALL] + _item_opts,
+                                      key=f"gc_item_{ti}", counts=_item_cnt, off=_item_off)
+                if _item_off:
+                    _gc_paint_off()
             # 필터는 **캠페인 단위**로 건다 — 줄에 섞인 다른 캠페인 몫은 빼고 남긴다
             # (광고 관리자의 캠페인 합계와 맞게).
             _detail_pool_rows = rows.copy()
@@ -20961,15 +20990,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # 지금 운영 안 하는 묶음( - OFF)은 맨 끝 + 회색으로 — 버튼은 Streamlit 부품이라
                 # 글자로 골라 칠하는 작은 스크립트를 한 번 붙인다(화면이 바뀌어도 다시 칠한다).
                 if any(" - OFF" in o_ for o_ in _target_options):
-                    st.components.v1.html("""<script>
-(function(){var d=window.parent.document;
- function paint(){d.querySelectorAll('[data-testid="stButtonGroup"] button').forEach(function(b){
-  var off=b.innerText.indexOf(' - OFF')>=0;
-  if(off){b.style.background='#ECEBE7';b.style.color='#9A968C';b.style.borderStyle='dashed';}
-  else if(b.style.borderStyle==='dashed'){b.style.background='';b.style.color='';b.style.borderStyle='';}
- });}
- paint(); new MutationObserver(function(){paint();}).observe(d.body,{childList:true,subtree:true,characterData:true});
-})();</script>""", height=0)
+                    _gc_paint_off()
                 if label == "구글":
                     st.caption("구글은 광고 관리자 캠페인명으로 구분합니다. 선택 기간에 집행된 과거 캠페인도 포함됩니다. "
                                "캠페인 연결이 미확인인 행은 이 표에서 제외합니다.")
