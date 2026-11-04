@@ -1562,6 +1562,12 @@ def _load_table_uncached(name: str) -> pd.DataFrame:
         keep = ~df["source_medium"].map(_ga_sm_excluded).astype(bool)
         if not keep.all():
             df = df[keep].copy()
+    # 카카오모먼트 API 광고비는 예전에 채널 '카카오'로 저장됐다 → 카카오톡 플친(캐시 업로드)과 섞이지 않게
+    if (name == "ad_spend_daily" and df is not None and not df.empty
+            and {"source", "channel"} <= set(df.columns)):
+        _km = df["source"].astype(str) == "kakao_api"
+        if _km.any():
+            df.loc[_km, "channel"] = KAKAO_MOMENT_CHANNEL
     return df
 
 # 캐시를 비우면 실행 안 메모도 같이 비운다(새로 저장한 데이터가 바로 보이게).
@@ -2829,6 +2835,9 @@ def build_utm_channel_lookup(utm_map: pd.DataFrame, include_extra: bool = True) 
         for sm, ch in zip(utm_map["source_medium"], utm_map["channel"])
         if pd.notna(sm) and pd.notna(ch)
     }
+    # 카카오모먼트(2026-11-04 라이브) — UTM 리스트 파일에 아직 없어도 매체로 잡는다
+    for _sm in ("kakaomoment / display", "kakaomoment/display"):
+        out.setdefault(_sm, "카카오모먼트")
     if include_extra:
         meta_ch = out.get(GA_META_ANCHOR_SOURCE) or GA_META_FALLBACK_CHANNEL
         for sm in GA_META_EXTRA_SOURCES:
@@ -8979,6 +8988,7 @@ FUNNEL_CANON_RULES = [
     ("메타_제로라운지", ["메타_제로라운지", "메타 (제로라운지)", "메타제로라운지", "meta_zero"]),
     ("메타", ["메타", "페이스북", "facebook", "meta", "인스타", "instagram"]),
     ("구글", ["구글", "google", "p-max", "pmax", "실적최대화", "demand"]),
+    ("카카오모먼트", ["카카오모먼트", "kakaomoment", "kakao_moment", "모먼트"]),
     ("카카오톡 플친", ["카카오", "kakao", "플친"]),
     ("모비온", ["모비온", "mobon"]),
     ("크리테오", ["크리테오", "criteo"]),
@@ -10440,6 +10450,7 @@ def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
 #   · 요청 제한: 광고계정당 5초에 1회 → 호출 사이에 텀을 둔다.
 #   · 비즈니스 토큰은 만료되므로 refresh_token으로 갱신해서 쓴다.
 KAKAO_REPORT_URL = "https://apis.moment.kakao.com/openapi/v4/adAccounts/report"
+KAKAO_MOMENT_CHANNEL = "카카오모먼트"
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/business/token"
 KAKAO_MAX_RANGE_DAYS = 31
 KAKAO_RATE_LIMIT_SEC = 5.5
@@ -10465,7 +10476,8 @@ def _kakao_access_token(cfg: dict) -> str:
 
 
 def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
-    """카카오모먼트 일별 광고비. 채널명은 예산 파일의 '카카오톡 플친'과 맞춰 '카카오'로 정규화된다."""
+    """카카오모먼트 일별 광고비. 채널명은 '카카오모먼트' — 카카오톡 플친(채널 메시지·캐시)과 다른 매체다
+    (2026-11-04 라이브. UTM kakaomoment/display ↔ 플친 kakao_msg/email)."""
     cfg = _secrets_section("kakao_moment")
     if not cfg or not cfg.get("ad_account_id"):
         return pd.DataFrame()
@@ -10504,7 +10516,7 @@ def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
             day = d.get("start")
             if not day:
                 continue
-            rows.append({"report_date": day, "channel": "카카오",
+            rows.append({"report_date": day, "channel": KAKAO_MOMENT_CHANNEL,
                          "cost_incl_vat": float(cost) * 1.1,  # 카카오 cost는 VAT 제외
                          "impressions": float(metrics.get("imp") or 0),
                          "clicks": float(metrics.get("click") or 0),
@@ -12049,8 +12061,91 @@ def _creative_frame(rows: list) -> pd.DataFrame:
     return out[AD_CREATIVE_COLS]
 
 
+KAKAO_API_BASE = "https://apis.moment.kakao.com/openapi/v4"
+
+
+def _kakao_list(sess, path: str, params: dict = None) -> list:
+    """카카오모먼트 목록 API(캠페인·광고그룹·소재) — 응답이 리스트거나 {content:[...]} 모양."""
+    r = sess.get(f"{KAKAO_API_BASE}/{path}", params=params or {}, timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"카카오 {path} 실패({r.status_code}): {r.text[:200]}")
+    j = r.json()
+    if isinstance(j, list):
+        return j
+    for k in ("content", "data", "items"):
+        if isinstance(j.get(k), list):
+            return j[k]
+    return []
+
+
+def fetch_kakao_moment_creative(start: date, end: date) -> pd.DataFrame:
+    """카카오모먼트 소재 단위 일별 실적(노출·클릭·광고비). 2026-11-04 라이브.
+
+    캠페인 → 광고그룹 → 소재 목록을 받고, 소재 보고서(creatives/report)를 100개씩 묶어 부른다.
+    보고서는 광고계정당 5초에 1회 제한이라 호출 사이에 텀을 둔다. 오늘은 보고서에서 빠진다.
+    소재 이름은 매체 관리자 이름 그대로 — GA utm_content(타겟팅_YYMMDD_소재명)의 뒤 두 조각과 맞춰 붙는다.
+    """
+    cfg = _secrets_section("kakao_moment")
+    if not cfg or not cfg.get("ad_account_id"):
+        return _empty_creative()
+    import requests, time
+    acct = str(cfg["ad_account_id"]).strip()
+    sess = requests.Session()
+    sess.headers.update({"Authorization": f"Bearer {_kakao_access_token(cfg)}", "adAccountId": acct})
+
+    info = {}      # creative_id → (소재명, 캠페인명, 광고그룹명)
+    for cp in _kakao_list(sess, "campaigns"):
+        cid, cname = cp.get("id"), str(cp.get("name") or "")
+        if cid is None:
+            continue
+        time.sleep(0.4)
+        for ag in _kakao_list(sess, "adGroups", {"campaignId": cid}):
+            gid, gname = ag.get("id"), str(ag.get("name") or "")
+            if gid is None:
+                continue
+            time.sleep(0.4)
+            for cr in _kakao_list(sess, "creatives", {"adGroupId": gid}):
+                if cr.get("id") is not None:
+                    info[str(cr["id"])] = (str(cr.get("name") or cr["id"]).strip(), cname, gname)
+    if not info:
+        return _empty_creative()
+
+    rows = []
+    ids = list(info)
+    first = True
+    for i in range(0, len(ids), 100):
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(chunk_start + timedelta(days=KAKAO_MAX_RANGE_DAYS - 1), end)
+            if not first:
+                time.sleep(KAKAO_RATE_LIMIT_SEC)
+            first = False
+            r = sess.get(f"{KAKAO_API_BASE}/creatives/report", params={
+                "creativeId": ",".join(ids[i:i + 100]),
+                "start": chunk_start.strftime("%Y%m%d"), "end": chunk_end.strftime("%Y%m%d"),
+                "timeUnit": "DAY", "metricsGroup": "BASIC"}, timeout=90)
+            if r.status_code >= 400:
+                raise RuntimeError(f"카카오 소재 보고서 실패({r.status_code}): {r.text[:200]}")
+            for d0 in (r.json().get("data") or []):
+                dims = d0.get("dimensions") or {}
+                crid = str(dims.get("creative_id") or dims.get("creativeId") or d0.get("creativeId") or "")
+                m = d0.get("metrics") or {}
+                if crid not in info or not d0.get("start"):
+                    continue
+                nm, cname, gname = info[crid]
+                rows.append({"report_date": d0["start"], "channel": KAKAO_MOMENT_CHANNEL,
+                             "creative": nm, "campaign": cname, "adset": gname,
+                             "impressions": float(m.get("imp") or 0),
+                             "clicks": float(m.get("click") or 0),
+                             "cost_incl_vat": float(m.get("cost") or 0) * 1.1,   # VAT 제외값
+                             "conversions": 0.0, "revenue": 0.0, "source": "kakao_api"})
+            chunk_start = chunk_end + timedelta(days=1)
+    return _creative_frame(rows)
+
+
 # GFA는 API가 없어 빠져 있다(리포트 업로드로 채운다).
 AD_CREATIVE_FETCHERS = [
+    ("카카오모먼트", fetch_kakao_moment_creative),
     ("메타", fetch_meta_creative),
     ("구글", fetch_google_creative),
     ("크리테오", fetch_criteo_creative),
@@ -12825,6 +12920,9 @@ MEDIA_MASTER_DEFAULT = [
      "naver/n.box,naversb/cpp,naver_sb/cpp", 0),
     ("카카오톡 플친",       "자사몰",  90, "카카오",             "카카오톡 플친",        1.0,
      "kakao_msg/email,kakaotalk/display", 0),
+    # 2026-11-04 라이브. 광고비는 카카오모먼트 API, 매출은 GA(kakaomoment/display).
+    ("카카오모먼트",         "자사몰",  95, "카카오모먼트",        "카카오모먼트",         1.0,
+     "kakaomoment/display", 0),
     # 법인카드 정산분. 매체는 아니지만 월 예산 합계를 맞추려면 '기타'로 들고 있어야 한다.
     ("법인카드정산",         "자사몰", 100, "",                 "법인카드정산",         1.0, "", 0),
     # ── 외부몰: 매출이 GA4에 안 잡힌다(스마트스토어). 예산도 파일에 없어 직접 지정한다. ──
@@ -20170,7 +20268,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             return False
         return (s.startswith("구글") or s in (GFA_PC_OWN, GFA_MO_OWN, "네이버 GFA")
                 or (s.startswith("메타") and "자사몰" in s) or s == "메타"
-                or "크리테오" in s)
+                or "크리테오" in s or s == "카카오모먼트")
     _total_keep = [c for c in order if _total_in(c)]
     tab_labels = (["TOTAL"] if len(_total_keep) >= 2 else []) + list(order)
     # 엑셀 버튼은 표보다 위에 있어야 찾기 쉬운데, 담을 내용은 탭을 다 그려봐야 안다.
