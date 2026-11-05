@@ -13989,6 +13989,8 @@ CP_SEG_MEDIA = {
     ZERO_MEDIA: (META_ZERO_TAB,),
     # 구글 P-MAX — 캠페인 이름으로 가른다(PMax_온라인팀_…_리타겟팅 = 리타겟, 나머지 = 신규)
     "구글_실적최대화": ("구글",),
+    # 카카오모먼트 — 광고그룹 3569남성연령_리타겟제외 = 신규, 방문자180일 = 리타겟
+    "카카오모먼트": ("카카오모먼트",),
 }
 
 
@@ -16629,7 +16631,16 @@ _GC_NO_CAMP = ("", "nan", "none", "(not set)", "(미설정)", "(캠페인 없음
 # 타겟팅 이름만으로는 부족하다. 크리테오는 utm에 타겟팅이 안 붙고 캠페인 이름
 # (다이나믹_리텐션 / 스태틱_리텐션)에만 들어 있어서 캠페인·소재명까지 같이 본다.
 _GC_RT_WORDS = ("방문자", "리텐션", "리타겟", "retention", "retarget", "remarket", "_rt")
-_GC_NEW_WORDS = ("관심", "유사", "신규", "lookalike", "prospect", "broad", "인구")
+_GC_NEW_WORDS = ("관심", "유사", "신규", "lookalike", "prospect", "broad", "인구", "연령")
+# '리타겟제외'(카카오모먼트 광고그룹 3569남성연령_리타겟제외 = 신규)처럼 리타겟을 **빼는** 표기는
+# 리타겟 단어로 치지 않는다.
+_GC_RT_EXCL_RE = re.compile(r"(리타겟팅|리타겟|retarget(?:ing)?)\s*_?\s*(제외|exclude[d]?)", re.I)
+
+
+def _gc_rt_clean(s: str) -> str:
+    return _GC_RT_EXCL_RE.sub(" ", str(s or ""))
+
+
 GC_SEG_ALL, GC_SEG_NEW, GC_SEG_RT = "TOTAL", "신규타겟팅", "리타겟팅"
 
 
@@ -16645,7 +16656,7 @@ def _gc_target_group(row) -> str:
     campaign = str(row.get("campaign") or "").strip()
     if campaign.casefold().startswith("pmax_온라인팀"):
         return _gc_seg_of_campaign(campaign)
-    blob = " ".join(str(row.get(k) or "") for k in ("target", "campaign", "creative")).lower()
+    blob = _gc_rt_clean(" ".join(str(row.get(k) or "") for k in ("target", "campaign", "creative"))).lower()
     if any(w in blob for w in _GC_RT_WORDS):
         return GC_SEG_RT
     if any(w in blob for w in _GC_NEW_WORDS):
@@ -16677,7 +16688,7 @@ _GC_MF = ("impressions", "clicks", "cost", "media_conv", "media_rev")
 
 
 def _gc_seg_of_campaign(c):
-    s = str(c or "").lower()
+    s = _gc_rt_clean(c).lower()
     if not s.strip():
         return None
     if s.strip().startswith("pmax_온라인팀"):
