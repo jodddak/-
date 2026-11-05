@@ -12935,7 +12935,8 @@ MEDIA_MASTER_DEFAULT = [
     ("메타_외부몰",         "외부몰", 140, "메타_외부몰",         "",                  0.0, "", 0),
     # ── 제로라운지: 메타 STCO_코디갤러리 계정. 매출은 GA4(utm_campaign=제로라운지) 기준. ──
     # GA는 utm_campaign=제로라운지 줄을 STCO 메타에서 옮겨 온다(_ga_media_fix).
-    ("메타_자사몰",         ZERO_SCOPE, 150, META_ZERO_CHANNEL,   "",                  0.0, "", 0),
+    # 제로라운지 월 예산 4,000,000원(VAT 포함, 2026-11-05 담당자)
+    ("메타_자사몰",         ZERO_SCOPE, 150, META_ZERO_CHANNEL,   "",                  0.0, "", 4_000_000),
 ]
 MEDIA_MASTER_COLS = ["media", "scope", "sort_order", "spend_channel",
                      "budget_line", "budget_share", "utm_match", "budget_override", "note"]
@@ -14766,7 +14767,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 
     # ── 표 ───────────────────────────────────────────────
     heads = ["구분", "매체", "노출", "클릭", "CTR", "CPC", "총비용(VAT 포함)",
-             "GA 구매", "GA 매출", "GA ROAS", "월 예산", "예산 소진율"]
+             "GA 구매", "GA 매출", "GA ROAS", "월 예산(VAT 포함)", "예산 소진율"]
     # 맨 앞 '구분' 칸에 전체 선택 상자 — 매체를 골라 그 매체들만 합쳐 보는 용도(소재별 성과와 같은 방식)
     th = "".join(
         f'<th class="{"l" if h in ("구분", "매체") else ""}">'
