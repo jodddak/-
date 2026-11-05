@@ -12446,6 +12446,74 @@ def sync_ad_spend(existing: pd.DataFrame, only=None, unlimited: bool = False,
     return total, saved, errors
 
 
+@st.cache_resource(show_spinner=False)
+def _ga_topup_box() -> dict:
+    return {"at": 0.0, "tries": {}}
+
+
+def _auto_topup_ga_creative(days: int = 4) -> str:
+    """소재 GA(ga_creative_daily)가 채널 GA(ga_channel_daily)보다 **모자란 날**만 다시 받는다.
+
+    소재 GA는 아침에 한 번 받는데, 그때 GA4가 어제 구매를 다 처리하지 못했으면 채널 GA보다
+    작게 남는다(2026-11-05: GFA 11/4 채널 18건·1,158,305원 vs 소재 8건·443,603원).
+    그러면 채널 성과 하위 줄에 '소재 GA 집계 대기'가 생기고 소재별 성과 TOTAL이 채널 성과보다
+    작게 보인다. 최근 며칠만 날짜별 구매 수를 비교해서 모자란 날을 새로 받는다.
+    프로세스당 30분에 한 번, 같은 날짜는 하루 3번까지만 시도한다(GA가 아직 처리 중이면 또 모자랄 수 있어서)."""
+    box = _ga_topup_box()
+    import time as _t
+    if _t.time() - box["at"] < 1800:
+        return ""
+    box["at"] = _t.time()
+    try:
+        ch = load_table("ga_channel_daily")
+        cr = load_table("ga_creative_daily")
+        if ch is None or ch.empty or cr is None or cr.empty:
+            return ""
+        end = kst_today() - timedelta(days=1)
+        start = end - timedelta(days=days - 1)
+
+        def _by_day(df):
+            d = df.copy()
+            d["_d"] = pd.to_datetime(d["report_date"], errors="coerce").dt.date
+            d = d[(d["_d"] >= start) & (d["_d"] <= end)]
+            d["conversions"] = pd.to_numeric(d.get("conversions"), errors="coerce").fillna(0)
+            return d.groupby("_d")["conversions"].sum()
+        # 소재 표에 있는 광고 소스/매체끼리만 비교한다(채널 표엔 direct·organic도 있다)
+        if "source_medium" in ch.columns and "source_medium" in cr.columns:
+            _sms = set(cr["source_medium"].astype(str).str.strip().str.lower())
+            ch = ch[ch["source_medium"].astype(str).str.strip().str.lower().isin(_sms)]
+        a, b = _by_day(ch), _by_day(cr)
+        short = [d for d in a.index if float(a.get(d, 0)) - float(b.get(d, 0)) >= 1
+                 and box["tries"].get(str(d), 0) < 3]
+        if not short:
+            return ""
+        utm_map = load_table("utm_channel_map")
+        cmap = (build_utm_channel_lookup(utm_map, include_extra=False)
+                if utm_map is not None and not utm_map.empty else {})
+        fixed = []
+        for d in sorted(short):
+            box["tries"][str(d)] = box["tries"].get(str(d), 0) + 1
+            df = fetch_ga4_creative_daily(d, d, cmap)
+            if df is None or df.empty:
+                continue
+            new_conv = float(pd.to_numeric(df.get("conversions"), errors="coerce").fillna(0).sum())
+            if new_conv <= float(b.get(d, 0)):
+                continue                       # 새로 받아도 늘지 않으면 그대로 둔다
+            delete_ga_rows_in_range("ga_creative_daily", d, d)
+            save_table("ga_creative_daily", df,
+                       "report_date,source_medium,campaign,creative,user_type", "GA4 소재 보충")
+            fixed.append(f"{d:%m/%d}")
+        if fixed:
+            try:
+                _load_table_raw.clear()
+            except Exception:
+                pass
+            return "소재 GA 보충: " + ", ".join(fixed)
+    except Exception as e:
+        return f"소재 GA 보충 실패 — {str(e)[:120]}"
+    return ""
+
+
 def _auto_resync_early_spend() -> str:
     """어제 광고비가 **오늘 10시(KST) 전에** 받아진 매체만 세션당 한 번 다시 받는다.
 
@@ -24455,6 +24523,9 @@ def main():
         _sp_note = _auto_resync_early_spend()
         if _sp_note and "실패" in _sp_note:
             st.caption("⚠️ " + _sp_note)
+        _ga_note = _auto_topup_ga_creative()
+        if _ga_note and "실패" in _ga_note:
+            st.caption("⚠️ " + _ga_note)
 
     # 종합·매체별·운영 코멘트도 다른 화면처럼 GA4 API 데이터를 쓴다(없을 때만 옛 엑셀 업로드분).
     # 예전엔 이 세 화면만 엑셀 표(ga_channel_inflow)를 읽어서, 엑셀을 안 올린 최근 기간은
