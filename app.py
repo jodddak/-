@@ -21166,9 +21166,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # OFF 없이 켜짐으로 보였다). 품목 버튼(A/B테스트·고객감사제 - OFF)과 같은 기준.
                 if _gc_is_ab(_c) or "감사제" in _c or "감사제" in _b:
                     return _b + " - OFF"
-                if " · " in _b:
-                    return _l
-                _n = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", _b))
+                # MO 자사몰 캠페인(수트·아우터·이너·베스트)은 다 켜져 있고, 그룹은 쇼핑관심타겟·
+                # 방문자180일만 켜짐(2026-11-09 담당자). '쇼핑 관심타겟 (신규) · 베스트'처럼 캠페인이
+                # 붙은 라벨도 앞쪽 그룹 이름으로 판정한다.
+                _g = _b.split(" · ", 1)[0]
+                _n = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", _g))
                 return _b if _n in _GFA_ON else _b + " - OFF"
 
             def _row_label(r):
