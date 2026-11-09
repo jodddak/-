@@ -4929,17 +4929,20 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     )
     # 건수를 찾을 땐 금액 열도 빼야 한다 — '구매완료 전환매출액'이 '구매완료'를 품고
     # 있어서, 그걸 건수로 잡으면 매출이 구매 건수로 들어간다.
-    _EXCLUDE_COUNT = _EXCLUDE_CONV + ("매출", "금액", "revenue", "value", "sales")
+    _EXCLUDE_COUNT = _EXCLUDE_CONV + ("매출", "금액", "revenue", "value", "sales", "값", "가치")
 
     def _cols_without(bad):
         return [c for c in cols if not any(b in str(c).lower() for b in bad)]
 
     # 앞에 있는 후보가 먼저 이긴다. 구매완료 > (그냥) 전환수 순.
     c_cv = _mr_pick(_cols_without(_EXCLUDE_COUNT),
-                    ["구매완료 수", "구매 완료 수", "구매완료수", "purchase"]
+                    ["구매완료 수", "구매 완료 수", "구매완료수",
+                     # 새 GFA 리포트(2026-11) 지표 이름: '구매' · '구매 전환값'
+                     "구매", "구매 수", "구매수", "purchase"]
                     + MEDIA_REPORT_COLS["conv"])
     c_rv = _mr_pick(_cols_without(_EXCLUDE_CONV),
-                    ["구매완료 전환매출액", "구매완료 매출액", "구매완료전환매출액"]
+                    ["구매완료 전환매출액", "구매완료 매출액", "구매완료전환매출액",
+                     "구매 전환값", "구매전환값", "구매완료 전환값", "구매 전환 가치"]
                     + MEDIA_REPORT_COLS["rev"])
     # 구매완료·전환수 열이 아예 없는 옛 형식(지표를 안 붙이고 받은 파일)용 마지막 수단.
     # 네이버 GFA는 '결과' + '결과 유형' 꼴로도 주는데, 이 '결과'는 **총 전환**이라
