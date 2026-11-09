@@ -13641,7 +13641,7 @@ EXT_BUDGET_MONTHLY = {
         "GFA_외부몰": [0, 0, 852_684.8, 2_360_517.5, 2_289_694, 0, 0, 0, 1_045_523.6,
                       3_300_000, 6_600_000, 2_224_264.4],   # 11월 6,600,000 (261103 예산 시트로 수정)
         "메타_외부몰": [2_436_213, 2_159_225.2, 0, 0, 0, 0, 0, 0, 930_310.3, 3_431_753.8,
-                     3_500_000, 2_200_000],
+                     0, 2_200_000],          # 11월 0원 — 운영 안 함(2026-11-09 담당자)
     },
 }
 _EXT_KEY = "__ext__:"
@@ -15091,6 +15091,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         return "".join(rows)
 
     body = []
+    _idle_names = []
     for _, r in view.iterrows():
         badge = ("cp-ext" if r["구분"] == "외부몰"
                  else "cp-zero" if r["구분"] == ZERO_SCOPE else "cp-own")
@@ -15124,7 +15125,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         sub = (f'<span class="cp-src">{src}</span>' if src else "") + \
               (f'<span class="cp-src">{_tog}</span>' if _tog else "")
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
-        _tr_cls = ' class="cp-has-sub"' if _has_sub else ""
+        # 이번 기간 집행 없음(광고비·노출 0, 예산도 없음) — 맨 아래 접힌 묶음으로 숨긴다(합계엔 그대로 포함)
+        _idle = (float(r["비용"] or 0) == 0 and float(r["노출"] or 0) == 0
+                 and float(r["월예산"] or 0) == 0)
+        if _idle:
+            _idle_names.append(r["매체"])
+        _tr_cls = (' class="cp-has-sub"' if _has_sub else "") if not _idle else ' class="cp-idle" style="display:none"'
         body.append(
             f'<tr data-name="{r["매체"]}"{_tr_cls}>'
             f'<td class="l"><input type="checkbox" class="cp-chk">'
@@ -15144,6 +15150,11 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             body.append(_sub_rows_html(r["매체"], _gfa_subs[r["매체"]], "dev"))
         if r["매체"] in _seg_subs:
             body.append(_sub_rows_html(r["매체"], _seg_subs[r["매체"]], "seg"))
+    if _idle_names:
+        body.append('<tr class="cp-idle-tog"><td class="l" colspan="12" style="cursor:pointer;color:#6b7280;'
+                    'font-size:12px;padding:8px 10px">▸ 이번 기간 집행 없는 매체 '
+                    f'{len(_idle_names)}개 — {" · ".join(_idle_names)} '
+                    '<span style="color:#9ca3af">(눌러서 펼치기 · 합계에는 포함)</span></td></tr>')
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{tot_rev / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
@@ -15197,6 +15208,21 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 (function(){
   var tbl = document.getElementById('cptbl');
   var ths = tbl.tHead.rows[0].cells;
+  var itog = tbl.querySelector('tr.cp-idle-tog');
+  if (itog) {
+    var tb0 = tbl.tBodies[0];
+    var tot0 = tb0.querySelector('tr.cp-selrow');
+    tb0.querySelectorAll('tr.cp-idle').forEach(function(tr){ tb0.insertBefore(tr, tot0); });
+    tb0.insertBefore(itog, tb0.querySelector('tr.cp-idle') || tot0);
+    itog.addEventListener('click', function(){
+      var open = itog.getAttribute('data-open') === '1';
+      tbl.querySelectorAll('tr.cp-idle').forEach(function(tr){ tr.style.display = open ? 'none' : ''; });
+      itog.setAttribute('data-open', open ? '0' : '1');
+      var td = itog.cells[0];
+      td.innerHTML = td.innerHTML.replace(open ? '▾' : '▸', open ? '▸' : '▾');
+      if (window.frameElement) { try { window.frameElement.style.height = (document.body.scrollHeight + 20) + 'px'; } catch(e){} }
+    });
+  }
   var state = {i:-1, asc:false};
   function val(row, i){
     var c = row.cells[i];
