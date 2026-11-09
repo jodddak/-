@@ -12527,6 +12527,47 @@ def _auto_topup_ga_creative(days: int = 4) -> str:
     return ""
 
 
+def _ensure_spend_fresh() -> str:
+    """광고비를 쓰는 화면 어디서 열어도 매체 광고비를 최신으로 받는다(세션당 1번, 1시간 안에 받았으면 건너뜀).
+
+    예전엔 '채널 퍼널 리포트'를 열 때만 광고비를 받았다. 주말 동안 아무도 안 열고 월요일에
+    채널 성과로 바로 들어오면 금요일까지의 광고비만 보여서 메타·구글·크리테오·카카오가 전부
+    관리자보다 작게 나왔다(2026-11-09: 메타 1,934,000 vs 관리자 3,140,855)."""
+    # GA4 채널(구매·매출)도 같은 규칙으로 — 1시간 안에 받았으면 건너뜀
+    if not st.session_state.get("fv4_synced"):
+        st.session_state["fv4_synced"] = True
+        try:
+            _gd = load_table("ga_channel_daily")
+            if not _synced_within(_gd, 60):
+                _um = load_table("utm_channel_map")
+                _lk = build_utm_channel_lookup(_um) if _um is not None and not _um.empty else {}
+                _n, _s, _e, _err = _run_bounded(lambda: sync_ga4_channel_daily(_gd, _lk),
+                                                SYNC_TIME_BUDGET_SEC)
+                if _n:
+                    st.cache_data.clear()
+        except Exception:
+            pass
+    if st.session_state.get("fv4_spend_synced"):
+        return ""
+    st.session_state["fv4_spend_synced"] = True
+    try:
+        ad_spend = load_table("ad_spend_daily")
+        _srcs = [v for k, v in AD_SPEND_FETCHER_SOURCE.items()
+                 if k in {lab for lab, _f in AD_SPEND_FETCHERS}]
+        if _synced_within(ad_spend, 60, sources=_srcs):
+            return ""
+        with st.status("광고비를 매체에서 최신으로 받는 중...", expanded=False) as _stt:
+            n_sp, saved, errs = sync_ad_spend(ad_spend, progress=st.write)
+            _stt.update(label=f"광고비 동기화 완료 ({n_sp:,}행)", state="complete")
+        if n_sp:
+            st.cache_data.clear()
+        if errs:
+            return "광고비 동기화 일부 실패 — " + ", ".join(f"{k}: {str(v)[:60]}" for k, v in errs.items())
+    except Exception as e:
+        return f"광고비 동기화 실패 — {str(e)[:120]}"
+    return ""
+
+
 def _auto_resync_early_spend() -> str:
     """어제 광고비가 **오늘 10시(KST) 전에** 받아진 매체만 세션당 한 번 다시 받는다.
 
@@ -24544,6 +24585,10 @@ def main():
 
     # 광고비를 쓰는 화면은 그리기 전에 '오전 이른 수집분'을 한 번 다시 받는다(크리테오 UTC 등).
     if page in ("채널 퍼널 리포트", "채널 성과", "예산 관리", "소재별 성과"):
+        if page != "채널 퍼널 리포트":          # 퍼널은 자기 화면에서 받는다
+            _fresh = _ensure_spend_fresh()
+            if _fresh:
+                st.caption("⚠️ " + _fresh)
         _sp_note = _auto_resync_early_spend()
         if _sp_note and "실패" in _sp_note:
             st.caption("⚠️ " + _sp_note)
