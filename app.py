@@ -1734,7 +1734,20 @@ def _save_table_impl(name: str, df: pd.DataFrame, on_conflict: str, source_file:
     records = df.to_dict(orient="records")
     try:
         for i in range(0, len(records), 500):
-            client.table(TABLES[name]).upsert(records[i : i + 500], on_conflict=on_conflict).execute()
+            # Supabase 앞단(cloudflare)이 가끔 HTML '400/5xx Bad Request'를 돌려준다 — 같은 요청을
+            # 잠시 뒤 다시 보내면 들어간다(2026-11-09 채널 퍼널 첫 화면에서 ad_spend_daily 저장 실패
+            # 2번, 다시 열면 안 남). 그런 응답만 새 연결로 2번까지 다시 보낸다.
+            for _try in range(3):
+                try:
+                    client.table(TABLES[name]).upsert(records[i : i + 500],
+                                                      on_conflict=on_conflict).execute()
+                    break
+                except Exception as _e:
+                    _msg = str(_e).lower()
+                    if _try == 2 or not ("cloudflare" in _msg or "<html" in _msg):
+                        raise
+                    time.sleep(1.5 * (_try + 1))
+                    client = get_supabase_client() or client
     except Exception as e:
         # 예: creative_performance처럼 Supabase에 아직 테이블을 안 만든 경우 — 이 테이블만 건너뛰고
         # 나머지 저장(주간/월별/매체 등)은 정상 진행되도록 전체 저장 흐름을 막지 않는다.
@@ -19666,7 +19679,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             return True
         _m = (_sp_all["_k"] == _v4_canon_channel(key)) & (_sp_all["_d"] > (d or date(2000, 1, 1)))
         if not _m.any():
-            return False
+            # 그 날짜 뒤 광고비 줄이 아예 없으면 '광고비 0원'이 아니라 '광고비도 안 받아짐(모름)'이다
+            # — 늦음으로 본다. 꺼진 매체는 광고비 동기화가 0원 줄을 채우므로(_spend_zero_fill)
+            # 여기로 오지 않는다. 2026-11-09: 소재·광고비가 둘 다 11-05에 멈췄는데
+            # '✅ 모두 어제까지'로 떴다.
+            return True
         return float(_sp_all.loc[_m, "_c"].sum()) > 0
 
     def _sub_lag(lab):
@@ -21141,10 +21158,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     if _b in ("그룹 미확인", "캠페인 미확인"):
                         return _l
                     return _b if ("베스트" in _b or "베스트" in str(_camp or "")) else _b + " - OFF"
-                if _gc_is_ab(_c) or "감사제" in _c:
-                    return _l
                 _b = re.sub(r"\s*-\s*OFF$", "", str(_l))
-                if " · " in _b or _b in ("그룹 미확인", "캠페인 미확인"):
+                if _b in ("그룹 미확인", "캠페인 미확인"):
+                    return _l
+                # 2026-11-09 담당자: GFA는 상태 API가 없다 — A/B테스트·고객감사제 캠페인은 꺼져 있고,
+                # 캠페인이 꺼지면 그 안의 그룹도 꺼진 것(MO A/B테스트의 '패션관심타겟_네이비'가
+                # OFF 없이 켜짐으로 보였다). 품목 버튼(A/B테스트·고객감사제 - OFF)과 같은 기준.
+                if _gc_is_ab(_c) or "감사제" in _c or "감사제" in _b:
+                    return _b + " - OFF"
+                if " · " in _b:
                     return _l
                 _n = _gc_tgt_norm(re.sub(r"\s*\([^)]*\)\s*$", "", _b))
                 return _b if _n in _GFA_ON else _b + " - OFF"
