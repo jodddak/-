@@ -5005,6 +5005,120 @@ def parse_media_report_creatives(file, vat_included: bool = True) -> pd.DataFram
     return _creative_frame(rows.to_dict("records"))
 
 
+def _gfa_period_read(file) -> pd.DataFrame:
+    """날짜 열이 없는 GFA 리포트 읽기('광고 소재 이름'이 있는 줄을 머리글로)."""
+    name = (getattr(file, "name", "") or "").lower()
+    raw = None
+    if name.endswith(".csv"):
+        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+            try:
+                file.seek(0)
+                raw = pd.read_csv(file, encoding=enc, header=None, dtype=str)
+                break
+            except Exception:
+                raw = None
+    else:
+        file.seek(0)
+        raw = pd.read_excel(file, header=None, dtype=str)
+    file.seek(0)
+    if raw is None:
+        raise RuntimeError("파일을 읽지 못했습니다.")
+    for i in range(min(len(raw), 30)):
+        cells = [str(c).strip() for c in raw.iloc[i]]
+        if "광고 소재 이름" in cells and "구매완료 수" in cells:
+            df = raw.iloc[i + 1:].copy()
+            df.columns = cells
+            return df.reset_index(drop=True)
+    raise RuntimeError("'광고 소재 이름'·'구매완료 수' 머리글을 못 찾았습니다.")
+
+
+def _gfa_period_report_ok(file) -> bool:
+    """날짜 열은 없고 '구매완료 수'·'구매완료 전환매출액'과 소재·광고그룹·캠페인 열이 있는
+    **기간 합계** GFA 리포트인가."""
+    try:
+        df = _gfa_period_read(file)
+    except Exception:
+        return False
+    cols = list(df.columns)
+    return all(_mr_pick(cols, [k]) is not None for k in
+               ("구매완료 수", "구매완료 전환매출액", "광고 소재 이름", "광고 그룹 이름", "캠페인 이름"))
+
+
+def apply_gfa_period_purchases(file, start: date, end: date, only_ext: bool = True) -> dict:
+    """기간 합계 GFA 리포트의 **구매완료 수·구매완료 전환매출액만** 일별 소재 행에 나눠 넣는다.
+
+    날짜가 없는 리포트라 일별로 못 쪼갠다 — 그래서 이미 저장된 그 기간 일별 행(같은 기기·캠페인·
+    광고그룹·소재)의 **광고비 비중**으로 나눠 넣는다. 기간 합계는 리포트와 정확히 같다.
+    노출·클릭·광고비는 건드리지 않는다. 같은 기간·매체의 예전 전환(총 전환 수가 들어가 있던 값)은
+    0으로 지우고 다시 채운다. 장바구니·총 전환은 쓰지 않는다."""
+    df = _gfa_period_read(file)
+    cols = list(df.columns)
+    c_cre, c_grp, c_cmp = (_mr_pick(cols, [k]) for k in ("광고 소재 이름", "광고 그룹 이름", "캠페인 이름"))
+    c_cv, c_rv = _mr_pick(cols, ["구매완료 수"]), _mr_pick(cols, ["구매완료 전환매출액"])
+    num = lambda s: pd.to_numeric(s.astype(str).str.replace(r"[^0-9.\-]", "", regex=True),
+                                  errors="coerce").fillna(0)
+    rep_ = pd.DataFrame({"cre": df[c_cre].astype(str).str.strip(),
+                         "grp": df[c_grp].astype(str).str.strip(),
+                         "cmp": df[c_cmp].astype(str).str.strip(),
+                         "conv": num(df[c_cv]), "rev": num(df[c_rv])})
+    if only_ext:
+        rep_ = rep_[rep_["cmp"].str.contains("외부몰")]
+    rep_["tab"] = [gfa_tab_or_mo(f"{c} {'외부몰' if '외부몰' in c else '자사몰'}") for c in rep_["cmp"]]
+    tabs = sorted(rep_["tab"].unique())
+    acd = load_table("ad_creative_daily")
+    if acd is None or acd.empty:
+        raise RuntimeError("저장된 GFA 일별 소재 데이터가 없습니다 — 일별 리포트를 먼저 올려주세요.")
+    a = acd.copy()
+    a["_d"] = pd.to_datetime(a["report_date"], errors="coerce").dt.date
+    a = a[(a["_d"] >= start) & (a["_d"] <= end) & a["channel"].isin(tabs)].copy()
+    if a.empty:
+        raise RuntimeError(f"{start}~{end} 기간에 {', '.join(tabs)} 일별 소재 데이터가 없습니다.")
+    a["cost_incl_vat"] = pd.to_numeric(a["cost_incl_vat"], errors="coerce").fillna(0)
+    a["_grp"] = a["adset"].map(_creative_adset_label).astype(str).str.strip()
+    a["_cmp"] = a["campaign"].astype(str).str.strip()
+    a["_cre"] = a["creative"].astype(str).str.strip()
+    a["conversions"] = 0.0
+    a["revenue"] = 0.0
+    missed = []
+    for _, r in rep_[(rep_["conv"] > 0) | (rep_["rev"] > 0)].iterrows():
+        m = (a["channel"] == r["tab"]) & (a["_cre"] == r["cre"]) & (a["_cmp"] == r["cmp"]) & (a["_grp"] == r["grp"])
+        if not m.any():
+            m = (a["channel"] == r["tab"]) & (a["_cre"] == r["cre"]) & (a["_cmp"] == r["cmp"])
+        if not m.any():
+            missed.append(f"{r['cmp']} · {r['grp']} · {r['cre']} ({int(r['conv'])}건)")
+            continue
+        w = a.loc[m, "cost_incl_vat"]
+        w = (w / w.sum()) if w.sum() > 0 else pd.Series(1.0 / m.sum(), index=w.index)
+        a.loc[m, "conversions"] += r["conv"] * w
+        a.loc[m, "revenue"] += r["rev"] * w
+    out = a.drop(columns=[c for c in a.columns if c.startswith("_")
+                          or c in ("id", "uploaded_at", "source_file", "created_at")])
+    n = save_ad_creative(out, getattr(file, "name", "GFA 기간 리포트") + f" (구매 {start}~{end})")
+    return {"rows": n, "conv": float(a["conversions"].sum()), "rev": float(a["revenue"].sum()),
+            "tabs": tabs, "missed": missed}
+
+
+def _render_gfa_period_purchase(mr_file):
+    st.sidebar.info("날짜가 없는 **기간 합계 GFA 리포트**입니다. 구매완료 수·구매완료 전환매출액만 "
+                    "골라 저장된 일별 소재 행에 광고비 비중으로 나눠 넣습니다(노출·클릭·광고비는 그대로). "
+                    "장바구니·총 전환은 쓰지 않습니다.")
+    _y = kst_today() - timedelta(days=1)
+    _rng = st.sidebar.date_input("이 리포트의 기간", value=(_y.replace(day=1), _y), key="gfa_pp_rng")
+    _ext = st.sidebar.checkbox("외부몰 캠페인만 반영", value=True, key="gfa_pp_ext")
+    if isinstance(_rng, (list, tuple)) and len(_rng) == 2 and st.sidebar.button(
+            "💾 구매·매출만 반영하기", type="primary", key="gfa_pp_btn"):
+        try:
+            res = apply_gfa_period_purchases(mr_file, _rng[0], _rng[1], only_ext=_ext)
+            st.cache_data.clear()
+            msg = (f"반영 완료 — {', '.join(res['tabs'])} · 구매 {res['conv']:,.0f}건 · "
+                   f"매출 {res['rev']:,.0f}원 ({res['rows']}행)")
+            if res["missed"]:
+                msg += "\n\n⚠️ 일별 행을 못 찾은 소재: " + " / ".join(res["missed"][:6])
+            st.sidebar.success(msg)
+        except Exception as e:
+            st.sidebar.error(f"반영 실패: {str(e)[:200]}")
+
+
 KKO_MSG_COLS = ["sent_at", "report_date", "message", "sends", "clicks", "ctr"]
 
 # 카카오 파일의 헤더 표기가 조금씩 달라서(발송수/발송 수, 클릭수/전체 클릭수 등) 후보를 둔다.
@@ -5862,7 +5976,10 @@ def render_upload_panel():
             mr_df = parse_media_report_file(mr_file, vat_included=vat_in)
         except Exception as e:
             mr_df = pd.DataFrame()
-            st.sidebar.warning(f"읽지 못했습니다: {e}")
+            if "날짜 열" in str(e) and _gfa_period_report_ok(mr_file):
+                _render_gfa_period_purchase(mr_file)
+            else:
+                st.sidebar.warning(f"읽지 못했습니다: {e}")
         if not mr_df.empty and drop_cost:
             mr_df = mr_df.assign(cost_incl_vat=0.0)
         if not mr_df.empty:
