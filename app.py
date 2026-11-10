@@ -16978,6 +16978,16 @@ def _gc_is_bf(c) -> bool:
     return any(w in low for w in ("블랙프라이데이", "블프", "blackfriday"))
 
 
+# 블랙프라이데이 소재 코드 — 매체 공통으로 '261109_트렌치코트'처럼 이 날짜로 시작한다(2026-11-10 확인:
+# 메타·GFA MO 블프 캠페인 소재, 크리테오 스태틱_리텐션에 새로 넣은 배너 6개).
+GC_BF_CREATIVE_PREFIXES = ("261109",)
+
+
+def _gc_is_bf_creative(text) -> bool:
+    t = str(text or "").strip()
+    return bool(t) and t.startswith(GC_BF_CREATIVE_PREFIXES)
+
+
 def _gc_item_of_campaign(c):
     low = str(c or "").lower()
     if not low.strip():
@@ -17668,6 +17678,10 @@ def _gc_item_group(row) -> str:
     items = {_gc_item_of_campaign(c) for c in campaigns} - {None}
     if len(items) == 1:
         return next(iter(items))
+    # 크리테오는 블랙프라이데이 배너를 따로 캠페인 없이 스태틱_리텐션에 넣었다 — 소재 이름의
+    # 블프 소재 코드(261109_)로 가른다(캠페인으로 품목이 안 갈릴 때만).
+    if not items and any(_gc_is_bf_creative(row.get(k)) for k in ("creative", "cre_title")):
+        return GC_ITEM_BF
     for key in ("creative", "cre_title"):
         item = _gc_item_of_text(row.get(key))
         if item:
@@ -21101,8 +21115,17 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _item_cnt[GC_ITEM_AB] = 0
             # GFA 자사몰은 블랙프라이데이_PC·_MO 캠페인이 켜져 있다(담당자 확인 2026-11-10). GFA 소재
             # 실적은 보고서 업로드로만 들어오니, 아직 안 올라왔어도 품목 버튼은 먼저 둔다.
-            if label in (GFA_PC_OWN, GFA_MO_OWN) and GC_ITEM_BF not in _item_cnt:
-                _item_cnt[GC_ITEM_BF] = 0
+            # 구글(검토 중)·크리테오(11/10 등록 배너)처럼 막 켠 블프 캠페인·소재도 실적 전부터 버튼을 둔다.
+            if GC_ITEM_BF not in _item_cnt:
+                _sm_here = _status_map or {}
+                _bf_live = label in (GFA_PC_OWN, GFA_MO_OWN) or any(
+                    _gc_is_bf(a.get("campaign")) or _gc_is_bf_creative(a.get("name"))
+                    for a in _sm_here.get(("__ads__", label), []) if isinstance(a, dict)) or any(
+                    _gc_is_bf(e[0]) for k, v in _sm_here.items()
+                    if isinstance(k, tuple) and k and k[0] == label and isinstance(v, list)
+                    for e in v if isinstance(e, tuple) and e)
+                if _bf_live:
+                    _item_cnt[GC_ITEM_BF] = 0
             # 지금 안 돌리는 행사·테스트 묶음(고객감사제·A/B테스트)은 ' - OFF' + 회색으로 맨 뒤에.
             # 매체 API에 켜진 광고가 하나라도 있으면 그대로 둔다(다시 켜면 자동으로 원래대로).
             # GFA처럼 광고별 ON/OFF를 API로 못 받는 매체는 켜진 광고가 없는 것으로 보아 회색이다.
@@ -21111,7 +21134,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         and (label == "TOTAL" or _k[1] == label)
                         for a in (_v or []) if isinstance(a, dict)]
             # 켜진 광고들의 품목(캠페인 이름 → 없으면 광고 이름으로)
-            _on_items = {(_gc_item_of_campaign(a.get("campaign")) or _gc_item_of_text(a.get("name")))
+            _on_items = {(_gc_item_of_campaign(a.get("campaign"))
+                          or (GC_ITEM_BF if _gc_is_bf_creative(a.get("name")) else None)
+                          or _gc_item_of_text(a.get("name")))
                          for a in _ads_for if a.get("on")}
             _item_off = set()
             for _it in _item_cnt:
@@ -21141,9 +21166,13 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                       key=f"gc_item_{ti}", counts=_item_cnt, off=_item_off)
                 if _item_off:
                     _gc_paint_off()
-                if item == GC_ITEM_BF and not _item_cnt.get(GC_ITEM_BF) and label in (GFA_PC_OWN, GFA_MO_OWN):
-                    st.info("GFA 블랙프라이데이 캠페인 실적이 아직 안 들어왔습니다. GFA 소재 실적은 보고서 "
-                            "업로드로 들어오니, 블랙프라이데이 기간이 포함된 GFA 보고서를 올리면 채워집니다.")
+                if item == GC_ITEM_BF and not _item_cnt.get(GC_ITEM_BF):
+                    if label in (GFA_PC_OWN, GFA_MO_OWN):
+                        st.info("GFA 블랙프라이데이 캠페인 실적이 아직 안 들어왔습니다. GFA 소재 실적은 보고서 "
+                                "업로드로 들어오니, 블랙프라이데이 기간이 포함된 GFA 보고서를 올리면 채워집니다.")
+                    else:
+                        st.info("블랙프라이데이 캠페인·소재는 켜져 있지만 이 기간 실적이 아직 없습니다 "
+                                "(매체 실적은 어제 날짜까지 들어옵니다).")
             # 필터는 **캠페인 단위**로 건다 — 줄에 섞인 다른 캠페인 몫은 빼고 남긴다
             # (광고 관리자의 캠페인 합계와 맞게).
             _detail_pool_rows = rows.copy()
