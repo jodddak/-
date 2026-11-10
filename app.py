@@ -16973,10 +16973,18 @@ def _gc_seg_of_campaign(c):
     return None
 
 
+def _gc_is_bf(c) -> bool:
+    low = str(c or "").lower().replace(" ", "")
+    return any(w in low for w in ("블랙프라이데이", "블프", "blackfriday"))
+
+
 def _gc_item_of_campaign(c):
     low = str(c or "").lower()
     if not low.strip():
         return None
+    # 블랙프라이데이(2026-11-10 시작) — 소재가 코트·자켓이라도 행사 캠페인이므로 따로 묶는다
+    if _gc_is_bf(low):
+        return GC_ITEM_BF
     if _gc_is_ab(low):
         return GC_ITEM_AB
     if "감사제" in low:
@@ -17551,6 +17559,8 @@ def _gc_detail_target_label(row):
                 _ev = " · 베스트"
             elif _it == GC_ITEM_EVENT and any("감사제" in c for c in _cands):
                 _ev = " · 고객감사제"
+            elif _it == GC_ITEM_BF and any(_gc_is_bf(c) for c in _cands):
+                _ev = " · 블랙프라이데이"
     return pretty + (f" ({suffix})" if suffix else "") + _ev + (" - OFF" if historical else "")
 
 
@@ -17589,7 +17599,8 @@ GC_ITEM_AB = "A/B테스트"
 # 성과에서는 뺀다(2026-10-19 요청: STCO_고객감사제·STCO_베스트 / GFA 자사몰_베스트)
 GC_ITEM_EVENT = "고객감사제"
 GC_ITEM_BEST = "베스트"
-GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_AB, GC_ITEM_EVENT, GC_ITEM_BEST]
+GC_ITEM_BF = "블랙프라이데이"
+GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_AB, GC_ITEM_EVENT, GC_ITEM_BEST, GC_ITEM_BF]
 
 
 def _gc_is_ab(text) -> bool:
@@ -21101,9 +21112,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             _item_off = set()
             for _it in _item_cnt:
                 if label == GFA_PC_OWN:
-                    # GFA는 상태 API가 없다 — 담당자 확인(2026-11-04): PC 자사몰은 베스트만 켜짐
-                    _off = _it != GC_ITEM_BEST
-                elif _it in (GC_ITEM_EVENT, GC_ITEM_AB):
+                    # GFA는 상태 API가 없다 — 담당자 확인(2026-11-10 관리자 화면): PC 자사몰은
+                    # 블랙프라이데이_PC만 켜짐(베스트_PC도 꺼짐)
+                    _off = _it != GC_ITEM_BF
+                elif label == GFA_MO_OWN and _it == GC_ITEM_BF:
+                    _off = False
+                elif _it in (GC_ITEM_EVENT, GC_ITEM_AB, GC_ITEM_BF):
                     _off = _it not in _on_items
                 elif label == "TOTAL" or not _ads_for or None in _on_items:
                     # 상태를 모르는 매체(GFA MO·애드부스트 등)가 섞였거나 품목을 못 가린 켜진 광고가
@@ -21286,8 +21300,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             def _ads_state(lab):
                 if label == GFA_PC_OWN:
-                    # 2026-11-04 담당자: PC 자사몰은 베스트 캠페인만 켜 두고 나머지는 전부 끔
-                    return "베스트" in str(lab) or any("베스트" in str(c) for c in _lab_camps.get(lab, set()))
+                    # 2026-11-10 관리자 화면: PC 자사몰은 블랙프라이데이_PC만 켜짐
+                    return _gc_is_bf(lab) or any(_gc_is_bf(c) for c in _lab_camps.get(lab, set()))
+                if label == GFA_MO_OWN and (_gc_is_bf(lab) or any(
+                        _gc_is_bf(c) for c in _lab_camps.get(lab, set()))):
+                    return True
                 if label in (GFA_PC_OWN, GFA_MO_OWN):
                     _base = re.sub(r"\s*-\s*OFF$", "", str(lab))
                     if " · " in _base:
@@ -21344,7 +21361,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _b = re.sub(r"\s*-\s*OFF$", "", str(_l))
                     if _b in ("그룹 미확인", "캠페인 미확인"):
                         return _l
-                    return _b if ("베스트" in _b or "베스트" in str(_camp or "")) else _b + " - OFF"
+                    return _b if (_gc_is_bf(_b) or _gc_is_bf(_camp)) else _b + " - OFF"
                 _b = re.sub(r"\s*-\s*OFF$", "", str(_l))
                 if _b in ("그룹 미확인", "캠페인 미확인"):
                     return _l
@@ -21353,6 +21370,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # OFF 없이 켜짐으로 보였다). 품목 버튼(A/B테스트·고객감사제 - OFF)과 같은 기준.
                 if _gc_is_ab(_c) or "감사제" in _c or "감사제" in _b:
                     return _b + " - OFF"
+                if _gc_is_bf(_c) or _gc_is_bf(_b):
+                    return _b                      # 블랙프라이데이_MO는 켜짐(그룹 전부)
                 # MO 자사몰 캠페인(수트·아우터·이너·베스트)은 다 켜져 있고, 그룹은 쇼핑관심타겟·
                 # 방문자180일만 켜짐(2026-11-09 담당자). '쇼핑 관심타겟 (신규) · 베스트'처럼 캠페인이
                 # 붙은 라벨도 앞쪽 그룹 이름으로 판정한다.
