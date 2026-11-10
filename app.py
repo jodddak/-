@@ -21138,6 +21138,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                           or (GC_ITEM_BF if _gc_is_bf_creative(a.get("name")) else None)
                           or _gc_item_of_text(a.get("name")))
                          for a in _ads_for if a.get("on")}
+            # 구글은 광고 목록(__ads__) 없이 (캠페인, 켜짐) 짝만 온다 — 켜진 블프 캠페인이 있으면 켜진 것으로
+            if any(isinstance(e, tuple) and len(e) >= 2 and e[1] and _gc_is_bf(e[0])
+                   for _k, _v in (_status_map or {}).items()
+                   if isinstance(_k, tuple) and _k and (label == "TOTAL" or _k[0] == label)
+                   and isinstance(_v, list) for e in _v):
+                _on_items.add(GC_ITEM_BF)
             _item_off = set()
             for _it in _item_cnt:
                 if label == GFA_PC_OWN:
