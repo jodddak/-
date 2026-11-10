@@ -21099,6 +21099,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     for e in v if isinstance(e, tuple) and e)
                 if _ab_live:
                     _item_cnt[GC_ITEM_AB] = 0
+            # GFA 자사몰은 블랙프라이데이_PC·_MO 캠페인이 켜져 있다(담당자 확인 2026-11-10). GFA 소재
+            # 실적은 보고서 업로드로만 들어오니, 아직 안 올라왔어도 품목 버튼은 먼저 둔다.
+            if label in (GFA_PC_OWN, GFA_MO_OWN) and GC_ITEM_BF not in _item_cnt:
+                _item_cnt[GC_ITEM_BF] = 0
             # 지금 안 돌리는 행사·테스트 묶음(고객감사제·A/B테스트)은 ' - OFF' + 회색으로 맨 뒤에.
             # 매체 API에 켜진 광고가 하나라도 있으면 그대로 둔다(다시 켜면 자동으로 원래대로).
             # GFA처럼 광고별 ON/OFF를 API로 못 받는 매체는 켜진 광고가 없는 것으로 보아 회색이다.
@@ -21137,6 +21141,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                       key=f"gc_item_{ti}", counts=_item_cnt, off=_item_off)
                 if _item_off:
                     _gc_paint_off()
+                if item == GC_ITEM_BF and not _item_cnt.get(GC_ITEM_BF) and label in (GFA_PC_OWN, GFA_MO_OWN):
+                    st.info("GFA 블랙프라이데이 캠페인 실적이 아직 안 들어왔습니다. GFA 소재 실적은 보고서 "
+                            "업로드로 들어오니, 블랙프라이데이 기간이 포함된 GFA 보고서를 올리면 채워집니다.")
             # 필터는 **캠페인 단위**로 건다 — 줄에 섞인 다른 캠페인 몫은 빼고 남긴다
             # (광고 관리자의 캠페인 합계와 맞게).
             _detail_pool_rows = rows.copy()
