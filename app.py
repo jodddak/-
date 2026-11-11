@@ -24836,6 +24836,9 @@ def _inject_ui_zoom():
         f"html{{zoom:{UI_ZOOM};}}"
         '[data-testid="stAppViewContainer"] > div:has(> [data-testid="stMain"]),'
         '[data-testid="stMain"]{height:100% !important;}'
+        # 커스텀 컴포넌트(소재 표 등)는 iframe 폭을 '화면에 보이는 폭'으로 재서 px로 박는다 →
+        # 배율을 걸면 75% 폭으로 줄어 오른쪽이 빈다. 칸 폭을 그대로 따르게 한다.
+        '[data-testid="stMain"] iframe{width:100% !important;}'
         "</style>",
         unsafe_allow_html=True,
     )
