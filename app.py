@@ -17674,7 +17674,16 @@ GC_ITEM_AB = "A/B테스트"
 GC_ITEM_EVENT = "고객감사제"
 GC_ITEM_BEST = "베스트"
 GC_ITEM_BF = "블랙프라이데이"
-GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_AB, GC_ITEM_EVENT, GC_ITEM_BEST, GC_ITEM_BF]
+# 외부몰 GFA는 품목별 캠페인이 없다 — PC·MO 데일리 캠페인 하나씩에 광고그룹(패션관심타겟·방문자180일·
+# 쇼핑관심타겟·…_블프)만 있다(2026-11-11 담당자 확인). 그래서 수트/아우터가 아니라 '데일리 / 블프'로 가른다.
+GC_ITEM_DAILY = "데일리"
+GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_DAILY, GC_ITEM_AB, GC_ITEM_EVENT,
+            GC_ITEM_BEST, GC_ITEM_BF]
+
+
+def _gc_is_ext_daily(c) -> bool:
+    low = str(c or "")
+    return "외부몰" in low and "데일리" in low
 
 
 def _gc_is_ab(text) -> bool:
@@ -17739,6 +17748,10 @@ def _gc_item_group(row) -> str:
     actual = [c for c in (media.get("campaigns") or []) if str(c or "").strip()]
     campaigns = actual or (row.get("camp_list") or [row.get("campaign")])
     campaigns = [c for c in campaigns if str(c or "").strip()]
+    if campaigns and all(_gc_is_ext_daily(c) for c in campaigns):
+        # 외부몰 GFA 데일리 캠페인 — 광고그룹 이름으로만 가른다(패션관심타겟_블프 → 블프)
+        grp = " ".join(str(x or "") for x in (row.get("target"), media.get("_adset")))
+        return GC_ITEM_BF if _gc_is_bf(grp) else GC_ITEM_DAILY
     items = {_gc_item_of_campaign(c) for c in campaigns} - {None}
     if len(items) == 1:
         return next(iter(items))
