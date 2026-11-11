@@ -20205,16 +20205,28 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     def _img_upload_panel():
         with st.expander("🖼️ 소재 이미지 추가 업로드 — 파일명을 소재명으로 "
                          "(예: 260807_수피마티셔츠.jpg)"):
+            # 반영이 끝나면 올린 파일 목록을 비운다 — 업로더는 key가 바뀌어야 비워지므로
+            # 회차 번호를 key에 붙여 하나 올린다. 결과 문구는 rerun 뒤에도 보이게 따로 남긴다.
+            _n_up = int(st.session_state.get("gc_img_up_n", 0))
+            _done = st.session_state.pop("gc_img_up_msg", None)
+            if _done:
+                st.success(_done)
             ups = st.file_uploader("이미지 여러 장 한 번에 올릴 수 있습니다",
                                    type=["png", "jpg", "jpeg", "webp"],
-                                   accept_multiple_files=True, key="gc_img_up")
+                                   accept_multiple_files=True, key=f"gc_img_up_{_n_up}")
             if ups and st.button("업로드하고 반영", key="gc_img_btn"):
                 urls, errs = upload_ga_creative_images(ups)
                 if urls:
                     st.session_state.setdefault("gc_img_extra", {}).update(urls)
                     _gc_stored_image_index.clear()   # 방금 올린 것이 바로 목록에 잡히게
-                    st.success(f"{len(urls)}장 올렸습니다. 다음 접속에도 그대로 남습니다.")
-                    st.rerun()
+                    st.session_state.pop(f"gc_img_up_{_n_up}", None)
+                    st.session_state["gc_img_up_n"] = _n_up + 1
+                    st.session_state["gc_img_up_msg"] = (
+                        f"{len(urls)}장 올렸습니다: {', '.join(list(urls)[:5])}"
+                        + (f" 외 {len(urls) - 5}장" if len(urls) > 5 else "")
+                        + " · 다음 접속에도 그대로 남습니다.")
+                    if not errs:
+                        st.rerun()
                 for e in errs:
                     st.error(e)
             st.caption(
