@@ -21226,7 +21226,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     # GFA는 상태 API가 없다 — 담당자 확인(2026-11-10 관리자 화면): PC 자사몰은
                     # 블랙프라이데이_PC만 켜짐(베스트_PC도 꺼짐)
                     _off = _it != GC_ITEM_BF
-                elif label == GFA_MO_OWN and _it == GC_ITEM_BF:
+                elif label in (GFA_MO_OWN, GFA_PC_EXT, GFA_MO_EXT) and _it == GC_ITEM_BF:
+                    # GFA는 상태 API가 없다 — 블프 캠페인은 자사몰 MO·외부몰 PC/MO 모두 집행 중
+                    # (11/10 외부몰 MO 블프 소재 12개 실적 확인). 실적이 있으면 켜진 것으로 본다.
                     _off = False
                 elif _it in (GC_ITEM_EVENT, GC_ITEM_AB, GC_ITEM_BF):
                     _off = _it not in _on_items
@@ -24819,10 +24821,31 @@ def render_account_page():
 
 
 
+# 화면 전체 배율 — 브라우저 100%에서도 75%로 본 것처럼 보이게(2026-11-11 요청: 100%는 너무 크다).
+# html에 zoom을 걸면 글자·표·버튼·이미지가 같은 비율로 줄어든다. 단, Streamlit 본문 칸은 높이를
+# 화면 높이(px)로 고정해서 그대로 두면 아래 25%가 비어 보인다 → 본문 칸 높이를 100%로 풀어준다.
+# 로그인 화면은 따로 크게 맞춰둔 것이라 로그인 뒤에만 건다.
+UI_ZOOM = 0.75
+
+
+def _inject_ui_zoom():
+    if not UI_ZOOM or UI_ZOOM == 1:
+        return
+    st.markdown(
+        "<style>"
+        f"html{{zoom:{UI_ZOOM};}}"
+        '[data-testid="stAppViewContainer"] > div:has(> [data-testid="stMain"]),'
+        '[data-testid="stMain"]{height:100% !important;}'
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+
 def main():
     _lt_memo_reset()   # 실행마다 표를 새로 한 번씩만 읽는다
     if not _auth_gate():   # 로그인 전이면 로그인 화면만 보여준다
         return
+    _inject_ui_zoom()
     # st.title()은 raw HTML(이미지)을 못 받아서, 이모지(📊) 대신 커스텀 아이콘을 쓰려면
     # 직접 <h1>을 그려야 한다. inject_theme()의 전역 h1 스타일(글자크기/굵기/색)은
     # 태그 자체를 그대로 쓰기 때문에 동일하게 적용된다.
