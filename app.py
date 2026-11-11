@@ -24839,9 +24839,9 @@ def _inject_ui_zoom():
         # 커스텀 컴포넌트(소재 표 등)는 iframe 폭을 '화면에 보이는 폭'으로 재서 px로 박는다 →
         # 배율을 걸면 75% 폭으로 줄어 오른쪽이 빈다. 칸 폭을 그대로 따르게 한다.
         '[data-testid="stMain"] iframe{width:100% !important;}'
-        # Plotly 차트도 '보이는 폭'으로 그림 크기를 정해서 75% 폭으로 그려진다 → 차트 칸에만
-        # 배율을 되돌려(1/배율) 칸 폭을 꽉 채우게 한다.
-        f'[data-testid="stPlotlyChart"]{{zoom:{1 / UI_ZOOM:.6f};}}'
+        # Plotly 차트·표(st.dataframe)도 '보이는 폭'으로 크기를 정해서 75% 폭으로 그려진다 →
+        # 그 칸에만 배율을 되돌려(1/배율) 칸 폭을 꽉 채우게 한다.
+        f'[data-testid="stPlotlyChart"],[data-testid="stDataFrame"]{{zoom:{1 / UI_ZOOM:.6f};}}'
         "</style>",
         unsafe_allow_html=True,
     )
