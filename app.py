@@ -17681,6 +17681,17 @@ GC_ITEMS = [GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_DAILY, GC_ITEM_A
             GC_ITEM_BEST, GC_ITEM_BF]
 
 
+def _gc_zero_batch(campaigns, grp_text):
+    """제로라운지 메타는 캠페인 하나(제로라운지_쇼핑어드밴티지)에 광고세트를 **소재 묶음 날짜별**로
+    만든다(의류관심타겟_261028 · 리타겟팅_261028 / _261008 …). 품목 대신 이 묶음으로 가른다
+    (2026-11-11 요청: 아우터/이너로 나눈 건 관리자 구조와 안 맞음). '261028 세트'를 돌려준다."""
+    cps = [str(c or "") for c in (campaigns or []) if str(c or "").strip()]
+    if not cps or not all("제로라운지" in c for c in cps):
+        return None
+    m = re.findall(r"(?<!\d)(2\d{5})(?!\d)", str(grp_text or ""))
+    return f"{m[-1]} 세트" if m else None
+
+
 def _gc_is_ext_daily(c) -> bool:
     low = str(c or "")
     return "외부몰" in low and "데일리" in low
@@ -17748,6 +17759,9 @@ def _gc_item_group(row) -> str:
     actual = [c for c in (media.get("campaigns") or []) if str(c or "").strip()]
     campaigns = actual or (row.get("camp_list") or [row.get("campaign")])
     campaigns = [c for c in campaigns if str(c or "").strip()]
+    _zb = _gc_zero_batch(campaigns, " ".join(str(x or "") for x in (row.get("target"), media.get("_adset"))))
+    if _zb:
+        return _zb
     if campaigns and all(_gc_is_ext_daily(c) for c in campaigns):
         # 외부몰 GFA 데일리 캠페인 — 광고그룹 이름으로만 가른다(패션관심타겟_블프 → 블프)
         grp = " ".join(str(x or "") for x in (row.get("target"), media.get("_adset")))
@@ -21187,7 +21201,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             item = GC_ITEM_ALL
             _item_cnt = {}
-            for _it in GC_ITEMS:
+            # 제로라운지처럼 묶음(세트)으로 가르는 매체는 품목 이름이 정해져 있지 않다 — 최신 묶음부터
+            _extra_items = []
+            if not rows.empty and "_item" in rows.columns:
+                _extra_items = sorted({str(x) for x in rows["_item"].dropna()
+                                       if str(x).endswith(" 세트")}, reverse=True)
+            for _it in list(GC_ITEMS) + _extra_items:
                 _n = _cnt(seg, _it)
                 if _n:
                     _item_cnt[_it] = _n
@@ -21223,7 +21242,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                         and (label == "TOTAL" or _k[1] == label)
                         for a in (_v or []) if isinstance(a, dict)]
             # 켜진 광고들의 품목(캠페인 이름 → 없으면 광고 이름으로)
-            _on_items = {(_gc_item_of_campaign(a.get("campaign"))
+            _on_items = {(_gc_zero_batch([a.get("campaign")], a.get("adset"))
+                          or _gc_item_of_campaign(a.get("campaign"))
                           or (GC_ITEM_BF if _gc_is_bf_creative(a.get("name")) else None)
                           or _gc_item_of_text(a.get("name")))
                          for a in _ads_for if a.get("on")}
