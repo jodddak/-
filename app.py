@@ -15929,6 +15929,44 @@ th.br-now{background:#DCE8FA !important;color:#2C4E86}
 """
 
 
+def _mix_with_current_budget(mix: pd.DataFrame, budget: pd.DataFrame) -> pd.DataFrame:
+    """연초 채널 믹스(channel_mix_budget) 중 **월 예산표(channel_budget, 자사몰)가 올라온 달**은
+    그 월 예산으로 바꿔 끼운다.
+
+    퍼널은 실집행이 없는 매체를 예산 일할로 채우는데, 연초 계획표만 보면 이미 접은 매체도
+    예산이 남아 있다 — 2026-11 맨즈탭은 연초 계획 2,000만 원이지만 실제 11월 예산은 0원이라,
+    10일치 667만 원이 광고비로 잡혀 신규 ROAS가 91% → 58%로 내려가 있었다(2026-11-11 확인).
+    채널 성과·예산 관리가 쓰는 월 예산표와 같은 기준으로 맞춘다."""
+    if budget is None or budget.empty or not {"scope", "channel", "year", "month", "budget_cost"} <= set(budget.columns):
+        return mix
+    b = budget[budget["scope"].astype(str).str.strip() == "자사몰"].copy()
+    b["channel"] = b["channel"].astype(str).str.strip()
+    _skip = ("TOTAL", "잔여", "달성", "법인카드", "촬영", "__")
+    b = b[~b["channel"].apply(lambda c: (not c) or any(w in c for w in _skip))]
+    b["year"] = pd.to_numeric(b["year"], errors="coerce")
+    b["month"] = pd.to_numeric(b["month"], errors="coerce")
+    b["budget"] = pd.to_numeric(b["budget_cost"], errors="coerce").fillna(0)
+    b = b.dropna(subset=["year", "month"])
+    if b.empty:
+        return mix
+    if mix is None or mix.empty:
+        return mix
+    # 연초 계획에 있던 매체의 그 달 예산만 월 예산표 값으로 바꾼다(새 매체를 끼워 넣지는 않는다 —
+    # 11/4에 시작한 카카오모먼트처럼 월 중간에 붙은 매체가 시작 전 날짜까지 예산으로 채워지면 안 된다).
+    cur = {(int(r.year), int(r.month), _v4_canon_channel(r.channel)): float(r.budget)
+           for r in b.itertuples()}
+    m = mix.copy()
+    m["budget"] = pd.to_numeric(m["budget"], errors="coerce").fillna(0)
+    for i, r in m.iterrows():
+        try:
+            k = (int(float(r["year"])), int(float(r["month"])), _v4_canon_channel(str(r["channel"]).strip()))
+        except Exception:
+            continue
+        if k in cur:
+            m.at[i, "budget"] = cur[k]
+    return m
+
+
 def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame,
                           channel_mix: pd.DataFrame, start: date, end: date):
     """채널별 광고비를 확정한다. (DataFrame[channel, cost_incl_vat, source], 요약문자열)
@@ -24832,7 +24870,8 @@ def main():
     elif page == "채널 퍼널 리포트":
         render_ga_channel_funnel_page(
             T("channel_audience_snapshot"), (lambda: T("ga_channel_inflow")),
-            T("inflow_revenue_daily"), T("channel_weekly"), T("channel_mix_budget"),
+            T("inflow_revenue_daily"), T("channel_weekly"),
+            _mix_with_current_budget(T("channel_mix_budget"), T("channel_budget")),
             ga_daily=T("ga_channel_daily"), utm_map=T("utm_channel_map"),
             decisions=T("decision_log"), ad_spend=T("ad_spend_daily"),
             master=T("media_master"),
