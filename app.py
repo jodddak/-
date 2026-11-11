@@ -18042,9 +18042,11 @@ def _gc_add_zero_live_ads(ad_creative, start, end, status_snapshot=None):
     for a in ads:
         created = pd.to_datetime(a.get("created_time"), errors="coerce", utc=True)
         if pd.isna(created):
-            continue  # Unknown creation dates cannot establish historical membership.
-        created_date = created.tz_convert("Asia/Seoul").date()
-        if created_date > end:
+            # 등록일을 모르는 켜진 광고(크리테오·카카오 목록)는 **어제까지 보는 기간**에만 넣는다 —
+            # 지금 켜져 있다는 것만 확실해서, 지난달 같은 과거 기간에 끼워 넣으면 안 된다.
+            if end < kst_today() - timedelta(days=1):
+                continue
+        elif created.tz_convert("Asia/Seoul").date() > end:
             continue
         k = _creative_image_key(a["name"])
         if not k:
@@ -18467,7 +18469,8 @@ def fetch_creative_status() -> tuple:
             end_d = kst_today() - timedelta(days=1)
             vers = ([str(c["api_version"]).strip()] if c.get("api_version") else []) + \
                 CRITEO_VERSION_CANDIDATES
-            ad2set, sets, _rep, ad_stat = {}, {}, [], {}
+            ad2set, sets, _rep, ad_stat, set_names = {}, {}, [], {}, {}
+            _crit_ver, _crit_adv = None, ""
             for v in vers:
                 adv = str(c.get("advertiser_id", "") or "").strip() or _criteo_advertiser_ids(token, v)
                 if not adv:
@@ -18482,6 +18485,7 @@ def fetch_creative_status() -> tuple:
                 if r.status_code >= 400:
                     errs.append(f"크리테오(광고-광고세트): {r.text[:100]}")
                     break
+                _crit_ver, _crit_adv = v, adv
                 p = r.json()
                 _rep = []
                 for row in (p.get("Rows") or p.get("rows") or []) if isinstance(p, dict) else []:
@@ -18517,6 +18521,7 @@ def fetch_creative_status() -> tuple:
                         on = (act == "on") and dlv not in ("archived", "inactive", "draft", "ended")
                         sets[str(it.get("id"))] = on
                         sets["name:" + str(at.get("name") or "")] = on
+                        set_names[str(it.get("id"))] = str(at.get("name") or "")
                 else:
                     errs.append(f"크리테오(광고세트 상태): {rs.status_code}")
                 break
@@ -18550,9 +18555,110 @@ def fetch_creative_status() -> tuple:
                 out.setdefault(("__ads__", tab), []).append(dict(
                     ch="크리테오", name=_an, adset=sname, on=on, campaign=camp or sname,
                     created_time=None))
+            # 리포트는 노출이 1번이라도 난 광고만 준다 — 어제 올린 배너가 아직 노출 0이면 목록에서
+            # 빠진다(2026-11-11 요청: 올린 소재는 노출 0이라도 표에 보여야 한다). 광고 목록 API에서
+            # 리포트에 없는 켜진 광고를 더 붙인다.
+            if _crit_ver and _crit_adv:
+                try:
+                    _seen_ads = {a for a, _ in _seen}
+                    _set_camp = {sid: camp for _an, nm, aid, sid, sname, camp in _rep if sid}
+                    for ad in _criteo_list_ads(token, _crit_ver, _crit_adv):
+                        aid = str(ad.get("id") or "")
+                        if not aid or aid in _seen_ads:
+                            continue
+                        _an = str(ad.get("name") or "").strip()
+                        nm = _creative_image_key(_an)
+                        if not nm:
+                            continue
+                        sid = str(ad.get("adSetId") or "")
+                        sname = set_names.get(sid, "")
+                        s_on = sets.get(sid)
+                        a_st = str(ad.get("status") or "").strip().lower().replace("_", "")
+                        a_on = None if not a_st else a_st in (
+                            "live", "active", "running", "on", "delivering", "eligible")
+                        try:
+                            if ad.get("endDate") and pd.to_datetime(ad["endDate"], utc=True).date() < kst_today():
+                                a_on = False
+                        except Exception:
+                            pass
+                        on = (bool(s_on) and a_on is not False) if s_on is not None else bool(a_on)
+                        if not on:
+                            continue      # 꺼진 옛 광고는 늘리지 않는다
+                        out.setdefault((tab, nm), []).append((sname, on))
+                        out.setdefault(("__ads__", tab), []).append(dict(
+                            ch="크리테오", name=_an, adset=sname, on=on,
+                            campaign=_set_camp.get(sid) or sname,
+                            created_time=ad.get("startDate")))
+                except Exception as _e:
+                    errs.append(f"크리테오(광고 목록): {str(_e)[:100]}")
         except Exception as e:
             errs.append(f"크리테오: {str(e)[:120]}")
+
+    # ── 카카오모먼트 ── 캠페인·광고그룹·소재가 모두 ON인 소재만 켜진 것으로 본다(config).
+    # 보고서는 노출이 난 소재만 주므로, 목록에서 켜진 소재를 받아야 막 올린 노출 0 소재도 보인다.
+    _kcfg = _secrets_section("kakao_moment")
+    if _kcfg and _kcfg.get("ad_account_id"):
+        try:
+            import requests as _rqk
+            tab = _gc_channel(KAKAO_MOMENT_CHANNEL)
+            _ks = _rqk.Session()
+            _ks.headers.update({"Authorization": f"Bearer {_kakao_access_token(_kcfg)}",
+                                "adAccountId": str(_kcfg["ad_account_id"]).strip()})
+
+            def _k_on(x):
+                return str(x.get("config") or "").upper() == "ON"
+            for cp in _kakao_list(_ks, "campaigns"):
+                if cp.get("id") is None:
+                    continue
+                cname = str(cp.get("name") or "")
+                time.sleep(0.3)
+                for ag in _kakao_list(_ks, "adGroups", {"campaignId": cp["id"]}):
+                    if ag.get("id") is None:
+                        continue
+                    gname = str(ag.get("name") or "")
+                    time.sleep(0.3)
+                    for cr in _kakao_list(_ks, "creatives", {"adGroupId": ag["id"]}):
+                        _an = str(cr.get("name") or "").strip()
+                        nm = _creative_image_key(_an)
+                        if not nm or str(cr.get("config") or "").upper() == "DEL":
+                            continue
+                        on = _k_on(cp) and _k_on(ag) and _k_on(cr)
+                        out.setdefault((tab, nm), []).append((gname, on))
+                        out.setdefault(("__ads__", tab), []).append(dict(
+                            ch=KAKAO_MOMENT_CHANNEL, name=_an, adset=gname, on=on, campaign=cname,
+                            created_time=cr.get("createdDate") or cr.get("createdAt")
+                            or cr.get("created_time")))
+        except Exception as e:
+            errs.append(f"카카오모먼트: {str(e)[:120]}")
     return out, errs
+
+
+def _criteo_list_ads(token: str, ver: str, adv: str) -> list:
+    """크리테오 광고주 광고 목록 — [{id, name, adSetId, startDate, endDate, status}].
+    목록이 offset을 무시하고 같은 쪽을 다시 주면(첫 ID가 반복되면) 멈춘다."""
+    import requests
+    H = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    out = []
+    for a1 in [x.strip() for x in str(adv).split(",") if x.strip()]:
+        off, seen_first = 0, set()
+        for _ in range(30):
+            r = requests.get(f"{CRITEO_BASE}/{ver}/marketing-solutions/advertisers/{a1}/ads",
+                             headers=H, params={"limit": 100, "offset": off}, timeout=60)
+            if r.status_code >= 400:
+                break
+            dat = (r.json() or {}).get("data") or []
+            if not dat or str(dat[0].get("id")) in seen_first:
+                break
+            seen_first.add(str(dat[0].get("id")))
+            for it in dat:
+                at = it.get("attributes") or {}
+                out.append(dict(id=str(it.get("id") or at.get("id") or ""), name=at.get("name"),
+                                adSetId=at.get("adSetId"), startDate=at.get("startDate"),
+                                endDate=at.get("endDate"), status=at.get("adDeliveryStatus")))
+            if len(dat) < 100:
+                break
+            off += len(dat)
+    return out
 
 
 def _gc_status_campaign(row, media=None):
