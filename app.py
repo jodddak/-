@@ -16020,6 +16020,32 @@ def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame
                 _ds = g_.loc[g_["source"].isin(_srcs), "report_date"]
                 covered.setdefault(ch, set()).update(d_ for d_ in _ds if start <= d_ <= end)
 
+    # 카카오 비즈월렛 캐시 사용현황은 **기간 전체 내역**을 한 번에 올리는 파일이다. 발송한 날만 행이
+    # 남지만(안 보낸 날은 0원이라 안 저장), 그 사이 날짜도 '0원으로 확정'이다 — 안 그러면 발송 안 한
+    # 날마다 예산 일할이 끼어들어 실제 발송비 위에 추정액이 또 얹힌다(2026-11-11: 11월 발송 3회
+    # 286만 원을 올렸는데 나머지 날짜에 예산이 채워질 뻔했다). 그 달 1일부터 파일을 올린 날
+    # (없으면 마지막 행 날짜)까지를 확정으로 본다.
+    if (ad_actual is not None and not ad_actual.empty
+            and {"report_date", "channel", "source"} <= set(ad_actual.columns)):
+        _kc = ad_actual[ad_actual["source"].astype(str) == "kakao_cash"].copy()
+        if not _kc.empty:
+            _kc["report_date"] = pd.to_datetime(_kc["report_date"], errors="coerce").dt.date
+            _kc = _kc.dropna(subset=["report_date"])
+            _kc["channel"] = _kc["channel"].map(_v4_canon_channel)
+            _kc["_up"] = (pd.to_datetime(_kc["uploaded_at"], errors="coerce", utc=True)
+                          + pd.Timedelta(hours=9)).dt.date if "uploaded_at" in _kc.columns else None
+            _kc["_ym"] = [(d_.year, d_.month) for d_ in _kc["report_date"]]
+            for (ch, ym), g_ in _kc.groupby(["channel", "_ym"]):
+                _last = max(g_["report_date"])
+                _ups = [u for u in g_["_up"] if isinstance(u, date)] if "_up" in g_.columns else []
+                if _ups:
+                    _last = max(_last, max(_ups))
+                d_ = date(ym[0], ym[1], 1)
+                while d_ <= _last and d_.month == ym[1]:
+                    if start <= d_ <= end:
+                        covered.setdefault(ch, set()).add(d_)
+                    d_ += timedelta(days=1)
+
     # 폴백 — 달 단위 구간마다 (주간 → 예산) 값 × (그 구간의 안 덮인 날 ÷ 구간 일수)
     fb_sum, fb_src = {}, {}
     m0 = start.replace(day=1)
