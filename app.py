@@ -18872,8 +18872,15 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 gc = _gc_tgt_norm(camps[i]).replace("/", "")
                 mc = bt[a].get("campaign")
                 mcn = _gc_tgt_norm(mc).replace("/", "")
-                return bool(gc) and (gc == mcn or gc in mcn
-                                     or str(camps[i]).strip().lower() in _gc_camp_parts(mc))
+                if bool(gc) and (gc == mcn or gc in mcn
+                                 or str(camps[i]).strip().lower() in _gc_camp_parts(mc)):
+                    return True
+                # utm은 '블랙프라이데이_전환_PC', 매체는 'STCO_자사몰_블랙프라이데이_PC'처럼 앞뒤 수식어
+                # (STCO·자사몰·전환)만 다르게 적는 경우 — 떼고 비교한다(GFA PC 블프 16개가 전부
+                # 'UTM 없음'으로 빠지고 GA 줄이 따로 떴다, 2026-11-12).
+                def _cq(x):
+                    return re.sub(r"stco|자사몰|전환|_|-", "", _gc_tgt_norm(x).replace("/", ""))
+                return bool(_cq(camps[i])) and _cq(camps[i]) == _cq(mc)
 
             # 타겟팅 이름이 같은 GA 줄이 몇 개인지 먼저 센다.
             #  · 1개면 → 그 타겟팅의 광고세트를 **캠페인 상관없이 전부** 붙인다.
