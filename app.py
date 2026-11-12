@@ -13152,14 +13152,16 @@ MEDIA_MASTER_DEFAULT = [
     ("GFA_애드부스트",      "자사몰",  40, "네이버 애드부스트",    "신규 매체",           1.0,
      "naver/gfa_애드부스트", 0),
     ("GFA_자사몰",         "자사몰",  50, "네이버 GFA",         "네이버 GFA",          1.0,
-     "naver/gfa,naver/da,naver/display", 0),
+     "naver/gfa,naver/display", 0),
     ("크리테오",            "자사몰",  60, "크리테오",           "크리테오",            1.0,
      "criteo/display,criteo/cpc", 0),
     ("구글_실적최대화",      "자사몰",  70, "구글",              "구글",               1.0,
      "google/cpc", 0),
     # 맨즈탭 8월 예산 500만원은 전액 자사몰이다(외부몰은 미집행).
     ("네이버 맨즈탭_자사몰",  "자사몰",  80, "네이버 맨즈탭_자사몰", "네이버 맨즈탭",        1.0,
-     "naver/n.box,naversb/cpp,naver_sb/cpp", 0),
+     # naver/da(utm_campaign=pc_sb, utm_content=mens)는 맨즈탭 PC 배너 링크다 — GFA 실광고는
+     # Naver / GFA로만 들어온다. 예전엔 GFA_자사몰이 받아 'UTM 구분 없음'으로 떴다(2026-11-12 확인·이관).
+     "naver/n.box,naversb/cpp,naver_sb/cpp,naver/da", 0),
     ("카카오톡 플친",       "자사몰",  90, "카카오",             "카카오톡 플친",        1.0,
      "kakao_msg/email,kakaotalk/display", 0),
     # 2026-11-04 라이브. 광고비는 카카오모먼트 API, 매출은 GA(kakaomoment/display).
@@ -15126,8 +15128,10 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
               (f'<span class="cp-src">{_tog}</span>' if _tog else "")
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
         # 이번 기간 집행 없음(광고비·노출 0, 예산도 없음) — 맨 아래 접힌 묶음으로 숨긴다(합계엔 그대로 포함)
+        # GA 구매가 잡힌 매체는 광고를 안 돌려도 숨기지 않는다(옛 링크로 들어온 구매 — 맨즈탭 11월)
         _idle = (float(r["비용"] or 0) == 0 and float(r["노출"] or 0) == 0
-                 and float(r["월예산"] or 0) == 0)
+                 and float(r["월예산"] or 0) == 0 and float(r.get("GA구매") or 0) == 0
+                 and float(r.get("GA매출") or 0) == 0)
         if _idle:
             _idle_names.append(r["매체"])
         _tr_cls = (' class="cp-has-sub"' if _has_sub else "") if not _idle else ' class="cp-idle" style="display:none"'
