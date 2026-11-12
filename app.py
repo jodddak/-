@@ -21723,6 +21723,14 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
 
             def _row_label(r):
                 _l = _raw_row_label(r)
+                # 크리테오는 광고세트 = 캠페인(스태틱_리텐션·다이나믹_리텐션)이다. utm에 타겟팅이 없어
+                # '그룹 미확인'으로 뜨던 GA 줄(옛 배너로 들어온 구매)은 그 캠페인 그룹으로 넣는다(2026-11-12).
+                if label == "크리테오" and str(_l).startswith("그룹 미확인"):
+                    _c = str(_gc_actual_campaign_label(r) or r.get("campaign") or "").split(" · ")[0].strip()
+                    if _c:
+                        _r2 = r.copy() if hasattr(r, "copy") else dict(r)
+                        _r2["target"] = _c
+                        _l = _raw_row_label(_r2)
                 return _gfa_fix(_off_alias.get(_l, _l), _gc_actual_campaign_label(r))
 
             def _detail_left_label(v, k):
