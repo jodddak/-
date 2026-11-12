@@ -21281,6 +21281,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 실적 0인 광고그룹(매체 관리자엔 있는데 이 기간 노출 0)을 미리 모아둔다 —
             # 아래 '빈 줄 제거'에서 같이 빠지면 매체 관리자 목록과 달라 보인다.
             _zero_groups = []
+            # 직접 등록한 소재(보고서에 없는 신규 소재 등록 · creative_inventory)는 **그 캠페인·광고그룹**
+            # 기준으로 살아 있는 것으로 본다. 같은 소재가 다른 캠페인(아우터)에 실적이 있으면 묶음
+            # 출처가 매체 리포트로 잡혀 등록한 광고그룹(베스트·쇼핑관심타겟) 줄이 빠졌다(2026-11-12).
+            _inv_set = set()
+            try:
+                if ad_creative is not None and not ad_creative.empty and "source" in ad_creative.columns:
+                    _iv = ad_creative[ad_creative["source"].astype(str) == "creative_inventory"]
+                    for _ich, _icr, _icp, _iad in zip(_iv["channel"], _iv["creative"],
+                                                    _iv.get("campaign", pd.Series("", index=_iv.index)),
+                                                    _iv.get("adset", pd.Series("", index=_iv.index))):
+                        _inv_set.add((_gc_channel(_ich), _creative_image_key(str(_icr)),
+                                      _gc_tgt_norm(_icp), _gc_tgt_norm(_creative_adset_label(_iad))))
+            except Exception:
+                _inv_set = set()
             for _zk, _zv in media_map.items():
                 if _zk[0] not in ch_keep:
                     continue
@@ -21297,7 +21311,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _zc0, _za0 = str(_tv.get("campaign") or "").strip(), str(_tv.get("adset") or "").strip()
                     # 매체 관리자 '운영가능' 목록과 같게 — **지금 켜져 있는** 소재·그룹만 0으로라도
                     # 보여준다(직접 등록한 GFA 소재 포함). 꺼진 옛 캠페인(추석세일 등)은 빼야 한다.
-                    if _gc_zero_is_live(_zk, _zv, _zc0, _za0, _status_map):
+                    _ikey = (_zk[0], _creative_image_key(str(_zv.get("name") or _zk[1]).split("__", 1)[0]),
+                             _gc_tgt_norm(_zc0), _gc_tgt_norm(_za0))
+                    if _ikey in _inv_set or _gc_zero_is_live(_zk, _zv, _zc0, _za0, _status_map):
                         _zero_groups.append((_zk, _zv, _zc0, _za0))
             # Remove truly empty rows before calculating buttons, totals and exports.
             if not rows.empty:
