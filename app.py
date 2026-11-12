@@ -16603,7 +16603,13 @@ def _gc_pick_image(row, img_map: dict, store_idx: dict):
         m = re.match(r"^(.*[^\dv_])(\d{1,2})$", k, flags=re.I)
         if m and not re.match(r"^\d+$", k):
             _alt.append(m.group(1) + "v" + m.group(2))
-    for ks in (keys, [a for a in _alt if a not in keys]):
+    # 카카오모먼트는 같은 소재를 '_정방형'·'_직각형' 두 판으로 올린다 — 이미지는 소재 이름
+    # 하나(261109_컴포트슬랙스.jpg)로 올렸으니 모양 꼬리표를 떼고도 찾는다(2026-11-12).
+    for k in list(keys):
+        m = re.match(r"^(.*?)_?(정방형|직각형|가로형|세로형)$", k)
+        if m and m.group(1):
+            _alt.append(m.group(1))
+    for ks in (keys, [a for a in dict.fromkeys(_alt) if a not in keys]):
         if store_idx:
             for k in ks:
                 hit = store_idx.get(_safe_storage_name(k))
@@ -18260,6 +18266,21 @@ def _gc_tgt_norm(s) -> str:
     return "".join(str(s or "").lower().split())
 
 
+# utm에 광고그룹 이름을 잘못·짧게 적은 것 바로잡기 — 카카오모먼트 데일리 '3069남성연령'은
+# 광고그룹 '3569남성연령_리타겟제외'의 오타(2026-11-12 담당자 확인).
+GC_TARGET_TYPO = {"3069남성연령": "3569남성연령"}
+
+
+def _gc_tgt_q(s) -> str:
+    """광고그룹 비교용 느슨한 키 — 밑줄·'리타겟제외'를 빼고 오타를 고친다.
+    utm '3569남성연령v1' ↔ 광고그룹 '3569남성연령_리타겟제외v1'이 같아진다."""
+    t = _gc_tgt_norm(s).replace("_", "").replace("리타겟제외", "")
+    for a, b in GC_TARGET_TYPO.items():
+        if t.startswith(a):
+            t = b + t[len(a):]
+    return t
+
+
 def _gc_tgt_match(target, adset) -> bool:
     """GA 타겟팅(utm_content 앞부분)과 매체 광고세트 이름이 같은 묶음인가.
     '패션관심타겟' ↔ '패션관심타겟' / '방문자180일' ↔ '리타겟팅_방문자180일' 둘 다 잡는다."""
@@ -18881,6 +18902,11 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                     # (다른 캠페인 줄에 얹으면 신규/리타겟팅이 섞인다).
                     return [i for i in idxs if _camp_ok(i, a)]
                 ex = [i for i in idxs if _nt[i] and _nt[i] == an]
+                if ex:
+                    return ex
+                # utm이 광고그룹 이름을 줄여 쓴 경우(3569남성연령v1 ↔ 3569남성연령_리타겟제외v1)
+                _aq = _gc_tgt_q(bt[a].get("adset", a))
+                ex = [i for i in idxs if _nt[i] and _aq and _gc_tgt_q(_nt[i]) == _aq]
                 if ex:
                     return ex
                 cm = [i for i in idxs if _gc_tgt_match(_nt[i], bt[a].get("adset", a))]
@@ -21496,8 +21522,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     # utm 앞부분은 광고그룹 이름을 줄여 쓰기도 한다 — 카카오모먼트 광고그룹
                     # '3569남성연령_리타겟제외v1'을 utm엔 '3569남성연령v1'로 심었다(2026-11-12).
                     # '리타겟제외'·밑줄을 빼고 비교해야 같은 그룹 버튼으로 모인다.
-                    def _tq(x):
-                        return _gc_tgt_norm(x).replace("_", "").replace("리타겟제외", "")
+                    _tq = _gc_tgt_q
                     _t = _tq(r.get("target"))
                     _nm = {_creative_image_key(str(n)) for n in
                            (r.get("cre_title"), r.get("cre_name")) if n}
