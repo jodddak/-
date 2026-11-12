@@ -18281,6 +18281,15 @@ def _gc_tgt_q(s) -> str:
     return t
 
 
+def _gc_group_version(label) -> int:
+    """세부 타겟팅 버튼의 버전 번호 — '의류관심타겟v2 (신규) · 블랙프라이데이' → 2,
+    '방문자180일2 (리타겟팅)' → 2, 버전 없으면 0(맨 앞)."""
+    name = re.sub(r"\s*\(.*$", "", str(label or "").split(" · ")[0]).strip()
+    name = re.sub(r"\s*-\s*OFF$", "", name)
+    m = re.search(r"[vV](\d{1,2})$", name) or re.search(r"(?<=[가-힣])(\d{1,2})$", name)
+    return int(m.group(1)) if m else 0
+
+
 def _gc_tgt_match(target, adset) -> bool:
     """GA 타겟팅(utm_content 앞부분)과 매체 광고세트 이름이 같은 묶음인가.
     '패션관심타겟' ↔ '패션관심타겟' / '방문자180일' ↔ '리타겟팅_방문자180일' 둘 다 잡는다."""
@@ -21707,8 +21716,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             if label != "TOTAL":
                 _groups.update(_detail_left_label(v, k) for k, v in _left_all)
             if _groups - {"그룹 미확인"}:
+                # 버전(v1·v2…)이 있으면 v1 신규 → v1 리타 → v2 신규 → v2 리타 순(2026-11-12 요청, 전 매체).
                 _target_options = ["전체"] + sorted(_groups,
-                    key=lambda x: (" - OFF" in x, "리타겟팅" in x, "패션 관심타겟" in x, x == "그룹 미확인", x))
+                    key=lambda x: (" - OFF" in x, _gc_group_version(x), "리타겟팅" in x,
+                                   "패션 관심타겟" in x, x == "그룹 미확인", x))
                 _detail_counts = {choice: (
                     sum(_row_label(r) == choice for _, r in rows.iterrows())
                     + sum(_detail_left_label(v, k) == choice for k, v in _left_f))
