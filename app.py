@@ -17770,6 +17770,13 @@ def _gc_item_group(row) -> str:
         # 외부몰 GFA 데일리 캠페인 — 광고그룹 이름으로만 가른다(패션관심타겟_블프 → 블프)
         grp = " ".join(str(x or "") for x in (row.get("target"), media.get("_adset")))
         return GC_ITEM_BF if _gc_is_bf(grp) else GC_ITEM_DAILY
+    # 카카오모먼트도 품목별 캠페인이 아니라 '데일리' 캠페인 하나 + 블랙프라이데이 캠페인이다
+    # (STCO_모먼트_데일리_전환 / GA utm_campaign=데일리, 2026-11-12). 발마칸·코트 소재라고
+    # 아우터로 가르면 관리자 구조와 안 맞는다.
+    _is_km = (str(row.get("channel") or "") == KAKAO_MOMENT_CHANNEL
+              or any("모먼트" in str(c) for c in campaigns))
+    if _is_km and campaigns and all("데일리" in str(c) for c in campaigns):
+        return GC_ITEM_DAILY
     items = {_gc_item_of_campaign(c) for c in campaigns} - {None}
     if len(items) == 1:
         return next(iter(items))
@@ -21363,6 +21370,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                    if isinstance(_k, tuple) and _k and (label == "TOTAL" or _k[0] == label)
                    and isinstance(_v, list) for e in _v):
                 _on_items.add(GC_ITEM_BF)
+            # 데일리 캠페인(카카오모먼트·외부몰)이 켜져 있으면 '데일리' 품목도 켜진 것
+            if any(a.get("on") and "데일리" in str(a.get("campaign") or "")
+                   and ("모먼트" in str(a.get("campaign") or "") or "외부몰" in str(a.get("campaign") or ""))
+                   for a in _ads_for):
+                _on_items.add(GC_ITEM_DAILY)
             _item_off = set()
             for _it in _item_cnt:
                 if label == GFA_PC_OWN:
@@ -21481,12 +21493,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 m = r.get("_media")
                 _mad = str((m or {}).get("_adset") or "").strip() if isinstance(m, dict) else ""
                 if not (_mad and "," not in _mad) and _ads_lbl:
-                    _t = _gc_tgt_norm(r.get("target"))
+                    # utm 앞부분은 광고그룹 이름을 줄여 쓰기도 한다 — 카카오모먼트 광고그룹
+                    # '3569남성연령_리타겟제외v1'을 utm엔 '3569남성연령v1'로 심었다(2026-11-12).
+                    # '리타겟제외'·밑줄을 빼고 비교해야 같은 그룹 버튼으로 모인다.
+                    def _tq(x):
+                        return _gc_tgt_norm(x).replace("_", "").replace("리타겟제외", "")
+                    _t = _tq(r.get("target"))
                     _nm = {_creative_image_key(str(n)) for n in
                            (r.get("cre_title"), r.get("cre_name")) if n}
                     _cand = {a.get("adset") for a in _ads_lbl
                              if _creative_image_key(a.get("name") or "") in _nm
-                             and _t and _t in _gc_tgt_norm(a.get("adset"))}
+                             and _t and _t in _tq(a.get("adset"))}
+                    if not _cand and _t:
+                        # 소재 이름이 매체 목록과 달라도, 줄인 이름이 딱 한 광고그룹과 같으면 그 그룹이다
+                        _cand = {a.get("adset") for a in _ads_lbl if _tq(a.get("adset")) == _t}
                     if len(_cand) == 1:
                         return _gc_detail_target_label(_with_current_group_state(dict(
                             target=next(iter(_cand)), campaign=r.get("campaign") or "")))
