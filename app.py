@@ -21312,7 +21312,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     # 매체 관리자 '운영가능' 목록과 같게 — **지금 켜져 있는** 소재·그룹만 0으로라도
                     # 보여준다(직접 등록한 GFA 소재 포함). 꺼진 옛 캠페인(추석세일 등)은 빼야 한다.
                     # 광고세트별로 쪼갠 줄은 campaign 칸이 '캠페인 · 그룹'이라 앞부분(campaigns)으로 본다
-                    _zcb = str(((_zv.get("campaigns") or [None])[0]) or _zc0.split(" · ")[0]).strip()
+                    _zcb = _zc0.split(" · ")[0].strip()
                     _ikey = (_zk[0], _creative_image_key(str(_zv.get("name") or _zk[1]).split("__", 1)[0]),
                              _gc_tgt_norm(_zcb), _gc_tgt_norm(_za0))
                     if _ikey in _inv_set or _gc_zero_is_live(_zk, _zv, _zc0, _za0, _status_map):
