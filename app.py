@@ -18046,7 +18046,8 @@ def _gc_add_zero_live_ads(ad_creative, start, end, status_snapshot=None):
             smap, _ = fetch_creative_status()
         except Exception:
             return ad_creative
-    ads = [a for k, v in (smap or {}).items() if k[0] == "__ads__" for a in v if a.get("on")]
+    ads = [a for k, v in (smap or {}).items() if k[0] in ("__ads__", "__zero_ads__")
+           for a in v if a.get("on")]
     if not ads:
         return ad_creative
     have = set()
@@ -18501,6 +18502,12 @@ def fetch_creative_status() -> tuple:
                             continue
                         on = (ag.get("status") == "ENABLED" and camp.get("status") == "ENABLED")
                         out.setdefault((tab, nm), []).append((str(camp.get("name") or ""), on))
+                        # 켜진 애셋 그룹 목록 — 오늘 만든 그룹처럼 아직 실적이 없어도 소재별 성과에
+                        # 0으로 한 줄 띄운다(__ads__에 넣으면 구글 ON/OFF 판정 경로가 바뀌어 따로 둔다).
+                        if on:
+                            out.setdefault(("__zero_ads__", tab), []).append(dict(
+                                ch="구글", name=str(ag.get("name") or "").strip(), adset="", on=True,
+                                campaign=str(camp.get("name") or ""), created_time=None))
                 break
         except Exception as e:
             errs.append(f"구글: {str(e)[:120]}")
