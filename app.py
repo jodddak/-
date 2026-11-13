@@ -18871,6 +18871,7 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
             used = set()
             assigned = {}          # 줄 번호 → [광고세트 키, ...]
             camps = (rows["campaign"].tolist() if "campaign" in rows.columns else [""] * len(rows))
+            _camp_lists = (rows["camp_list"].tolist() if "camp_list" in rows.columns else [None] * len(rows))
 
             def _camp_ok(i, a):
                 # 'A/B테스트'(매체) ↔ 'AB테스트'(UTM)처럼 빗금 표기만 다른 경우도 같은 캠페인으로 본다.
@@ -18889,7 +18890,13 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 # GA 줄 하나가 캠페인 여러 개('아우터_전환_MO + 베스트_전환_MO')를 품기도 한다 — 조각마다 본다
                 # (베스트_MO의 발마칸코트·텐셀셔츠가 'UTM 없음'으로 빠지고 GA 줄은 '광고비 없음'이 됐다, 2026-11-13).
                 _mq = _cq(mc)
-                return bool(_mq) and any(_cq(p_) == _mq for p_ in str(camps[i] or "").split(" + ") if p_.strip())
+                _parts = [p_ for p_ in str(camps[i] or "").split(" + ") if p_.strip()]
+                # 캠페인별로 따로였던 GA 줄을 합친 줄은 camp_list에 원래 utm 캠페인들이 들어 있다
+                _cl = _camp_lists[i] if i < len(_camp_lists) else None
+                if isinstance(_cl, (list, tuple, set)):
+                    _parts += [str(p_) for p_ in _cl if str(p_ or "").strip()]
+                return bool(_mq) and any(_cq(p_) == _mq or _cq(p_) in _mq or _mq in _cq(p_)
+                                         for p_ in _parts if _cq(p_))
 
             # 타겟팅 이름이 같은 GA 줄이 몇 개인지 먼저 센다.
             #  · 1개면 → 그 타겟팅의 광고세트를 **캠페인 상관없이 전부** 붙인다.
