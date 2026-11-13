@@ -21361,6 +21361,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     if _id in _shown:
                         continue
                     _shown.add(_id)
+                    # 광고그룹별로 쪼갠 키는 campaign 칸이 '캠페인 · 그룹'이다 — 그대로 두면 상태 조회용
+                    # 캠페인 이름이 어긋나 직접 체크한 ON/OFF가 안 붙었다(261112 수트 신규 소재, 2026-11-13).
+                    _zc = str(_zc or "").split(" · ")[0].strip()
                     _left_all.append((_zk, dict(
                         channel=_zv.get("channel"), name=_zv.get("name"), src=_zv.get("src"),
                         campaign=_zc, campaigns=[_zc] if _zc else [], _adset=_za,
