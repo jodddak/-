@@ -16044,6 +16044,10 @@ def resolve_channel_spend(ad_actual: pd.DataFrame, channels_weekly: pd.DataFrame
                 _ups = [u for u in g_["_up"] if isinstance(u, date)] if "_up" in g_.columns else []
                 if _ups:
                     _last = max(_last, max(_ups))
+                # 파일을 올린 뒤 날짜도 예산 일할로 채우지 않는다 — 플친은 3~4일에 한 번 보내는
+                # 건당 비용이라 하루 21만 원씩 추정하면 틀린다(11/12에 216,667원이 얹혀 채널 성과
+                # 2,863,740원과 어긋났다, 2026-11-13). 다음 파일을 올릴 때까지 0원으로 둔다.
+                _last = max(_last, end)
                 d_ = date(ym[0], ym[1], 1)
                 while d_ <= _last and d_.month == ym[1]:
                     if start <= d_ <= end:
@@ -18286,7 +18290,9 @@ def _gc_group_version(label) -> int:
     '방문자180일2 (리타겟팅)' → 2, 버전 없으면 0(맨 앞)."""
     name = re.sub(r"\s*\(.*$", "", str(label or "").split(" · ")[0]).strip()
     name = re.sub(r"\s*-\s*OFF$", "", name)
-    m = re.search(r"[vV](\d{1,2})$", name) or re.search(r"(?<=[가-힣])(\d{1,2})$", name)
+    m = (re.search(r"[vV](\d{1,2})$", name) or re.search(r"_(\d{6})$", name)
+         or re.search(r"(?<=[가-힣])(\d{1,2})$", name))
+    # '_261028'처럼 날짜로 묶은 세트(제로라운지)도 같은 날짜끼리 신규 → 리타로 붙인다
     return int(m.group(1)) if m else 0
 
 
@@ -18880,7 +18886,10 @@ def _gc_attach_media(rows: pd.DataFrame, media_map: dict, matched_ids: set) -> l
                 # 'UTM 없음'으로 빠지고 GA 줄이 따로 떴다, 2026-11-12).
                 def _cq(x):
                     return re.sub(r"stco|자사몰|전환|_|-", "", _gc_tgt_norm(x).replace("/", ""))
-                return bool(_cq(camps[i])) and _cq(camps[i]) == _cq(mc)
+                # GA 줄 하나가 캠페인 여러 개('아우터_전환_MO + 베스트_전환_MO')를 품기도 한다 — 조각마다 본다
+                # (베스트_MO의 발마칸코트·텐셀셔츠가 'UTM 없음'으로 빠지고 GA 줄은 '광고비 없음'이 됐다, 2026-11-13).
+                _mq = _cq(mc)
+                return bool(_mq) and any(_cq(p_) == _mq for p_ in str(camps[i] or "").split(" + ") if p_.strip())
 
             # 타겟팅 이름이 같은 GA 줄이 몇 개인지 먼저 센다.
             #  · 1개면 → 그 타겟팅의 광고세트를 **캠페인 상관없이 전부** 붙인다.
