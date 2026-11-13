@@ -15128,10 +15128,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
               (f'<span class="cp-src">{_tog}</span>' if _tog else "")
         nn = lambda v: -1 if v is None or (isinstance(v, float) and pd.isna(v)) else v
         # 이번 기간 집행 없음(광고비·노출 0, 예산도 없음) — 맨 아래 접힌 묶음으로 숨긴다(합계엔 그대로 포함)
-        # GA 구매가 잡힌 매체는 광고를 안 돌려도 숨기지 않는다(옛 링크로 들어온 구매 — 맨즈탭 11월)
-        _idle = (float(r["비용"] or 0) == 0 and float(r["노출"] or 0) == 0
-                 and float(r["월예산"] or 0) == 0 and float(r.get("GA구매") or 0) == 0
-                 and float(r.get("GA매출") or 0) == 0)
+        # 광고비·노출이 0이면(안 돌린 매체: 맨즈탭·법인카드정산·메타_외부몰 등) 표에서 숨긴다 —
+        # 예산이 잡혀 있거나 옛 링크로 GA 구매가 들어와도 숨긴다(2026-11-13 요청). 합계엔 그대로 포함.
+        _idle = (float(r["비용"] or 0) == 0 and float(r["노출"] or 0) == 0)
         if _idle:
             _idle_names.append(r["매체"])
         _tr_cls = (' class="cp-has-sub"' if _has_sub else "") if not _idle else ' class="cp-idle" style="display:none"'
@@ -15155,10 +15154,9 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         if r["매체"] in _seg_subs:
             body.append(_sub_rows_html(r["매체"], _seg_subs[r["매체"]], "seg"))
     if _idle_names:
-        body.append('<tr class="cp-idle-tog"><td class="l" colspan="12" style="cursor:pointer;color:#6b7280;'
-                    'font-size:12px;padding:8px 10px">▸ 이번 기간 집행 없는 매체 '
-                    f'{len(_idle_names)}개 — {" · ".join(_idle_names)} '
-                    '<span style="color:#9ca3af">(눌러서 펼치기 · 합계에는 포함)</span></td></tr>')
+        body.append('<tr class="cp-idle-note"><td class="l" colspan="12" style="color:#9ca3af;'
+                    'font-size:11px;padding:6px 10px">이번 기간 집행 없는 매체 '
+                    f'{len(_idle_names)}개는 숨김 — {" · ".join(_idle_names)} (합계에는 포함)</td></tr>')
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
     s_roas = f'{tot_rev / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
@@ -15212,6 +15210,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 (function(){
   var tbl = document.getElementById('cptbl');
   var ths = tbl.tHead.rows[0].cells;
+  var inote = tbl.querySelector('tr.cp-idle-note');
+  if (inote) { var tbn = tbl.tBodies[0]; tbn.insertBefore(inote, tbn.querySelector('tr.cp-selrow')); }
   var itog = tbl.querySelector('tr.cp-idle-tog');
   if (itog) {
     var tb0 = tbl.tBodies[0];
