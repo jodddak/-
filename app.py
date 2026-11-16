@@ -15351,8 +15351,11 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
   var tbl=document.getElementById('cptbl'), bar=document.getElementById('cpselbar');
   if(!tbl||!bar) return;
   var only=false;
-  function fit(){try{window.parent.postMessage({type:'streamlit:setFrameHeight',
-    height:document.documentElement.scrollHeight+8},'*');}catch(e){}}
+  // 줄을 숨기면 표가 짧아지는데 문서 높이(scrollHeight)는 지금 틀 높이 밑으로 안 줄어든다 —
+  // 내용(.cp-wrap) 끝 위치로 재야 아래 빈 공간이 안 남는다.
+  function fit(){try{var w=document.querySelector('.cp-wrap');
+    var h=w?Math.ceil(w.getBoundingClientRect().bottom+window.scrollY):document.documentElement.scrollHeight;
+    window.parent.postMessage({type:'streamlit:setFrameHeight',height:h+8},'*');}catch(e){}}
   var scope='';
   function mains(){return Array.prototype.slice.call(tbl.tBodies[0].rows).filter(function(r){
     return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow')
