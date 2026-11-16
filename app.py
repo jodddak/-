@@ -15355,7 +15355,9 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
   // 내용(.cp-wrap) 끝 위치로 재야 아래 빈 공간이 안 남는다.
   function fit(){try{var w=document.querySelector('.cp-wrap');
     var h=w?Math.ceil(w.getBoundingClientRect().bottom+window.scrollY):document.documentElement.scrollHeight;
-    window.parent.postMessage({type:'streamlit:setFrameHeight',height:h+8},'*');}catch(e){}}
+    window.parent.postMessage({type:'streamlit:setFrameHeight',height:h+8},'*');
+    // 이 표 틀(components.html)은 높이 메시지를 무시하고 고정 높이라, 틀 높이를 직접 맞춘다
+    if(window.frameElement) window.frameElement.style.height=(h+8)+'px';}catch(e){}}
   var scope='';
   function mains(){return Array.prototype.slice.call(tbl.tBodies[0].rows).filter(function(r){
     return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow')
