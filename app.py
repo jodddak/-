@@ -13976,6 +13976,9 @@ def contract_seed() -> pd.DataFrame:
         {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 9, 6),
          "end_date": date(2026, 11, 4), "amount_incl_vat": 1_540_000,
          "note": "브검PC_2609~2611 · 60일 · 일 25,667원"},
+        {"channel": "네이버 브랜드검색광고", "start_date": date(2026, 11, 5),
+         "end_date": date(2027, 2, 2), "amount_incl_vat": 2_310_000,
+         "note": "브검PC_2611~2701 · 90일 · 일 25,667원"},
     ], columns=CONTRACT_COLS)
 
 
