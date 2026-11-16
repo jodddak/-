@@ -15135,7 +15135,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             _idle_names.append(r["매체"])
         _tr_cls = (' class="cp-has-sub"' if _has_sub else "") if not _idle else ' class="cp-idle" style="display:none"'
         body.append(
-            f'<tr data-name="{r["매체"]}"{_tr_cls}>'
+            f'<tr data-name="{r["매체"]}" data-scope="{r["구분"]}" data-basis="{r.get("_basis", "")}"{_tr_cls}>'
             f'<td class="l"><input type="checkbox" class="cp-chk">'
             f'<span class="cp-badge {badge}">{r["구분"]}</span></td>'
             f'<td class="l m">{r["매체"]}{sub}</td>'
@@ -15170,12 +15170,22 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                           ("imp", "clk", "ctr", "cpc", "cost", "conv", "rev", "roas", "bud", "pace"))
                 + '</tr>')
     body.append(
-        f'<tr class="cp-tot"><td class="l" colspan="2">합계</td>'
-        f'<td>{_cp_int(view["노출"].sum())}</td><td>{_cp_int(view["클릭"].sum())}</td>'
-        f'<td>{s_ctr}</td><td>{s_cpc}</td>'
-        f'<td>{_cp_won(s_cost)}</td><td>{_cp_int(tot_conv)}</td>'
-        f'<td>{_cp_won(tot_rev)}</td><td>{s_roas}</td>'
-        f'<td>{_cp_won(s_bud)}</td><td>{s_pace}</td></tr>')
+        f'<tr class="cp-tot"><td class="l" colspan="2"><span class="cp-totlbl">합계</span></td>'
+        f'<td data-k="imp">{_cp_int(view["노출"].sum())}</td><td data-k="clk">{_cp_int(view["클릭"].sum())}</td>'
+        f'<td data-k="ctr">{s_ctr}</td><td data-k="cpc">{s_cpc}</td>'
+        f'<td data-k="cost">{_cp_won(s_cost)}</td><td data-k="conv">{_cp_int(tot_conv)}</td>'
+        f'<td data-k="rev">{_cp_won(tot_rev)}</td><td data-k="roas">{s_roas}</td>'
+        f'<td data-k="bud">{_cp_won(s_bud)}</td><td data-k="pace">{s_pace}</td></tr>')
+    # 표 바로 위 구분 버튼(TOTAL/자사몰/외부몰/제로라운지) — 누르면 그 구분 매체만 남기고 합계도
+    # 그 구분 기준으로 다시 계산한다(화면에서 바로, 새로고침 없음). 위 '구분' 선택이 전체일 때만 띄운다.
+    _scopes_here = [x for x in ("자사몰", "외부몰", ZERO_SCOPE) if (view["구분"] == x).any()]
+    _scope_bar = ""
+    if len(_scopes_here) >= 2:
+        _scope_bar = ('<div class="cp-scopebar">'
+                      + '<button type="button" class="cp-scope on" data-scope="">TOTAL</button>'
+                      + "".join(f'<button type="button" class="cp-scope" data-scope="{x}">{x}</button>'
+                                for x in _scopes_here)
+                      + '</div>')
 
     note = (
         '<div class="cp-note">'
@@ -15198,7 +15208,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     )
     html = (
         CP_CSS
-        + '<div class="cp-wrap">'
+        + '<div class="cp-wrap">' + _scope_bar
         + '<div class="cp-selbar" id="cpselbar" style="display:none">'
           '<span class="cp-selinfo"></span>'
           '<span class="cp-selbtns"><button type="button" class="cp-selonly">선택한 매체만 보기</button>'
@@ -15301,6 +15311,11 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
 .cp-selonly{background:#C6F36B;color:#14181F}
 .cp-selonly.on{background:#FFF}
 .cp-selclear{background:#2B313B;color:#FFF}
+.cp-scopebar{display:flex;gap:6px;margin:0 0 10px;flex-wrap:wrap}
+.cp-scope{border:1px solid #D7DBE2;background:#FFF;color:#374151;border-radius:999px;padding:7px 18px;
+  font-weight:700;font-size:13.5px;cursor:pointer;font-family:inherit}
+.cp-scope:hover{border-color:#14181F}
+.cp-scope.on{background:#14181F;color:#FFF;border-color:#14181F}
 </style>
 <script>
 (function(){
@@ -15338,8 +15353,10 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
   var only=false;
   function fit(){try{window.parent.postMessage({type:'streamlit:setFrameHeight',
     height:document.documentElement.scrollHeight+8},'*');}catch(e){}}
+  var scope='';
   function mains(){return Array.prototype.slice.call(tbl.tBodies[0].rows).filter(function(r){
-    return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow');});}
+    return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow')
+      && (!scope || r.getAttribute('data-scope')===scope);});}
   function num(r,i){var v=parseFloat(r.cells[i].getAttribute('data-v'));return (isNaN(v)||v<0)?0:v;}
   function won(v){return '\u20A9'+Math.round(v).toLocaleString('ko-KR');}
   function n0(v){return Math.round(v).toLocaleString('ko-KR');}
@@ -15349,7 +15366,7 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
     rs.forEach(function(r){
       var on=r.querySelector('.cp-chk').checked;
       r.classList.toggle('cp-picked',on);
-      var hide = only && sel.length && !on;
+      var hide = (only && sel.length && !on) || r.classList.contains('cp-idle');
       r.style.display = hide ? 'none' : '';
       if(hide){tbl.querySelectorAll('tr.cp-subrow[data-parent="'+r.getAttribute('data-name')+'"]')
         .forEach(function(s){s.style.display='none';});}
@@ -15393,6 +15410,45 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
     this.textContent = only ? '전체 매체 보기' : '선택한 매체만 보기'; update();});
   bar.querySelector('.cp-selclear').addEventListener('click',function(){
     mains().forEach(function(r){r.querySelector('.cp-chk').checked=false;}); only=false; update();});
+  // ── 구분 버튼 ──
+  var tot=tbl.querySelector('tr.cp-tot'), tot0={};
+  if(tot) Array.prototype.forEach.call(tot.querySelectorAll('td[data-k]'),function(c){tot0[c.getAttribute('data-k')]=c.innerHTML;});
+  function applyScope(){
+    var every=Array.prototype.slice.call(tbl.tBodies[0].rows).filter(function(r){
+      return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow');});
+    every.forEach(function(r){
+      var out = scope && r.getAttribute('data-scope')!==scope;
+      if(out){r.querySelector('.cp-chk').checked=false; r.style.display='none';
+        tbl.querySelectorAll('tr.cp-subrow[data-parent="'+r.getAttribute('data-name')+'"]')
+          .forEach(function(s){s.style.display='none';});}
+    });
+    var note=tbl.querySelector('tr.cp-idle-note'); if(note) note.style.display = scope ? 'none' : '';
+    if(tot){
+      tot.querySelector('.cp-totlbl').textContent = scope ? ('합계 ('+scope+')') : '합계';
+      if(!scope){Array.prototype.forEach.call(tot.querySelectorAll('td[data-k]'),function(c){c.innerHTML=tot0[c.getAttribute('data-k')];});}
+      else{
+        var t={imp:0,clk:0,cost:0,conv:0,rev:0,bud:0};
+        every.filter(function(r){return r.getAttribute('data-scope')===scope;}).forEach(function(r){
+          t.imp+=num(r,2);t.clk+=num(r,3);t.cost+=num(r,6);t.bud+=num(r,10);
+          // 외부몰 외에는 매체 신고 매출을 섞지 않는다(서버 합계와 같은 규칙)
+          if(scope==='외부몰' || r.getAttribute('data-basis')!=='매체'){t.conv+=num(r,7);t.rev+=num(r,8);}
+        });
+        var v={imp:n0(t.imp),clk:n0(t.clk),
+          ctr:t.imp>0?(t.clk/t.imp*100).toFixed(2)+'%':DASH,
+          cpc:t.clk>0?won(t.cost/t.clk):DASH, cost:won(t.cost), conv:n0(t.conv), rev:won(t.rev),
+          roas:t.cost>0?(t.rev/t.cost*100).toLocaleString('ko-KR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%':DASH,
+          bud:t.bud>0?won(t.bud):DASH, pace:t.bud>0?(t.cost/t.bud*100).toFixed(1)+'%':DASH};
+        Array.prototype.forEach.call(tot.querySelectorAll('td[data-k]'),function(c){c.innerHTML=v[c.getAttribute('data-k')];});
+      }
+    }
+    update();
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.cp-scope'),function(b){
+    b.addEventListener('click',function(){
+      scope=b.getAttribute('data-scope')||'';
+      document.querySelectorAll('.cp-scope').forEach(function(o){o.classList.toggle('on',o===b);});
+      applyScope();});
+  });
 })();
 </script>
 <script>
