@@ -15456,6 +15456,7 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
       document.querySelectorAll('.cp-scope').forEach(function(o){o.classList.toggle('on',o===b);});
       applyScope();});
   });
+  setTimeout(fit,150); setTimeout(fit,600);
 })();
 </script>
 <script>
