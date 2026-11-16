@@ -15358,7 +15358,8 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
     window.parent.postMessage({type:'streamlit:setFrameHeight',height:h+8},'*');
     // 이 표 틀(components.html)은 높이 메시지를 무시하고 고정 높이라, 틀 높이를 직접 맞춘다
     var fe=window.frameElement;
-    if(fe){fe.style.height=(h+8)+'px'; if(fe.parentElement) fe.parentElement.style.height=(h+8)+'px';}}catch(e){}}
+    if(fe){fe.style.height=(h+8)+'px'; if(fe.parentElement){fe.parentElement.style.height=(h+8)+'px';
+      fe.parentElement.style.flex='0 0 '+(h+8)+'px';}}}catch(e){}}
   var scope='';
   function mains(){return Array.prototype.slice.call(tbl.tBodies[0].rows).filter(function(r){
     return r.hasAttribute('data-name') && !r.classList.contains('cp-subrow')
