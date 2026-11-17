@@ -22471,7 +22471,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 '.gc-tbl th.gc-st-th,.gc-tbl td.gc-status{width:1%;min-width:0;'
                 'text-align:center!important;white-space:nowrap;padding-left:10px;padding-right:10px}'
                 '.gc-tbl td.gc-status .gc-onoff{margin-right:0}'
-                '.gc-tbl th:first-child,.gc-tbl td:first-child{min-width:230px}'
+                # 이름 칸이 남는 폭을 혼자 다 먹지 않게 기준 폭을 주고, 숫자 칸들이 나머지를 나눠 갖게 한다
+                '.gc-tbl th:first-child,.gc-tbl td:first-child{min-width:230px;width:330px}'
                 '.gc-chk,.gc-chk-all{width:17px;height:17px;margin:0 12px 0 0;vertical-align:middle;'
                 'cursor:pointer;accent-color:#2C5AA0}'
                 '.gc-bulk{position:absolute;z-index:5;display:none;align-items:center;gap:8px;'
