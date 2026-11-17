@@ -13240,8 +13240,8 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
 
     어디에도 안 걸린 유입은 '_미매칭'으로 따로 모아, 화면에서 누락을 확인할 수 있게 한다.
     """
-    out = {m: {"conv": 0.0, "rev": 0.0} for m in master["media"]}
-    out["_미매칭"] = {"conv": 0.0, "rev": 0.0, "keys": {}}
+    out = {m: {"conv": 0.0, "rev": 0.0, "su": 0.0} for m in master["media"]}
+    out["_미매칭"] = {"conv": 0.0, "rev": 0.0, "su": 0.0, "keys": {}}
     if ga_daily is None or ga_daily.empty or "source_medium" not in ga_daily.columns:
         return out
     g = ga_daily.copy()
@@ -13267,6 +13267,8 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
         sm = norm(row.get("source_medium"))
         conv = float(row.get("conversions") or 0)
         rev = float(row.get("revenue") or 0)
+        su = float(pd.to_numeric(row.get("signups"), errors="coerce") or 0) if "signups" in row else 0.0
+        su = 0.0 if su != su else su
         media = exact.get(sm)
         if media is None:
             for _, kw, mm in partial:
@@ -13276,11 +13278,13 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
         if media is None:
             out["_미매칭"]["conv"] += conv
             out["_미매칭"]["rev"] += rev
+            out["_미매칭"]["su"] += su
             k = str(row.get("source_medium") or "(없음)")
             out["_미매칭"]["keys"][k] = out["_미매칭"]["keys"].get(k, 0) + rev
             continue
         out[media]["conv"] += conv
         out[media]["rev"] += rev
+        out[media]["su"] += su
     return out
 
 
@@ -13307,13 +13311,16 @@ def cp_ga_map_adjusted(ga_daily: pd.DataFrame, mst: pd.DataFrame, start: date, e
         if _m in ga_map:
             ga_map[_m]["conv"] = max(0.0, ga_map[_m]["conv"] - _v["conv"])
             ga_map[_m]["rev"] = max(0.0, ga_map[_m]["rev"] - _v["rev"])
+            ga_map[_m]["su"] = max(0.0, ga_map[_m].get("su", 0.0) - _v.get("su", 0.0))
     _rc_ga = _cp_ga_reclass(mst, start, end)
     for (_src, _dst), _v in _rc_ga.items():
         # 옮기는 양은 **보낸 쪽에서 실제로 뺀 만큼**만 — 두 GA 표의 수집 날짜가 어긋나면
         # 받는 쪽만 늘어 전체 매출이 생겨나는 일이 없게.
         if _src not in ga_map or _dst not in ga_map:
             continue
-        for _f in ("conv", "rev"):
+        for _f in ("conv", "rev", "su"):
+            if _f not in _v or _f not in ga_map[_src]:
+                continue
             _mv = min(float(_v[_f]), float(ga_map[_src][_f]))
             ga_map[_src][_f] -= _mv
             ga_map[_dst][_f] += _mv
@@ -13369,8 +13376,8 @@ def _cp_ga_reclass(master: pd.DataFrame, start: date, end: date) -> dict:
         return out
     if "campaign" not in c.columns:
         return out
-    for col in ("conversions", "revenue"):
-        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+    for col in ("conversions", "revenue", "signups"):
+        c[col] = (pd.to_numeric(c[col], errors="coerce").fillna(0) if col in c.columns else 0.0)
     c["_to"] = [_ga_media_fix(sm, cp) for sm, cp in zip(c["source_medium"], c["campaign"])]
     c = c[c["_to"].notna()]
     if c.empty:
@@ -13381,7 +13388,8 @@ def _cp_ga_reclass(master: pd.DataFrame, start: date, end: date) -> dict:
         dst = r["_to"]
         if not src or src == dst:
             continue
-        e = out.setdefault((src, dst), {"conv": 0.0, "rev": 0.0, "names": {}})
+        e = out.setdefault((src, dst), {"conv": 0.0, "rev": 0.0, "su": 0.0, "names": {}})
+        e["su"] += float(r["signups"])
         e["conv"] += float(r["conversions"])
         e["rev"] += float(r["revenue"])
         _n = str(r.get("campaign") or "")
@@ -13429,8 +13437,8 @@ def _cp_excluded_ga(master: pd.DataFrame, start: date, end: date) -> dict:
           | c["creative"].map(_google_campaign_excluded).astype(bool)]
     if c.empty:
         return out
-    for col in ("conversions", "revenue"):
-        c[col] = pd.to_numeric(c.get(col), errors="coerce").fillna(0)
+    for col in ("conversions", "revenue", "signups"):
+        c[col] = (pd.to_numeric(c[col], errors="coerce").fillna(0) if col in c.columns else 0.0)
 
     def norm(s):
         return "".join(str(s or "").lower().split())
@@ -13454,7 +13462,8 @@ def _cp_excluded_ga(master: pd.DataFrame, start: date, end: date) -> dict:
                     break
         if media is None:
             continue
-        d = out.setdefault(media, {"conv": 0.0, "rev": 0.0, "names": {}})
+        d = out.setdefault(media, {"conv": 0.0, "rev": 0.0, "su": 0.0, "names": {}})
+        d["su"] += float(r["signups"])
         d["conv"] += float(r["conversions"])
         d["rev"] += float(r["revenue"])
         _nm = str(r.get("campaign") or "(미설정)")
@@ -14864,6 +14873,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             "노출": float(sp.get("impressions", 0) or 0),
             "클릭": float(sp.get("clicks", 0) or 0),
             "비용": cost,
+            # 회원가입은 GA4 이벤트(회원가입_신규·sign_up) — 외부몰도 매체 신고값이 없어 GA 그대로
+            "회원가입": float((ga_map.get(r["media"]) or {}).get("su", 0.0) or 0.0),
             "GA구매": g["conv"], "GA매출": g["rev"],
             # 외부몰인데 매출이 0이면 ROAS를 0%가 아니라 '—'(모름)으로 둔다.
             # 스마트스토어는 외부 스크립트를 못 붙여서 메타 픽셀도, GA4도 매출을 못 본다.
@@ -15014,7 +15025,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
 
     # ── 표 ───────────────────────────────────────────────
     heads = ["구분", "매체", "노출", "클릭", "CTR", "CPC", "총비용(VAT 포함)",
-             "GA 구매", "GA 매출", "GA ROAS", "월 예산(VAT 포함)", "예산 소진율"]
+             "회원가입", "가입당비용", "GA 구매", "GA 매출", "GA ROAS", "월 예산(VAT 포함)", "예산 소진율"]
     # 맨 앞 '구분' 칸에 전체 선택 상자 — 매체를 골라 그 매체들만 합쳐 보는 용도(소재별 성과와 같은 방식)
     th = "".join(
         f'<th class="{"l" if h in ("구분", "매체") else ""}">'
@@ -15080,6 +15091,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             _ctr_v = mute if _ctr is None else f"{_ctr:.2f}%"
             _roas = s["GA ROAS"]
             _roas_v = mute if _roas is None else f"{_roas:,.1f}%"
+            _su = s.get("회원가입")
+            _cpsu = (_cost / _su) if (_su and _cost is not None) else None
             rows.append(
                 f'<tr class="cp-subrow" data-parent="{parent_name}" data-kind="{kind}" style="display:none">'
                 f'<td class="l"></td>'
@@ -15089,6 +15102,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 f'<td data-v="{dv(_ctr, 3)}">{_ctr_v}</td>'
                 f'<td data-v="{dv(_cpc)}">{fmt_w(_cpc)}</td>'
                 f'<td data-v="{dv(_cost)}">{fmt_w(_cost)}</td>'
+                f'<td data-v="{dv(s.get("회원가입"))}">{fmt_i(s.get("회원가입"))}</td>'
+                f'<td data-v="{dv(_cpsu)}">{fmt_w(_cpsu)}</td>'
                 f'<td data-v="{dv(s["GA구매"])}">{fmt_i(s["GA구매"])}</td>'
                 f'<td data-v="{dv(s["GA매출"])}">{fmt_w(s["GA매출"])}</td>'
                 f'<td data-v="{dv(_roas, 2)}">{_roas_v}</td>'
@@ -15106,6 +15121,10 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         _ctr = (_clk / _imp * 100) if _imp > 0 else None
         _cpc = (_cost / _clk) if _clk > 0 else None
         ctr_v = ('<span class="cp-mute">—</span>' if _ctr is None else f'{_ctr:.2f}%')
+        # 가입당비용 = 광고비 ÷ GA 회원가입(회원가입_신규·sign_up)
+        _su = float(r.get("회원가입") or 0)
+        _cpsu = (_cost / _su) if _su > 0 else None
+        cpsu_v = ('<span class="cp-mute">—</span>' if _cpsu is None else _cp_won(_cpsu))
         cpc_v = ('<span class="cp-mute">—</span>' if _cpc is None else _cp_won(_cpc))
         roas_v = ('<span class="cp-mute">—</span>'
                   if r["GA ROAS"] is None or pd.isna(r["GA ROAS"])
@@ -15147,6 +15166,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
             f'<td data-v="{(_ctr if _ctr is not None else -1):.3f}">{ctr_v}</td>'
             f'<td data-v="{(_cpc if _cpc is not None else -1):.0f}">{cpc_v}</td>'
             f'<td data-v="{r["비용"]:.0f}">{_cp_won(r["비용"])}</td>'
+            f'<td data-v="{_su:.0f}">{_cp_int(_su)}</td>'
+            f'<td data-v="{(_cpsu if _cpsu is not None else -1):.0f}">{cpsu_v}</td>'
             f'<td data-v="{r["GA구매"]:.0f}">{_cp_int(r["GA구매"])}</td>'
             f'<td data-v="{r["GA매출"]:.0f}">{_cp_won(r["GA매출"])}</td>'
             f'<td data-v="{nn(r["GA ROAS"]):.2f}">{roas_v}</td>'
@@ -15157,10 +15178,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
         if r["매체"] in _seg_subs:
             body.append(_sub_rows_html(r["매체"], _seg_subs[r["매체"]], "seg"))
     if _idle_names:
-        body.append('<tr class="cp-idle-note"><td class="l" colspan="12" style="color:#9ca3af;'
+        body.append('<tr class="cp-idle-note"><td class="l" colspan="14" style="color:#9ca3af;'
                     'font-size:11px;padding:6px 10px">이번 기간 집행 없는 매체 '
                     f'{len(_idle_names)}개는 숨김 — {" · ".join(_idle_names)} (합계에는 포함)</td></tr>')
     s_cost, s_bud = view["비용"].sum(), view["월예산"].sum()
+    s_su = float(view["회원가입"].sum()) if "회원가입" in view.columns else 0.0
+    s_cpsu = _cp_won(s_cost / s_su) if s_su > 0 else '<span class="cp-mute">—</span>'
     s_roas = f'{tot_rev / s_cost * 100:,.1f}%' if s_cost > 0 else '<span class="cp-mute">—</span>'
     s_pace = f'{s_cost / s_bud * 100:,.1f}%' if s_bud > 0 else '<span class="cp-mute">—</span>'
     _s_imp, _s_clk = float(view["노출"].sum()), float(view["클릭"].sum())
@@ -15170,13 +15193,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     body.append('<tr class="cp-selrow" style="display:none"><td class="l" colspan="2">'
                 '선택 합계 <span class="cp-selcnt"></span></td>'
                 + "".join(f'<td data-k="{k}"></td>' for k in
-                          ("imp", "clk", "ctr", "cpc", "cost", "conv", "rev", "roas", "bud", "pace"))
+                          ("imp", "clk", "ctr", "cpc", "cost", "su", "cpsu", "conv", "rev", "roas", "bud", "pace"))
                 + '</tr>')
     body.append(
         f'<tr class="cp-tot"><td class="l" colspan="2"><span class="cp-totlbl">합계</span></td>'
         f'<td data-k="imp">{_cp_int(view["노출"].sum())}</td><td data-k="clk">{_cp_int(view["클릭"].sum())}</td>'
         f'<td data-k="ctr">{s_ctr}</td><td data-k="cpc">{s_cpc}</td>'
-        f'<td data-k="cost">{_cp_won(s_cost)}</td><td data-k="conv">{_cp_int(tot_conv)}</td>'
+        f'<td data-k="cost">{_cp_won(s_cost)}</td>'
+        f'<td data-k="su">{_cp_int(s_su)}</td><td data-k="cpsu">{s_cpsu}</td>'
+        f'<td data-k="conv">{_cp_int(tot_conv)}</td>'
         f'<td data-k="rev">{_cp_won(tot_rev)}</td><td data-k="roas">{s_roas}</td>'
         f'<td data-k="bud">{_cp_won(s_bud)}</td><td data-k="pace">{s_pace}</td></tr>')
     # 표 바로 위 구분 버튼(TOTAL/자사몰/외부몰/제로라운지) — 누르면 그 구분 매체만 남기고 합계도
@@ -15388,10 +15413,10 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
     if(!sel.length){bar.style.display='none';row.style.display='none';only=false;
       bar.querySelector('.cp-selonly').classList.remove('on');
       bar.querySelector('.cp-selonly').textContent='선택한 매체만 보기';fit();return;}
-    var t={imp:0,clk:0,cost:0,conv:0,rev:0,bud:0};
-    sel.forEach(function(r){t.imp+=num(r,2);t.clk+=num(r,3);t.cost+=num(r,6);
-      t.conv+=num(r,7);t.rev+=num(r,8);t.bud+=num(r,10);});
-    var v={imp:n0(t.imp),clk:n0(t.clk),
+    var t={imp:0,clk:0,cost:0,su:0,conv:0,rev:0,bud:0};
+    sel.forEach(function(r){t.imp+=num(r,2);t.clk+=num(r,3);t.cost+=num(r,6);t.su+=num(r,7);
+      t.conv+=num(r,9);t.rev+=num(r,10);t.bud+=num(r,12);});
+    var v={imp:n0(t.imp),clk:n0(t.clk),su:n0(t.su),cpsu:t.su>0?won(t.cost/t.su):DASH,
       ctr:t.imp>0?(t.clk/t.imp*100).toFixed(2)+'%':DASH,
       cpc:t.clk>0?won(t.cost/t.clk):DASH, cost:won(t.cost), conv:n0(t.conv), rev:won(t.rev),
       roas:t.cost>0?(t.rev/t.cost*100).toLocaleString('ko-KR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%':DASH,
@@ -15437,13 +15462,13 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
       tot.querySelector('.cp-totlbl').textContent = scope ? ('합계 ('+scope+')') : '합계';
       if(!scope){Array.prototype.forEach.call(tot.querySelectorAll('td[data-k]'),function(c){c.innerHTML=tot0[c.getAttribute('data-k')];});}
       else{
-        var t={imp:0,clk:0,cost:0,conv:0,rev:0,bud:0};
+        var t={imp:0,clk:0,cost:0,su:0,conv:0,rev:0,bud:0};
         every.filter(function(r){return r.getAttribute('data-scope')===scope;}).forEach(function(r){
-          t.imp+=num(r,2);t.clk+=num(r,3);t.cost+=num(r,6);t.bud+=num(r,10);
+          t.imp+=num(r,2);t.clk+=num(r,3);t.cost+=num(r,6);t.su+=num(r,7);t.bud+=num(r,12);
           // 외부몰 외에는 매체 신고 매출을 섞지 않는다(서버 합계와 같은 규칙)
-          if(scope==='외부몰' || r.getAttribute('data-basis')!=='매체'){t.conv+=num(r,7);t.rev+=num(r,8);}
+          if(scope==='외부몰' || r.getAttribute('data-basis')!=='매체'){t.conv+=num(r,9);t.rev+=num(r,10);}
         });
-        var v={imp:n0(t.imp),clk:n0(t.clk),
+        var v={imp:n0(t.imp),clk:n0(t.clk),su:n0(t.su),cpsu:t.su>0?won(t.cost/t.su):DASH,
           ctr:t.imp>0?(t.clk/t.imp*100).toFixed(2)+'%':DASH,
           cpc:t.clk>0?won(t.cost/t.clk):DASH, cost:won(t.cost), conv:n0(t.conv), rev:won(t.rev),
           roas:t.cost>0?(t.rev/t.cost*100).toLocaleString('ko-KR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%':DASH,
@@ -15830,6 +15855,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         rows.append({
             "매체": r["media"], "구분": r.get("scope", "자사몰"),
             "집행": cost, "예산": bud,
+            "회원가입": float(g.get("su", 0.0) or 0.0),
             "예산 소진율": (cost / bud * 100) if bud > 0 else None,
             "ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
             "출처": src,
@@ -15917,7 +15943,9 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
     VTAG = {"증액": "up", "감액": "down", "유지": "keep",
             "계약 고정": "hold", "판단 보류": "hold",
             "판단 제외": "skip", "예산 없음": "skip"}
-    heads = ["매체", "판정", "월 예산", "집행", "예산 소진율", "남은 예산", "GA ROAS"]
+    heads = ["매체", "판정", "월 예산", "집행", "회원가입", "가입당비용", "예산 소진율", "남은 예산", "GA ROAS"]
+    _br_su = lambda n, c: (f'<td>{_cp_int(n)}</td><td>'
+                           + (_cp_won(c / n) if n > 0 else '<span class="cp-mute">—</span>') + '</td>')
     th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
     body = []
     for scope_name in ["자사몰", "외부몰", ZERO_SCOPE]:
@@ -15928,6 +15956,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         body.append(
             f'<tr class="br-sub"><td class="l" colspan="2">{scope_name}</td>'
             f'<td>{_cp_won(s_b)}</td><td>{_cp_won(s_c)}</td>'
+            + _br_su(float(sub["회원가입"].sum()), s_c) +
             f'<td>{(s_c / s_b * 100) if s_b else 0:.1f}%</td>'
             f'<td>{_cp_won(s_b - s_c)}</td><td></td></tr>')
         for _, r in sub.sort_values("집행", ascending=False).iterrows():
@@ -15939,12 +15968,14 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
                 f'<tr><td class="l m"><span class="br-ind">{r["매체"]}</span></td>'
                 f'<td class="l"><span class="cp-tag {VTAG.get(r["판정"], "hold")}">{r["판정"]}</span></td>'
                 f'<td>{_cp_won(r["예산"])}</td><td>{_cp_won(r["집행"])}</td>'
+                + _br_su(float(r["회원가입"] or 0), float(r["집행"] or 0)) +
                 f'<td>{pct}</td><td>{_cp_won(r["예산"] - r["집행"])}</td>'
                 f'<td>{roas}</td></tr>')
     t_b, t_c = df["예산"].sum(), df["집행"].sum()
     body.append(
         f'<tr class="cp-tot"><td class="l" colspan="2">전체 합계</td>'
         f'<td>{_cp_won(t_b)}</td><td>{_cp_won(t_c)}</td>'
+        + _br_su(float(df["회원가입"].sum()), t_c) +
         f'<td>{(t_c / t_b * 100) if t_b else 0:.1f}%</td>'
         f'<td>{_cp_won(t_b - t_c)}</td><td></td></tr>')
     st.markdown(
