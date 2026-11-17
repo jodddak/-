@@ -15855,7 +15855,6 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         rows.append({
             "매체": r["media"], "구분": r.get("scope", "자사몰"),
             "집행": cost, "예산": bud,
-            "회원가입": float(g.get("su", 0.0) or 0.0),
             "예산 소진율": (cost / bud * 100) if bud > 0 else None,
             "ROAS": (g["rev"] / cost * 100) if cost > 0 else None,
             "출처": src,
@@ -15943,9 +15942,7 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
     VTAG = {"증액": "up", "감액": "down", "유지": "keep",
             "계약 고정": "hold", "판단 보류": "hold",
             "판단 제외": "skip", "예산 없음": "skip"}
-    heads = ["매체", "판정", "월 예산", "집행", "회원가입", "가입당비용", "예산 소진율", "남은 예산", "GA ROAS"]
-    _br_su = lambda n, c: (f'<td>{_cp_int(n)}</td><td>'
-                           + (_cp_won(c / n) if n > 0 else '<span class="cp-mute">—</span>') + '</td>')
+    heads = ["매체", "판정", "월 예산", "집행", "예산 소진율", "남은 예산", "GA ROAS"]
     th = "".join(f'<th class="{"l" if h in ("매체", "판정") else ""}">{h}</th>' for h in heads)
     body = []
     for scope_name in ["자사몰", "외부몰", ZERO_SCOPE]:
@@ -15956,7 +15953,6 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
         body.append(
             f'<tr class="br-sub"><td class="l" colspan="2">{scope_name}</td>'
             f'<td>{_cp_won(s_b)}</td><td>{_cp_won(s_c)}</td>'
-            + _br_su(float(sub["회원가입"].sum()), s_c) +
             f'<td>{(s_c / s_b * 100) if s_b else 0:.1f}%</td>'
             f'<td>{_cp_won(s_b - s_c)}</td><td></td></tr>')
         for _, r in sub.sort_values("집행", ascending=False).iterrows():
@@ -15968,14 +15964,12 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
                 f'<tr><td class="l m"><span class="br-ind">{r["매체"]}</span></td>'
                 f'<td class="l"><span class="cp-tag {VTAG.get(r["판정"], "hold")}">{r["판정"]}</span></td>'
                 f'<td>{_cp_won(r["예산"])}</td><td>{_cp_won(r["집행"])}</td>'
-                + _br_su(float(r["회원가입"] or 0), float(r["집행"] or 0)) +
                 f'<td>{pct}</td><td>{_cp_won(r["예산"] - r["집행"])}</td>'
                 f'<td>{roas}</td></tr>')
     t_b, t_c = df["예산"].sum(), df["집행"].sum()
     body.append(
         f'<tr class="cp-tot"><td class="l" colspan="2">전체 합계</td>'
         f'<td>{_cp_won(t_b)}</td><td>{_cp_won(t_c)}</td>'
-        + _br_su(float(df["회원가입"].sum()), t_c) +
         f'<td>{(t_c / t_b * 100) if t_b else 0:.1f}%</td>'
         f'<td>{_cp_won(t_b - t_c)}</td><td></td></tr>')
     st.markdown(
@@ -16397,7 +16391,7 @@ def diagnose_ad_spend_setup() -> str:
 # 광고비가 매체 실제 청구액이라 소재별 ROAS를 제대로 볼 수 있다.
 # 전환은 GA 기준 하나만 쓴다 — 매체 신고 전환은 매체마다 기준이 달라 서로 못 더한다.
 GC_HEAD = ["구분", "노출", "클릭", "CTR", "CPC", "광고비(VAT+)",
-           "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
+           "회원가입", "가입당비용", "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
 
 # utm_content 작명 규칙: 그룹명(타겟팅명)_날짜_소재이름
 #   예) 패션관심타겟_260807_수피마티셔츠
@@ -19427,6 +19421,13 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
     imp = float((media or {}).get("impressions", 0) or 0)
     clk = float((media or {}).get("clicks", 0) or 0)
     cost = float((media or {}).get("cost", 0) or 0)
+    # 회원가입(GA4 회원가입_신규·sign_up, 신규 유입 기준)과 가입당비용 = 광고비 ÷ 회원가입
+    try:
+        su = float(r.get("signup", 0) or 0)
+        su = 0.0 if su != su else su
+    except Exception:
+        su = 0.0
+    cpsu = (cost / su) if (su > 0 and cost > 0) else 0.0
 
     # 외부몰은 GA4에 매출이 안 잡히므로 매체가 신고한 전환·매출을 쓴다.
     # (평소엔 안 쓴다 — 매체마다 기준이 달라 서로 못 더하기 때문. 여기선 대안이 없다.)
@@ -19504,6 +19505,8 @@ def _gc_row_html(r, media, extra_cls="", img_url=None, show_img=False) -> str:
         f'<td data-v="{ctr:.3f}">{f"{ctr:.2f}%" if imp else "-"}</td>'
         f'<td data-v="{cpc:.0f}">{(f"{cpc:,.0f}원" if cpc else "-")}</td>'
         f'<td data-v="{cost:.0f}">{(f"{cost:,.0f}원" if cost else "-")}</td>'
+        f'<td data-v="{su:.0f}">{_v4_num(su)}</td>'
+        f'<td data-v="{cpsu:.0f}">{(f"{cpsu:,.0f}원" if cpsu else "-")}</td>'
         f'<td data-v="{conv:.0f}">{_v4_num(conv)}</td>'
         f'<td data-v="{rev:.0f}">{_v4_num(rev, "원")}</td>'
         f'<td data-v="{aov:.0f}">{dash(aov, ",.0f")}{"원" if aov else ""}</td>'
@@ -19541,6 +19544,11 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
     imp = float((media or {}).get("impressions", 0) or 0)
     clk = float((media or {}).get("clicks", 0) or 0)
     cost = float((media or {}).get("cost", 0) or 0)
+    try:
+        _su_x = float(r.get("signup", 0) or 0)
+        _su_x = 0.0 if _su_x != _su_x else _su_x
+    except Exception:
+        _su_x = 0.0
     _basis = bool((media or {}).get("_media_basis"))
     if _basis:                      # 외부몰 — 매체 신고 전환·매출 (화면과 같은 규칙)
         conv = float((media or {}).get("media_conv", 0) or 0)
@@ -19642,7 +19650,9 @@ def _gc_row_record(r, media, img_url=None, is_total=False) -> dict:
         "_img": img_url,
         "노출": _r0(imp), "클릭": _r0(clk), "CTR(%)": round(ctr, 2),
         "CPC": _r0((cost / clk) if clk else 0.0),
-        "광고비(VAT+)": _r0(cost), "방문(세션)": _r0(ses),
+        "광고비(VAT+)": _r0(cost),
+        "회원가입": _r0(_su_x), "가입당비용": _r0((cost / _su_x) if (_su_x > 0 and cost > 0) else 0.0),
+        "방문(세션)": _r0(ses),
         "구매": round(conv, 1) if conv != round(conv) else _r0(conv), "매출": _r0(rev), "객단가": _r0(aov),
         "ROAS(%)": (round(roas, 1) if roas is not None else None), "판정": label, "사유": _why, "경과일": _age,
         "ON/OFF": (((media or {}).get("_onoff") or ("",))[0] if not is_total else ""),
@@ -19722,18 +19732,20 @@ def gc_build_excel(sheets: dict, level: str, start, end, with_images: bool = Tru
     # 캠페인·타겟팅·구분을 따로 둬야 엑셀에서 필터와 피벗이 된다.
     # (예전엔 'STCO_수트_전환 · 패션관심타겟'을 한 칸에 넣어서 타겟팅별로 못 갈랐다)
     cols = ["이름", "매체", "캠페인", "타겟팅", "구분", "품목"] + (["이미지"] if with_images else []) + [
-        "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "방문(세션)",
+        "노출", "클릭", "CTR(%)", "CPC", "광고비(VAT+)", "회원가입", "가입당비용", "방문(세션)",
         "구매", "매출", "객단가", "ROAS(%)", "ON/OFF", "판정", "사유", "경과일", "기준"]
     # CTR·ROAS는 값이 이미 퍼센트 단위(110 = 110%)라 엑셀 기본 '백분율' 서식을 쓰면
     # 11000%가 된다. 그래서 숫자는 그대로 두고 표시만 %를 붙인다 —
     # 값이 숫자로 남아 있어야 정렬·필터·평균이 정상으로 돈다.
     # 원·건수에도 단위를 붙여, 어느 열이 금액인지 열어보자마자 알게 한다.
     numfmt = {"노출": "#,##0", "클릭": "#,##0", "CTR(%)": '0.00"%"', "CPC": '#,##0"원"',
-              "광고비(VAT+)": '#,##0"원"', "방문(세션)": "#,##0", "구매": "#,##0",
+              "광고비(VAT+)": '#,##0"원"', "회원가입": "#,##0", "가입당비용": '#,##0"원"',
+              "방문(세션)": "#,##0", "구매": "#,##0",
               "매출": '#,##0"원"', "객단가": '#,##0"원"', "ROAS(%)": '#,##0"%"'}
     width = {"이름": 30, "매체": 20, "캠페인": 32, "타겟팅": 20, "구분": 12, "품목": 12,
              "이미지": max(12, int(px / 7)), "노출": 12, "클릭": 10,
-             "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "방문(세션)": 11, "구매": 9,
+             "CTR(%)": 10, "CPC": 11, "광고비(VAT+)": 15, "회원가입": 9, "가입당비용": 12,
+             "방문(세션)": 11, "구매": 9,
              "매출": 15, "객단가": 12, "ROAS(%)": 11, "ON/OFF": 9, "판정": 14, "사유": 46, "경과일": 8,
              "기준": 11}
 
@@ -22384,7 +22396,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                              img_url=_url, show_img=show_img))
                     recs.append(_gc_row_record(_row, _m_un, img_url=_url))
 
-            tot_r = rows[["sessions", "conv", "rev"]].sum()
+            tot_r = rows[[c for c in ("sessions", "signup", "conv", "rev") if c in rows.columns]].sum()
             tot_r["key"] = "TOTAL"
             tot_media = {
                 "impressions": sum(float((m or {}).get("impressions", 0) or 0) for m in rows["_media"])
@@ -22552,7 +22564,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     function cE(r,n){var c=r.cells; return c[c.length-n];}
     function num(r,n){var c=cE(r,n); if(!c) return 0; var d=parseFloat(c.getAttribute('data-v')); return isNaN(d)?0:d;}
     function fmt(x){return Math.round(x).toLocaleString('ko-KR');}
-    if(sumr){for(var q=1;q<=11;q++){var cq=cE(sumr,q); if(cq&&!cq.hasAttribute('data-orig')) cq.setAttribute('data-orig',cq.innerHTML);}}
+    if(sumr){for(var q=1;q<=13;q++){var cq=cE(sumr,q); if(cq&&!cq.hasAttribute('data-orig')) cq.setAttribute('data-orig',cq.innerHTML);}}
     function counts(){
       var all=rows(), n={'':all.length,on:0,off:0,unk:0}, m={all:0,keep:0,up:0,off:0};
       all.forEach(function(r){var o=onOf(r); if(o) n[o]++;
@@ -22573,11 +22585,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         if(a==='fold'){t.scrollIntoView({block:'start'});}};
       return more;}
     function apply(){
-      var im=0,ck=0,co=0,cv=0,rv=0, filt=!!(OF||JFk), shown=0;
+      var im=0,ck=0,co=0,su=0,cv=0,rv=0, filt=!!(OF||JFk), shown=0;
       rows().forEach(function(r){var o=onOf(r), k=jcat(jOf(r));
         var show=(!OF||o===OF) && (!JFk||(JFk==='all'?!!k:k===JFk));
         r.style.display=(show&&shown<LIM)?'':'none';
-        if(show){shown++;im+=num(r,11);ck+=num(r,10);co+=num(r,7);cv+=num(r,6);rv+=num(r,5);}});
+        if(show){shown++;im+=num(r,13);ck+=num(r,12);co+=num(r,9);su+=num(r,8);cv+=num(r,6);rv+=num(r,5);}});
       (function(){var mb=moreBar(), left=shown-Math.min(shown,LIM);
         var css='height:38px;padding:0 18px;border-radius:10px;border:1.5px solid #D9D3C3;background:#fff;'
           +'font-size:13.5px;font-weight:800;cursor:pointer;font-family:inherit;color:#14181F';
@@ -22605,10 +22617,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
           if(c0) c0.innerHTML='<div style="font-size:12px;font-weight:800;color:#F4C95D">'
             +(OF==='on'?'지금 ON인 소재 합계':OF==='off'?'OFF 소재 합계':OF==='unk'?'상태 미확인 합계':'판정 필터 합계')
             +'</div><div style="font-size:10.5px;font-weight:600;color:#C9CED8;margin-top:2px">관리자 합계는 위 TOTAL</div>';
-          for(var z=1;z<subr.cells.length-11;z++){if(subr.cells[z]) subr.cells[z].innerHTML='';}
+          for(var z=1;z<subr.cells.length-13;z++){if(subr.cells[z]) subr.cells[z].innerHTML='';}
           var set=function(n,x){var c=cE(subr,n); if(c) c.innerHTML=x;};
-          set(11,im?fmt(im):'-'); set(10,ck?fmt(ck):'-'); set(9,im?(ck/im*100).toFixed(2)+'%':'-');
-          set(8,ck&&co?fmt(co/ck)+'원':'-'); set(7,co?fmt(co)+'원':'-'); set(6,fmt(cv));
+          set(13,im?fmt(im):'-'); set(12,ck?fmt(ck):'-'); set(11,im?(ck/im*100).toFixed(2)+'%':'-');
+          set(10,ck&&co?fmt(co/ck)+'원':'-'); set(9,co?fmt(co)+'원':'-');
+          set(8,fmt(su)); set(7,su&&co?fmt(co/su)+'원':'-'); set(6,fmt(cv));
           set(5,rv?fmt(rv)+'원':'0원'); set(4,cv&&rv?fmt(rv/cv)+'원':'-');
           set(3,co?fmt(rv/co*100)+'%':'-'); set(2,''); set(1,'');}}
       Array.prototype.forEach.call(obtn,function(b){b.classList.toggle('on',b.getAttribute('data-of')===OF);});
