@@ -12420,6 +12420,45 @@ def _run_bounded(fn, seconds: float):
         ex.shutdown(wait=False)
 
 
+def _auto_resync_creative_media(ad_creative: pd.DataFrame, ad_spend: pd.DataFrame) -> str:
+    """어제 소재 실적(ad_creative_daily)이 광고비 표(ad_spend_daily)보다 모자라면 그 매체만 다시 받는다.
+
+    매체 리포트는 아침에 받으면 어제분이 덜 차 있을 때가 있다. 11/17 크리테오를 10:05에 받았더니
+    광고비 24.4만원 중 21.7만원만 들어와, 소재별 성과(스태틱 203만원)가 채널 성과(205만원)보다
+    적게 나왔다(2026-11-18). 세션당 한 번, 어제 하루만, 2% 넘게 모자란 매체만 다시 받는다."""
+    if st.session_state.get("ad_cre_media_resynced"):
+        return ""
+    st.session_state["ad_cre_media_resynced"] = True
+    try:
+        if ad_creative is None or ad_creative.empty or ad_spend is None or ad_spend.empty:
+            return ""
+        yday = kst_today() - timedelta(days=1)
+
+        def _sum(df, label):
+            d = df[pd.to_datetime(df["report_date"], errors="coerce").dt.date == yday]
+            chs = FETCHER_CHANNELS.get(label, [label])
+            m = d["channel"].astype(str).map(lambda c: any(x in c for x in chs))
+            return float(pd.to_numeric(d.loc[m, "cost_incl_vat"], errors="coerce").fillna(0).sum())
+
+        redo = []
+        for label, _fn in AD_CREATIVE_FETCHERS:
+            sp, cr = _sum(ad_spend, label), _sum(ad_creative, label)
+            if sp >= 10000 and cr < sp * 0.98:
+                redo.append(label)
+        if not redo:
+            return ""
+        n, saved, errs = sync_ad_creative(ad_creative, only=redo, start=yday, end=yday)
+        if n:
+            try:
+                _load_table_raw.clear("ad_creative_daily")
+            except Exception:
+                st.cache_data.clear()
+            return f"어제 소재 실적이 광고비보다 모자라 다시 받았습니다 — {', '.join(redo)} ({n:,}행)"
+        return ""
+    except Exception as _e:
+        return ""
+
+
 def _auto_sync_ga_creative() -> str:
     """소재 GA 표(ga_creative_daily)가 어제까지 안 차 있으면 세션당 한 번 받는다.
 
@@ -20372,6 +20411,10 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         cre = load_table("ga_creative_daily")
     elif _cre_note:
         st.caption("⚠️ " + _cre_note)
+    _mnote = _auto_resync_creative_media(ad_creative, ad_spend)
+    if _mnote:
+        ad_creative = load_table("ad_creative_daily")
+        st.caption("🔄 " + _mnote)
 
     def _last(df):
         if df is None or df.empty or "report_date" not in df.columns:
