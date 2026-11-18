@@ -16544,6 +16544,10 @@ def diagnose_ad_spend_setup() -> str:
 # 매체 리포트(노출·클릭·광고비)와 GA(방문·구매·매출)를 한 줄에 놓는다.
 # 광고비가 매체 실제 청구액이라 소재별 ROAS를 제대로 볼 수 있다.
 # 전환은 GA 기준 하나만 쓴다 — 매체 신고 전환은 매체마다 기준이 달라 서로 못 더한다.
+# 소재별 성과 탭 → 채널 성과 매체(1:1로 맞는 것만). GFA PC/MO는 둘을 합쳐야 GFA_자사몰이라 뺀다.
+_GC_TAB_MEDIA = {"구글": "구글_실적최대화", "메타 (자사몰)": "메타", "메타 (제로라운지)": "메타_자사몰",
+                 "카카오모먼트": "카카오모먼트", "카카오톡 플친": "카카오톡 플친", "크리테오": "크리테오",
+                 "네이버 애드부스트": "GFA_애드부스트", "네이버 맨즈탭 (자사몰)": "네이버 맨즈탭_자사몰"}
 GC_HEAD = ["구분", "노출", "클릭", "CTR", "CPC", "광고비(VAT+)",
            "회원가입", "가입당비용", "GA 구매", "GA 매출", "객단가", "ROAS", "판정"]
 
@@ -20790,6 +20794,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # Google GA scope: session campaign must belong to the online-team PMax family.
     _google_rows = d["_gc_ch"].eq("구글")
     _online_pmax = d["campaign"].fillna("").astype(str).str.strip().str.casefold().str.startswith("pmax_온라인팀")
+    # 옛 구글 디스플레이 UTM(pc_display)도 온라인팀 몫 — 채널 성과엔 들어 있어 빼면 1건·13,000원이 어긋났다
+    _online_pmax = _online_pmax | d["campaign"].fillna("").astype(str).str.strip().str.casefold().eq("pc_display")
     # 차이 패널용 — 이 화면에서 뺀 구글 줄(온라인팀 PMax가 아닌 캠페인)의 매출·구매.
     # 채널 성과(소스/매체 단위)에는 이 줄이 들어 있어서, 안 적어주면 '오류'처럼 보였다.
     _google_drop = {"rev": 0.0, "conv": 0.0, "camps": []}
@@ -22640,6 +22646,20 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _sp = 0.0
                 if _sp > 0:
                     tot_media["cost"] = _sp
+            # 회원가입 TOTAL은 채널 성과와 같은 GA 채널 표 값으로(필터 없을 때, 매체가 1:1로 맞는 탭만).
+            # 소재 GA 표는 차원이 많아 GA4가 일부를 (other)로 뭉쳐 몇 건씩 모자랐다.
+            if (seg == GC_SEG_ALL and item == GC_ITEM_ALL and detail_target == "전체"
+                    and manager_campaign == "전체" and label in _GC_TAB_MEDIA):
+                try:
+                    if "_cp_ga_for_gc" not in locals() or _cp_ga_for_gc is None:
+                        _cp_ga_for_gc = cp_ga_map_adjusted(load_table("ga_channel_daily"),
+                                                           media_master_frame(load_table("media_master")),
+                                                           start, end)[0]
+                    _su_ch = (_cp_ga_for_gc.get(_GC_TAB_MEDIA[label]) or {}).get("su")
+                    if _su_ch is not None:
+                        tot_r["signup"] = float(_su_ch)
+                except Exception:
+                    pass
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
             export_sheets[label] = [_gc_row_record(tot_r, tot_media, is_total=True)] + recs
             export_views[label] = view_lbl
