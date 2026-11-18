@@ -14577,6 +14577,8 @@ def _cp_ext_report_split(parent: dict, dim: str, start: date, end: date) -> list
 def _cp_range_for(name, today=None):
     """조회 기간 프리셋 → (시작일, 종료일). 채널 성과·소재별 성과가 같이 쓴다."""
     today = today or kst_today()
+    if name == "오늘":
+        return today, today
     if name == "이번 달":
         if today.day == 1:
             # 1일엔 '이번 달'에 끝난 날이 아직 없다 — 지난달 전체를 보여준다.
@@ -14611,6 +14613,35 @@ CP_BAR_CSS = """<style>
 </style>"""
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _ga4_today(kind: str, channel_map: dict, day: date) -> pd.DataFrame:
+    """오늘 GA4 데이터를 바로 받는다(저장하지 않는다 — 내일 아침 동기화가 확정값으로 채운다).
+    GA4는 오늘 데이터도 주지만 몇 시간 늦게, 그리고 나중에 조금씩 바뀐다. 10분 캐시."""
+    try:
+        if get_ga4_client()[0] is None:
+            return pd.DataFrame()
+        f = fetch_ga4_creative_daily if kind == "creative" else fetch_ga4_channel_daily
+        return f(day, day, channel_map)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _with_ga4_today(df: pd.DataFrame, kind: str, channel_map: dict, end: date) -> pd.DataFrame:
+    """조회 기간이 오늘까지면 저장된 표에 오늘 GA4 값을 붙인다(오늘 날짜 저장분은 바꿔 끼운다)."""
+    today = kst_today()
+    if end < today:
+        return df
+    td = _ga4_today(kind, channel_map or {}, today)
+    if td is None or td.empty:
+        return df
+    td = td.copy()
+    base = df.copy() if df is not None else pd.DataFrame()
+    if not base.empty and "report_date" in base.columns:
+        _bd = pd.to_datetime(base["report_date"], errors="coerce").dt.date
+        base = base[_bd != today]
+    return pd.concat([base, td], ignore_index=True)
+
+
 def _cp_period_bar(prefix: str, src_label: str):
     """기간 바: 조회 기간 │ 시작일 → 종료일 │ 조회 │ 데이터 소스 (채널 성과·소재별 성과 공통).
     칸 사이에 간격 칸을 둬서 '조회 기간'과 '시작일'이 붙어 보이지 않게 한다.
@@ -14629,7 +14660,7 @@ def _cp_period_bar(prefix: str, src_label: str):
         b1, _g1, b2, b3, b4, _g2, b5, _g3, b6 = cols
         with b1:
             preset = st.selectbox("조회 기간",
-                                  ["이번 달", "어제", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
+                                  ["이번 달", "오늘", "어제", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
                                   key=f"{prefix}_preset")
         d0, d1 = _cp_range_for(preset)
         with b2:
@@ -14663,6 +14694,17 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     today = kst_today()
     start, end = _cp_period_bar("cp", "GA4 · 실제 데이터" if (ga_daily is not None and not ga_daily.empty)
                                 else "엑셀 업로드 데이터")
+    if end >= today:
+        # 오늘 GA4(구매·매출·회원가입)를 바로 받아 붙인다 — 저장하지 않는 미리보기 값
+        try:
+            _um = load_table("utm_channel_map")
+            _cm = (build_utm_channel_lookup(_um, include_extra=False)
+                   if _um is not None and not _um.empty else {})
+        except Exception:
+            _cm = {}
+        ga_daily = _with_ga4_today(ga_daily, "channel", _cm, end)
+        st.caption("📡 **오늘** GA 구매·매출은 GA4에서 바로 받은 값입니다(10분마다 새로 받음, 몇 시간 늦게 집계돼 "
+                   "실제보다 적을 수 있음). 매체 광고비는 동기화된 날짜(보통 어제)까지만 들어 있어 오늘 ROAS는 참고용입니다.")
 
     # ── 입력·참고 패널 ──────────────────────────────────────────────────
     # 매일 보는 건 숫자지 입력 폼이 아니다. 함수로만 정의해두고 페이지 맨 아래에서 그린다.
@@ -20572,6 +20614,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         d["channel"] = None
     # 기간 바는 채널 성과와 같은 양식(조회 기간 │ 시작일 → 종료일 │ 조회 │ 데이터 소스) — 2026-11-18
     start, end = _cp_period_bar("gcp", "GA4 · 소재(utm_content) 데이터")
+    # '오늘'이 들어간 기간이면 오늘 GA4(방문·구매·매출)를 바로 받아 붙인다(2026-11-18 요청)
+    if end >= kst_today():
+        _td = _with_ga4_today(pd.DataFrame(), "creative", lookup, end)
+        if not _td.empty:
+            _td["report_date"] = pd.to_datetime(_td["report_date"], errors="coerce").dt.date
+            if lookup:
+                _td["channel"] = _td["source_medium"].map(lambda sm: lookup.get(str(sm).strip().lower()))
+            d = pd.concat([d[d["report_date"] != kst_today()], _td], ignore_index=True)
+        st.caption("📡 **오늘** GA 구매·매출은 GA4에서 바로 받은 값입니다(10분마다 새로 받음, GA4 집계가 몇 시간 늦어 "
+                   "실제보다 적을 수 있음). 매체 노출·클릭·광고비는 **어제까지**만 들어와 오늘 몫은 비어 있습니다.")
 
     level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
                      horizontal=True, key="gc_level")
