@@ -21962,6 +21962,21 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 # (A/B테스트를 고르면 그 캠페인의 광고세트 2개만 — 0개짜리는 숨긴다).
                 _target_options = ["전체"] + [c for c in _target_options[1:]
                                               if _detail_counts.get(c)]
+                # 구글 캠페인 버튼 — 구글 API에서 꺼진(켜진 애셋 그룹이 하나도 없는) 캠페인은
+                # ' - OFF' + 회색 + 맨 뒤로(품목 버튼과 같은 방식, 2026-11-18 블프 v1 끔).
+                _camp_off = set()
+                if label == "구글":
+                    _cs = {}
+                    for _k, _v in (_status_map or {}).items():
+                        if (isinstance(_k, tuple) and len(_k) == 2 and _k[0] == "구글"
+                                and isinstance(_v, list)):
+                            for _e in _v:
+                                if isinstance(_e, tuple) and len(_e) >= 2 and _e[0]:
+                                    _cs[str(_e[0])] = _cs.get(str(_e[0]), False) or bool(_e[1])
+                    _camp_off = {c for c in _target_options[1:] if c in _cs and not _cs[c]}
+                    if _camp_off:
+                        _target_options = (["전체"] + [c for c in _target_options[1:] if c not in _camp_off]
+                                           + [c for c in _target_options[1:] if c in _camp_off])
                 _detail_key = f"gc_detail_target_{ti}"
                 if st.session_state.get(_detail_key) not in _target_options:
                     st.session_state.pop(_detail_key, None)
@@ -21971,10 +21986,11 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                   + '</div>', unsafe_allow_html=True)
                     with _tc2:
                         detail_target = _gc_choice("세부 타겟팅", _target_options,
-                                                   key=_detail_key, counts=_detail_counts)
+                                                   key=_detail_key, counts=_detail_counts,
+                                                   off=_camp_off)
                 # 지금 운영 안 하는 묶음( - OFF)은 맨 끝 + 회색으로 — 버튼은 Streamlit 부품이라
                 # 글자로 골라 칠하는 작은 스크립트를 한 번 붙인다(화면이 바뀌어도 다시 칠한다).
-                if any(" - OFF" in o_ for o_ in _target_options):
+                if any(" - OFF" in o_ for o_ in _target_options) or _camp_off:
                     _gc_paint_off()
                 if label == "구글":
                     st.caption("구글은 광고 관리자 캠페인명으로 구분합니다. 선택 기간에 집행된 과거 캠페인도 포함됩니다. "
