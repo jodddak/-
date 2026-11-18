@@ -17131,6 +17131,10 @@ def _gc_target_group(row) -> str:
         return GC_SEG_NEW
     if _gc_is_bare_adboost(campaign):
         return GC_SEG_NEW
+    # 구글 옛 디스플레이 UTM(utm_campaign=pc_display) — 지금 광고 목록엔 없지만 옛 소재 링크로
+    # 유입·구매가 계속 들어온다. **신규**로 본다(2026-11-18 사용자 확인 — 지우지 말 것).
+    if campaign.casefold() == "pc_display":
+        return GC_SEG_NEW
     return "기타"
 
 
