@@ -14968,70 +14968,87 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 2026-11-18: 위 '구분' 라디오를 없애고 표 바로 위 버튼(TOTAL·자사몰·외부몰·제로라운지)
     # 하나로 합쳤다. 버튼은 표 위에 그리지만 값은 여기서 먼저 읽어 KPI·표·추천을 모두 같은
     # 구분으로 다시 계산한다(누르면 화면이 다시 돌면서 위 카드 숫자도 같이 바뀐다).
-    _CP_SCOPES = ["TOTAL", "자사몰", "외부몰", ZERO_SCOPE]
-    _sv = st.session_state.get("cp_scope_seg")
-    scope_f = "전체" if _sv not in _CP_SCOPES[1:] else _sv
-    view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
+    # 2026-11-18(2): 카드까지 표와 같은 틀(iframe) 안으로 옮겨, 버튼을 누르면 서버를 안 거치고
+    # 카드·표가 **즉시** 바뀐다. 구분별 카드는 미리 다 만들어 두고 버튼이 보이기만 바꾼다.
+    scope_f = "전체"
+    view = df.sort_values("_order")
 
-    # ── 상단 KPI (선택한 구분 기준) ────────────────────────
-    tot_cost = view["비용"].sum()
-    tot_budget = view["월예산"].sum()
-    # 합계·KPI의 매출은 **GA 기준끼리만** 더한다. 외부몰의 '매체 신고 매출'은 기준이 달라
-    # (보통 더 후하다) 섞으면 전체 ROAS가 부풀고 아침 메일(GA만 셈)과도 달라진다.
-    # '외부몰'만 골랐을 땐 전부 같은 기준이라 그대로 더한다.
-    _tv = view if (scope_f in NON_GA_SCOPES or "_basis" not in view.columns) \
-        else view[view["_basis"] != "매체"]
-    _mixed_out = (len(_tv) != len(view))
-    tot_rev = _tv["GA매출"].sum()
-    tot_conv = _tv["GA구매"].sum()
-    ref_m = start.replace(day=1)
-    # 기간 경과 = (조회 구간의 일수) ÷ (걸친 달들의 전체 일수). 한 달 안이면 예전과 같은 값이다.
-    _last_m = end.replace(day=1)
-    last_day = (_last_m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    _span_days = (last_day - ref_m).days + 1
-    _used_days = (min(end, last_day) - start).days + 1
-    elapsed = (_used_days / _span_days * 100) if _span_days > 0 else 0
-    roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0
-    pace = (tot_cost / tot_budget * 100) if tot_budget > 0 else 0
-    pace_word = "과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")
-    scope_note = ("자사몰 + 외부몰" + (" + 제로라운지" if (df["구분"] == ZERO_SCOPE).any() else "")
-                  if scope_f == "전체" else scope_f)
-    _bud_label = "월 예산" if n_months == 1 else f"예산 ({n_months}개월 합)"
-    _bud_sub = f"{ref_m.year}년 {ref_m.month}월"
-    if n_months > 1:
-        _bud_sub += f"~{_last_m.year}년 {_last_m.month}월"
-    ext_note = ('<div class="cp-note" style="margin:-6px 0 12px">'
-                '· 외부몰 매출은 GA4에 안 잡혀 <b>매체가 신고한 값</b>으로 봅니다 — 네이버 쇼핑검색광고는 네이버 광고 시스템의 <b>구매완료 전환수·구매완료 전환매출액</b>입니다.'
-                '</div>') if scope_f == "외부몰" else (
-        ('<div class="cp-note" style="margin:-6px 0 12px">'
-         '· 제로라운지(메타 STCO_코디갤러리 계정) — GA4에서 '
-         '<b>utm_campaign=제로라운지</b>인 구매·매출입니다(STCO 메타에서 덜어내 옮김).'
-         '</div>') if scope_f == ZERO_SCOPE else "")
-    st.markdown(
-        '<div class="cp-wrap">'
-        '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
-        f'<div class="cp-title">채널별 성과 <span class="cp-scope">{scope_note}</span></div>'
-        + ext_note +
-        '<div class="cp-kpis">'
-        f'<div class="cp-kpi"><div class="k">실제 집행 광고비</div><div class="v">{_cp_won(tot_cost)}</div>'
-        f'<div class="s">VAT 포함 · 공급가 {_cp_won(tot_cost / 1.1)}</div></div>'
-        f'<div class="cp-kpi"><div class="k">{_bud_label}</div>'
-        f'<div class="v">{_cp_won(tot_budget)}</div>'
-        f'<div class="s">{_bud_sub} · {scope_note}</div></div>'
-        f'<div class="cp-kpi"><div class="k">예산 소진율</div>'
-        f'<div class="v">{pace:.1f}%</div>'
-        f'<div class="cp-pace"><i style="width:{min(pace,100):.0f}%"></i>'
-        f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
-        f'<div class="s">쓴 돈 ÷ 월 예산 · <b>{pace_word}</b></div></div>'
-        f'<div class="cp-kpi"><div class="k">기간 경과</div>'
-        f'<div class="v">{elapsed:.0f}%</div>'
-        f'<div class="s">{start.month}/{start.day}~{end.month}/{end.day} · '
-        f'{_span_days}일 중 {_used_days}일</div></div>'
-        f'<div class="cp-kpi"><div class="k">GA 매출 ROAS</div><div class="v">{roas:,.1f}%</div>'
-        f'<div class="s">목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%</div></div>'
-        f'<div class="cp-kpi"><div class="k">GA 구매매출</div><div class="v">{_cp_won(tot_rev)}</div>'
-        f'<div class="s">구매 {_cp_int(tot_conv)}건</div></div>'
-        '</div></div>', unsafe_allow_html=True)
+    # ── 상단 KPI (구분별로 미리 만든다) ─────────────────────
+    def _kpi_html(scope_f, view):
+      tot_cost = view["비용"].sum()
+      tot_budget = view["월예산"].sum()
+      # 합계·KPI의 매출은 **GA 기준끼리만** 더한다. 외부몰의 '매체 신고 매출'은 기준이 달라
+      # (보통 더 후하다) 섞으면 전체 ROAS가 부풀고 아침 메일(GA만 셈)과도 달라진다.
+      # '외부몰'만 골랐을 땐 전부 같은 기준이라 그대로 더한다.
+      _tv = view if (scope_f in NON_GA_SCOPES or "_basis" not in view.columns) \
+          else view[view["_basis"] != "매체"]
+      _mixed_out = (len(_tv) != len(view))
+      tot_rev = _tv["GA매출"].sum()
+      tot_conv = _tv["GA구매"].sum()
+      ref_m = start.replace(day=1)
+      # 기간 경과 = (조회 구간의 일수) ÷ (걸친 달들의 전체 일수). 한 달 안이면 예전과 같은 값이다.
+      _last_m = end.replace(day=1)
+      last_day = (_last_m.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+      _span_days = (last_day - ref_m).days + 1
+      _used_days = (min(end, last_day) - start).days + 1
+      elapsed = (_used_days / _span_days * 100) if _span_days > 0 else 0
+      roas = (tot_rev / tot_cost * 100) if tot_cost > 0 else 0
+      pace = (tot_cost / tot_budget * 100) if tot_budget > 0 else 0
+      pace_word = "과속" if pace > elapsed + 5 else ("저속" if pace < elapsed - 5 else "정상")
+      scope_note = ("자사몰 + 외부몰" + (" + 제로라운지" if (df["구분"] == ZERO_SCOPE).any() else "")
+                    if scope_f == "전체" else scope_f)
+      _bud_label = "월 예산" if n_months == 1 else f"예산 ({n_months}개월 합)"
+      _bud_sub = f"{ref_m.year}년 {ref_m.month}월"
+      if n_months > 1:
+          _bud_sub += f"~{_last_m.year}년 {_last_m.month}월"
+      ext_note = ('<div class="cp-note" style="margin:-6px 0 12px">'
+                  '· 외부몰 매출은 GA4에 안 잡혀 <b>매체가 신고한 값</b>으로 봅니다 — 네이버 쇼핑검색광고는 네이버 광고 시스템의 <b>구매완료 전환수·구매완료 전환매출액</b>입니다.'
+                  '</div>') if scope_f == "외부몰" else (
+          ('<div class="cp-note" style="margin:-6px 0 12px">'
+           '· 제로라운지(메타 STCO_코디갤러리 계정) — GA4에서 '
+           '<b>utm_campaign=제로라운지</b>인 구매·매출입니다(STCO 메타에서 덜어내 옮김).'
+           '</div>') if scope_f == ZERO_SCOPE else "")
+      _hide = "" if scope_f == "전체" else ' style="display:none"'
+      _head = (
+          f'<div class="cp-kset" data-kscope="{"" if scope_f == "전체" else scope_f}"'
+          f'{_hide}>'
+          '<div class="cp-eyebrow">CHANNEL PERFORMANCE · LIVE MEDIA SPEND</div>'
+          f'<div class="cp-title">채널별 성과 <span class="cp-scope">{scope_note}</span></div>'
+          + ext_note + '</div>')
+      _cards = (
+          f'<div class="cp-kset" data-kscope="{"" if scope_f == "전체" else scope_f}"'
+          f'{_hide}>'
+          '<div class="cp-kpis">'
+          f'<div class="cp-kpi"><div class="k">실제 집행 광고비</div><div class="v">{_cp_won(tot_cost)}</div>'
+          f'<div class="s">VAT 포함 · 공급가 {_cp_won(tot_cost / 1.1)}</div></div>'
+          f'<div class="cp-kpi"><div class="k">{_bud_label}</div>'
+          f'<div class="v">{_cp_won(tot_budget)}</div>'
+          f'<div class="s">{_bud_sub} · {scope_note}</div></div>'
+          f'<div class="cp-kpi"><div class="k">예산 소진율</div>'
+          f'<div class="v">{pace:.1f}%</div>'
+          f'<div class="cp-pace"><i style="width:{min(pace,100):.0f}%"></i>'
+          f'<u style="left:{min(elapsed,100):.0f}%"></u></div>'
+          f'<div class="s">쓴 돈 ÷ 월 예산 · <b>{pace_word}</b></div></div>'
+          f'<div class="cp-kpi"><div class="k">기간 경과</div>'
+          f'<div class="v">{elapsed:.0f}%</div>'
+          f'<div class="s">{start.month}/{start.day}~{end.month}/{end.day} · '
+          f'{_span_days}일 중 {_used_days}일</div></div>'
+          f'<div class="cp-kpi"><div class="k">GA 매출 ROAS</div><div class="v">{roas:,.1f}%</div>'
+          f'<div class="s">목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}%</div></div>'
+          f'<div class="cp-kpi"><div class="k">GA 구매매출</div><div class="v">{_cp_won(tot_rev)}</div>'
+          f'<div class="s">구매 {_cp_int(tot_conv)}건</div></div>'
+          '</div></div>')
+      return _head, _cards, tot_cost, tot_rev, tot_conv, _mixed_out
+
+    _kpi_heads, _kpi_cards = [], []
+    for _sc in ["전체", "자사몰", "외부몰", ZERO_SCOPE]:
+        if _sc != "전체" and not (df["구분"] == _sc).any():
+            continue
+        _h1, _c1, _tc, _tr, _tn, _mo = _kpi_html(
+            _sc, view if _sc == "전체" else view[view["구분"] == _sc])
+        _kpi_heads.append(_h1); _kpi_cards.append(_c1)
+        if _sc == "전체":
+            tot_cost, tot_rev, tot_conv, _mixed_out = _tc, _tr, _tn, _mo
 
     # ── 표 ───────────────────────────────────────────────
     heads = ["구분", "매체", "노출", "클릭", "CTR", "CPC", "총비용(VAT 포함)",
@@ -15218,10 +15235,10 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 그 구분 기준으로 다시 계산한다(화면에서 바로, 새로고침 없음). 위 '구분' 선택이 전체일 때만 띄운다.
     _scopes_here = [x for x in ("자사몰", "외부몰", ZERO_SCOPE) if (view["구분"] == x).any()]
     _scope_bar = ""
-    if False and len(_scopes_here) >= 2:      # 표 위 Streamlit 버튼으로 대신한다
+    if len(_scopes_here) >= 2:
         _scope_bar = ('<div class="cp-scopebar">'
-                      + '<button type="button" class="cp-scope on" data-scope="">TOTAL</button>'
-                      + "".join(f'<button type="button" class="cp-scope" data-scope="{x}">{x}</button>'
+                      + '<button type="button" class="cp-scopebtn on" data-scope="">TOTAL</button>'
+                      + "".join(f'<button type="button" class="cp-scopebtn" data-scope="{x}">{x}</button>'
                                 for x in _scopes_here)
                       + '</div>')
 
@@ -15246,7 +15263,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     )
     html = (
         CP_CSS
-        + '<div class="cp-wrap">' + _scope_bar
+        + '<div class="cp-wrap">' + "".join(_kpi_heads) + _scope_bar + "".join(_kpi_cards)
         + '<div class="cp-selbar" id="cpselbar" style="display:none">'
           '<span class="cp-selinfo"></span>'
           '<span class="cp-selbtns"><button type="button" class="cp-selonly">선택한 매체만 보기</button>'
@@ -15329,7 +15346,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 본문 20 + 보조 19를 더해 약 63px. 머리글 41, 아래 설명글 약 100.
     # 조금 넉넉하게 잡고 scrolling=False로 둬서, 어긋나도 스크롤바 대신 여백만 생기게 한다.
     # (아래 스크립트가 실제 높이를 재서 다시 맞춰준다 — 되면 여백도 사라진다.)
-    _h = 41 + 48 * (len(view) + 1) + 110 + (40 if _gfa_subs else 0)
+    _h = 41 + 48 * (len(view) + 1) + 110 + (40 if _gfa_subs else 0) + 260   # +카드
     html += """
 <style>
 tr.cp-has-sub{cursor:pointer}
@@ -15350,10 +15367,10 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
 .cp-selonly.on{background:#FFF}
 .cp-selclear{background:#2B313B;color:#FFF}
 .cp-scopebar{display:flex;gap:6px;margin:0 0 10px;flex-wrap:wrap}
-.cp-scope{border:1px solid #D7DBE2;background:#FFF;color:#374151;border-radius:999px;padding:7px 18px;
+.cp-scopebtn{border:1px solid #D7DBE2;background:#FFF;color:#374151;border-radius:999px;padding:7px 18px;
   font-weight:700;font-size:13.5px;cursor:pointer;font-family:inherit}
-.cp-scope:hover{border-color:#14181F}
-.cp-scope.on{background:#14181F;color:#FFF;border-color:#14181F}
+.cp-scopebtn:hover{border-color:#14181F}
+.cp-scopebtn.on{background:#14181F;color:#FFF;border-color:#14181F}
 </style>
 <script>
 (function(){
@@ -15488,10 +15505,12 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
     }
     update();
   }
-  Array.prototype.forEach.call(document.querySelectorAll('.cp-scope'),function(b){
+  Array.prototype.forEach.call(document.querySelectorAll('.cp-scopebtn'),function(b){
     b.addEventListener('click',function(){
       scope=b.getAttribute('data-scope')||'';
-      document.querySelectorAll('.cp-scope').forEach(function(o){o.classList.toggle('on',o===b);});
+      document.querySelectorAll('.cp-scopebtn').forEach(function(o){o.classList.toggle('on',o===b);});
+      document.querySelectorAll('.cp-kset').forEach(function(k){
+        k.style.display=(k.getAttribute('data-kscope')===scope)?'':'none';});
       applyScope();});
   });
   setTimeout(fit,150); setTimeout(fit,600);
@@ -15509,7 +15528,6 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
   setTimeout(fit, 80); setTimeout(fit, 400);
 })();
 </script>"""
-    _gc_choice("구분", _CP_SCOPES, key="cp_scope_seg")
     st.components.v1.html(html, height=_h, scrolling=False)
 
     if _n_warn or _n_info:
