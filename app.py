@@ -18182,8 +18182,8 @@ def _gc_rows(cre: pd.DataFrame, start: date, end: date, level: str,
             return pd.DataFrame(columns=cols)
     is_new = g["user_type"] == "신규"
     g["new"] = np.where(is_new, g["sessions"], 0.0)
-    # 회원가입은 신규 유입의 성과로 본다 (재방문자의 가입은 사실상 없다)
-    g["signup"] = np.where(is_new, g["signups"], 0.0)
+    # 회원가입은 채널 성과와 같게 **전체**(신규+재방문)로 센다(2026-11-18 — 두 화면 숫자 맞추기).
+    g["signup"] = pd.to_numeric(g["signups"], errors="coerce").fillna(0.0)
 
     parsed = g["creative"].map(_gc_parse_content)
     g["target"] = parsed.map(lambda t: t[0])
@@ -20853,6 +20853,26 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _api_channels = (_gc_api_coverage_channels(ad_creative, start, end)
                      & {ch for ch, _ in _api_map})
     media_map = {k: v for k, v in _report_map.items() if k[0] not in _api_channels}
+    # 매체 API로 받는 매체(메타·구글·크리테오·카카오모먼트)는 표 맨 위 TOTAL의 노출·클릭·광고비를
+    # **원본 표 합계 그대로** 쓴다(필터 없을 때). 소재 줄을 GA와 맞추고 쪼개는 과정에서 몇 원·몇 회가
+    # 새거나 겹쳐, 채널 성과와 메타 110원·노출 2회처럼 어긋났다(2026-11-18 '데이터 맞추기만').
+    _gc_raw_tab = {}
+    try:
+        if ad_creative is not None and not ad_creative.empty and _api_channels:
+            _rw = ad_creative[ad_creative["channel"].isin(_api_channels)].copy()
+            _rw["_d"] = pd.to_datetime(_rw["report_date"], errors="coerce").dt.date
+            _rw = _rw[(_rw["_d"] >= start) & (_rw["_d"] <= end)]
+            if "source" in _rw.columns:
+                _rw = _rw[_rw["source"].astype(str) != "creative_inventory"]
+            for _c in ("impressions", "clicks", "cost_incl_vat"):
+                _rw[_c] = pd.to_numeric(_rw.get(_c), errors="coerce").fillna(0)
+            _rw["_tab"] = _rw["channel"].map(_gc_channel)
+            for _t, _g in _rw.groupby("_tab"):
+                _gc_raw_tab[_t] = {"impressions": float(_g["impressions"].sum()),
+                                   "clicks": float(_g["clicks"].sum()),
+                                   "cost": float(_g["cost_incl_vat"].sum())}
+    except Exception:
+        _gc_raw_tab = {}
     # Inventory-only rows must not replace a report's real creative metrics.
     for _media_key, _media_value in _api_map.items():
         if _media_key[0] in _api_channels or _media_key not in media_map:
@@ -22051,13 +22071,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 return _gfa_fix(_off_alias.get(_l, _l), v.get("campaign"))
             if label == "구글":
                 # Explicitly exclude unresolved campaigns from this performance view.
-                if not rows.empty:
-                    rows = rows[rows.apply(lambda r: _row_label(r) != "캠페인 미확인", axis=1)].copy()
-                if not _detail_pool_rows.empty:
-                    _detail_pool_rows = _detail_pool_rows[_detail_pool_rows.apply(
-                        lambda r: _row_label(r) != "캠페인 미확인", axis=1)].copy()
-                _left_all = [(k, v) for k, v in _left_all if _detail_left_label(v, k) != "캠페인 미확인"]
-                _left_f = [(k, v) for k, v in _left_f if _detail_left_label(v, k) != "캠페인 미확인"]
+                # 2026-11-18: '캠페인 미확인' 줄도 남긴다 — 빼면 GA 구매·매출이 채널 성과보다 모자랐다
+                # (구글 2건·98,900원). 캠페인 버튼에 '캠페인 미확인'으로 따로 모인다.
+                pass
             _groups = {_row_label(r) for _, r in _detail_pool_rows.iterrows()} if label != "TOTAL" else set()
             if label != "TOTAL":
                 _groups.update(_detail_left_label(v, k) for k, v in _left_all)
@@ -22106,7 +22122,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                     _gc_paint_off()
                 if label == "구글":
                     st.caption("구글은 광고 관리자 캠페인명으로 구분합니다. 선택 기간에 집행된 과거 캠페인도 포함됩니다. "
-                               "캠페인 연결이 미확인인 행은 이 표에서 제외합니다.")
+                               "캠페인을 못 붙인 줄은 '캠페인 미확인'으로 따로 모읍니다.")
                 if detail_target != "전체":
                     # 매체 실적이 없는 GA 줄은 GA utm 앞부분만 보고 묶음을 정했다. 그래서 다른
                     # 캠페인 옛 광고로 들어온 방문(260910_추석세일니트)이 광고 관리자엔 없는
@@ -22608,6 +22624,12 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 tot_media["media_rev"] = sum(
                     float((m or {}).get("media_rev", 0) or 0) for m in rows["_media"]
                 ) + sum(float(m.get("media_rev", 0) or 0) for _, m in leftovers)
+            if (label in _gc_raw_tab and seg == GC_SEG_ALL and item == GC_ITEM_ALL
+                    and detail_target == "전체" and manager_campaign == "전체"):
+                _rt = _gc_raw_tab[label]
+                tot_media["impressions"] = _rt["impressions"]
+                tot_media["clicks"] = _rt["clicks"]
+                tot_media["cost"] = _rt["cost"]
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
             export_sheets[label] = [_gc_row_record(tot_r, tot_media, is_total=True)] + recs
             export_views[label] = view_lbl
