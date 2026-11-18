@@ -12448,6 +12448,19 @@ def _auto_sync_ga_creative() -> str:
                 if pd.notna(_up):
                     _up_kst = _up.tz_convert(None).to_pydatetime() + timedelta(hours=9)
                     _early = _up_kst < _cut
+        # 10시 넘어 받았어도 GA4가 어제 구매의 소스를 아직 못 붙인 채((not set)·(other))면 다시 받는다.
+        # 11/17분을 10:00에 받았더니 구매 387건 중 184건이 (not set)·(other)라, 채널 성과에서
+        # 메타 23건·98.8만원 등이 '소재 GA 집계 대기'로 빠졌다(2026-11-18).
+        if last is not None and last >= _yday and not _early and "source_medium" in cre.columns:
+            try:
+                _yd2 = cre[pd.to_datetime(cre["report_date"], errors="coerce").dt.date == _yday]
+                _cv = pd.to_numeric(_yd2.get("conversions"), errors="coerce").fillna(0)
+                _ns = _yd2["source_medium"].astype(str).str.strip().str.lower().isin(
+                    ["(not set)", "(other)", "(not set) / (not set)"])
+                if float(_cv.sum()) > 0 and float(_cv[_ns].sum()) / float(_cv.sum()) >= 0.05:
+                    _early = True
+            except Exception:
+                pass
         if last is not None and last >= _yday and not _early:
             return ""
         if get_ga4_client()[0] is None:
