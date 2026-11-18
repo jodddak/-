@@ -14605,7 +14605,8 @@ CP_BAR_CSS = """<style>
 [class*="bar_v2"][class*="st-key-"] .stButton>button{border-radius:9px;background:#14181F !important;
   color:#F3F1EC !important;border:none !important;font-weight:800;font-size:14px;min-height:40px}
 [class*="bar_v2"][class*="st-key-"] .stButton>button:hover{background:#2A3038 !important;color:#FFF !important}
-.cp-arrow2{height:40px;display:flex;align-items:center;justify-content:center;
+[class*="bar_v2"][class*="st-key-"] .stButton>button p{color:#F3F1EC !important;font-weight:800}
+.cp-arrow2{height:38px;margin-bottom:8px;display:flex;align-items:center;justify-content:center;
   font-size:18px;color:#9AA0A8;font-weight:700}
 </style>"""
 
