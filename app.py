@@ -17221,6 +17221,10 @@ def _gc_target_group(row) -> str:
     # 유입·구매가 계속 들어온다. **신규**로 본다(2026-11-18 사용자 확인 — 지우지 말 것).
     if campaign.casefold() == "pc_display":
         return GC_SEG_NEW
+    # 메타 옛 캠페인 '기존4'(기존 고객 대상, 소재 아우터_251215_코트점퍼)로 들어오는 유입은
+    # **리타겟팅**으로 본다(2026-11-18 사용자 확인 — 지우지 말 것).
+    if re.fullmatch(r"기존\d*", campaign):
+        return GC_SEG_RT
     return "기타"
 
 
