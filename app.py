@@ -13263,12 +13263,16 @@ def _cp_ga_by_media(ga_daily: pd.DataFrame, master: pd.DataFrame,
             partial.append((len(kw), kw, m["media"]))
     partial.sort(key=lambda x: -x[0])
 
-    for _, row in g.iterrows():
-        sm = norm(row.get("source_medium"))
-        conv = float(row.get("conversions") or 0)
-        rev = float(row.get("revenue") or 0)
-        su = float(pd.to_numeric(row.get("signups"), errors="coerce") or 0) if "signups" in row else 0.0
-        su = 0.0 if su != su else su
+    # 속도: 날짜·유저유형별 수만 줄을 한 줄씩 돌면(iterrows) 버튼 한 번에 몇 초씩 걸렸다.
+    # 소스/매체별로 먼저 합쳐(수백 줄) 매칭은 그 단위로만 한다 — 결과는 같다.
+    for _c in ("conversions", "revenue", "signups"):
+        g[_c] = (pd.to_numeric(g[_c], errors="coerce").fillna(0.0) if _c in g.columns else 0.0)
+    g["source_medium"] = g["source_medium"].fillna("").astype(str)
+    agg = g.groupby("source_medium", sort=False)[["conversions", "revenue", "signups"]].sum()
+    for sm_raw, (conv, rev, su) in zip(agg.index, agg.itertuples(index=False, name=None)):
+        sm = norm(sm_raw)
+        conv, rev, su = float(conv), float(rev), float(su)
+        row = {"source_medium": sm_raw}
         media = exact.get(sm)
         if media is None:
             for _, kw, mm in partial:
@@ -13352,6 +13356,7 @@ def _cp_media_matcher(master: pd.DataFrame):
     return match
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def _cp_ga_reclass(master: pd.DataFrame, start: date, end: date) -> dict:
     """소스/매체로는 틀리게 분류된 GA 구매·매출을 **매체끼리 옮긴다.**
 
@@ -13397,6 +13402,7 @@ def _cp_ga_reclass(master: pd.DataFrame, start: date, end: date) -> dict:
     return out
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def _cp_excluded_ga(master: pd.DataFrame, start: date, end: date) -> dict:
     """제외 대상(마케팅팀 등) 캠페인의 GA 구매·매출을 **매체별로** 집계한다.
 
@@ -19992,6 +19998,8 @@ def _gc_status_table_body(card, recs, label, height, ti):
 
 
 # 표 부분만 다시 그리는 조각(fragment) — 없는 Streamlit 버전이면 그냥 함수로 쓴다
+_cp_page_fragment = (st.fragment(render_channel_performance_page) if hasattr(st, "fragment")
+                     else render_channel_performance_page)
 _gc_status_table = (st.fragment(_gc_status_table_body) if hasattr(st, "fragment")
                     else _gc_status_table_body)
 
@@ -25322,7 +25330,9 @@ def main():
             master=T("media_master"),
         )
     elif page == "채널 성과":
-        render_channel_performance_page(
+        # 조각(fragment)으로 돌려, 표 위 구분 버튼·기간을 바꿀 때 이 화면만 다시 그린다
+        # (앱 전체 — 사이드바·데이터 적재·다른 준비 — 를 매번 다시 돌지 않게).
+        (_cp_page_fragment if hasattr(st, "fragment") else render_channel_performance_page)(
             T("ad_spend_daily"), T("ga_channel_daily"), T("channel_mix_budget"),
             master=T("media_master"), budget=T("channel_budget"),
         )
