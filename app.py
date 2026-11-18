@@ -22630,6 +22630,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                 tot_media["impressions"] = _rt["impressions"]
                 tot_media["clicks"] = _rt["clicks"]
                 tot_media["cost"] = _rt["cost"]
+            elif (label != "TOTAL" and seg == GC_SEG_ALL and item == GC_ITEM_ALL
+                  and float(tot_media.get("cost") or 0) <= 0):
+                # 소재 단위 실적이 없는 매체(카카오톡 플친 — 비즈월렛 충전액)는 채널 성과와 같은
+                # 광고비 표 값을 TOTAL에 넣는다(소재 줄엔 못 나눈다).
+                try:
+                    _sp = float(spend_by_ch.get(_v4_canon_channel(label), 0) or 0)
+                except Exception:
+                    _sp = 0.0
+                if _sp > 0:
+                    tot_media["cost"] = _sp
             sum_html = _gc_row_html(tot_r, tot_media, "fv4-sum-row nosort", show_img=show_img)
             export_sheets[label] = [_gc_row_record(tot_r, tot_media, is_total=True)] + recs
             export_views[label] = view_lbl
