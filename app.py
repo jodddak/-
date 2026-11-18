@@ -14574,6 +14574,79 @@ def _cp_ext_report_split(parent: dict, dim: str, start: date, end: date) -> list
     return out
 
 
+def _cp_range_for(name, today=None):
+    """조회 기간 프리셋 → (시작일, 종료일). 채널 성과·소재별 성과가 같이 쓴다."""
+    today = today or kst_today()
+    if name == "이번 달":
+        if today.day == 1:
+            # 1일엔 '이번 달'에 끝난 날이 아직 없다 — 지난달 전체를 보여준다.
+            f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
+        return today.replace(day=1), today - timedelta(days=1)
+    if name == "어제":
+        e = today - timedelta(days=1); return e, e
+    if name == "최근 7일":
+        e = today - timedelta(days=1); return e - timedelta(days=6), e
+    if name == "최근 30일":
+        e = today - timedelta(days=1); return e - timedelta(days=29), e
+    if name == "지난 달":
+        f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
+    return _cp_range_for("이번 달", today)      # 직접 지정의 기본값도 1일 처리를 같이 받는다
+
+
+CP_BAR_CSS = """<style>
+/* 기간 바 — 한 장짜리 카드. 칸 사이 간격·입력 높이를 맞춘다 */
+[class*="bar_v2"][class*="st-key-"]{background:#FFF;border:1px solid #E3E1DC;border-radius:14px;
+  padding:14px 20px 16px;margin-bottom:16px}
+[class*="bar_v2"][class*="st-key-"] label p{font-size:12.5px !important;color:#8A9099 !important;
+  font-weight:700 !important}
+[class*="bar_v2"][class*="st-key-"] [data-baseweb="select"]>div{border-radius:9px !important;min-height:40px}
+[class*="bar_v2"][class*="st-key-"] [data-testid="stDateInput"] [data-baseweb="input"]{border-radius:9px !important}
+[class*="bar_v2"][class*="st-key-"] [data-testid="stDateInput"] input{font-size:14px !important}
+[class*="bar_v2"][class*="st-key-"] .stButton>button{border-radius:9px;background:#14181F !important;
+  color:#F3F1EC !important;border:none !important;font-weight:800;font-size:14px;min-height:40px}
+[class*="bar_v2"][class*="st-key-"] .stButton>button:hover{background:#2A3038 !important;color:#FFF !important}
+.cp-arrow2{height:40px;display:flex;align-items:center;justify-content:center;
+  font-size:18px;color:#9AA0A8;font-weight:700}
+</style>"""
+
+
+def _cp_period_bar(prefix: str, src_label: str):
+    """기간 바: 조회 기간 │ 시작일 → 종료일 │ 조회 │ 데이터 소스 (채널 성과·소재별 성과 공통).
+    칸 사이에 간격 칸을 둬서 '조회 기간'과 '시작일'이 붙어 보이지 않게 한다.
+    프리셋을 고르면 날짜가 채워지고, 채워진 날짜를 손으로 고쳐도 된다."""
+    st.markdown(CP_BAR_CSS, unsafe_allow_html=True)
+    try:
+        bar = st.container(key=f"{prefix}bar_v2")
+    except TypeError:
+        bar = st.container()
+    _w = [1.15, 0.22, 1.0, 0.16, 1.0, 0.22, 0.62, 0.22, 1.25]
+    with bar:
+        try:
+            cols = st.columns(_w, vertical_alignment="bottom")
+        except TypeError:
+            cols = st.columns(_w)
+        b1, _g1, b2, b3, b4, _g2, b5, _g3, b6 = cols
+        with b1:
+            preset = st.selectbox("조회 기간",
+                                  ["이번 달", "어제", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
+                                  key=f"{prefix}_preset")
+        d0, d1 = _cp_range_for(preset)
+        with b2:
+            start = st.date_input("시작일", d0, key=f"{prefix}_s_{preset}", format="YYYY-MM-DD")
+        with b3:
+            st.markdown('<div class="cp-arrow2">→</div>', unsafe_allow_html=True)
+        with b4:
+            end = st.date_input("종료일", d1, key=f"{prefix}_e_{preset}", format="YYYY-MM-DD")
+        with b5:
+            if st.button("조회", key=f"{prefix}_apply", use_container_width=True):
+                st.cache_data.clear()
+        with b6:
+            st.selectbox("데이터 소스", [src_label], key=f"{prefix}_src", disabled=True)
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
@@ -14587,51 +14660,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 프리셋을 고르면 날짜가 그에 맞게 채워지고, 채워진 날짜를 손으로 고쳐도 된다.
     # (date_input의 key에 preset을 넣어야 프리셋을 바꿨을 때 값이 새로 잡힌다)
     today = kst_today()
-
-    def _range_for(name):
-        if name == "이번 달":
-            if today.day == 1:
-                # 1일엔 '이번 달'에 끝난 날이 아직 없다 — 예전엔 시작(오늘)·끝(어제)이 뒤집혀
-                # 지난달 말일~오늘로 두 달 예산이 합쳐졌다. 지난달 전체를 보여준다.
-                f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
-            return today.replace(day=1), today - timedelta(days=1)
-        if name == "어제":
-            e = today - timedelta(days=1); return e, e
-        if name == "최근 7일":
-            e = today - timedelta(days=1); return e - timedelta(days=6), e
-        if name == "최근 30일":
-            e = today - timedelta(days=1); return e - timedelta(days=29), e
-        if name == "지난 달":
-            f = today.replace(day=1); e = f - timedelta(days=1); return e.replace(day=1), e
-        return _range_for("이번 달")      # 직접 지정의 기본값도 1일 처리를 같이 받는다
-
-    try:
-        bar = st.container(key="cpbar")
-    except TypeError:
-        bar = st.container()
-    with bar:
-        b1, b2, b3, b4, b5, b6 = st.columns([1.05, 1.05, 0.12, 1.05, 0.5, 1.15])
-        with b1:
-            preset = st.selectbox("조회 기간",
-                                  ["이번 달", "어제", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
-                                  key="cp_preset")
-        d0, d1 = _range_for(preset)
-        with b2:
-            start = st.date_input("시작일", d0, key=f"cp_s_{preset}", format="YYYY-MM-DD")
-        with b3:
-            st.markdown('<div class="cp-arrow">→</div>', unsafe_allow_html=True)
-        with b4:
-            end = st.date_input("종료일", d1, key=f"cp_e_{preset}", format="YYYY-MM-DD")
-        with b5:
-            st.markdown('<div class="cp-btnpad"></div>', unsafe_allow_html=True)
-            if st.button("조회", key="cp_apply", use_container_width=True):
-                st.cache_data.clear()
-        with b6:
-            src_label = "GA4 · 실제 데이터" if (ga_daily is not None and not ga_daily.empty) \
-                else "엑셀 업로드 데이터"
-            st.selectbox("데이터 소스", [src_label], key="cp_src", disabled=True)
-    if start > end:
-        start, end = end, start
+    start, end = _cp_period_bar("cp", "GA4 · 실제 데이터" if (ga_daily is not None and not ga_daily.empty)
+                                else "엑셀 업로드 데이터")
 
     # ── 입력·참고 패널 ──────────────────────────────────────────────────
     # 매일 보는 건 숫자지 입력 폼이 아니다. 함수로만 정의해두고 페이지 맨 아래에서 그린다.
@@ -20539,9 +20569,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             lambda sm: lookup.get(str(sm).strip().lower()))
     elif "channel" not in d.columns:
         d["channel"] = None
-    with c1:
-        start, end = period_filter(d["report_date"].min(), d["report_date"].max(),
-                                   key="ga_creative", default_preset="이번달")
+    # 기간 바는 채널 성과와 같은 양식(조회 기간 │ 시작일 → 종료일 │ 조회 │ 데이터 소스) — 2026-11-18
+    start, end = _cp_period_bar("gcp", "GA4 · 소재(utm_content) 데이터")
 
     level = st.radio("보기 단위", ["소재", "타겟팅", "캠페인", "매체"],
                      horizontal=True, key="gc_level")
