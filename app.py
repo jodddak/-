@@ -14959,8 +14959,12 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # ── 구분 필터 (KPI보다 위) ────────────────────────────
     # 필터를 KPI 아래에 두면 '자사몰'을 골라도 위 숫자는 전체라서 예산·ROAS를 잘못 읽게 된다.
     # 자사몰과 외부몰은 재원도 매출 집계 방식도 달라 반드시 같이 걸러야 한다.
-    scope_f = st.radio("구분", ["전체", "자사몰", "외부몰", ZERO_SCOPE], horizontal=True,
-                       key="cp_scope")
+    # 2026-11-18: 위 '구분' 라디오를 없애고 표 바로 위 버튼(TOTAL·자사몰·외부몰·제로라운지)
+    # 하나로 합쳤다. 버튼은 표 위에 그리지만 값은 여기서 먼저 읽어 KPI·표·추천을 모두 같은
+    # 구분으로 다시 계산한다(누르면 화면이 다시 돌면서 위 카드 숫자도 같이 바뀐다).
+    _CP_SCOPES = ["TOTAL", "자사몰", "외부몰", ZERO_SCOPE]
+    _sv = st.session_state.get("cp_scope_seg")
+    scope_f = "전체" if _sv not in _CP_SCOPES[1:] else _sv
     view = (df if scope_f == "전체" else df[df["구분"] == scope_f]).sort_values("_order")
 
     # ── 상단 KPI (선택한 구분 기준) ────────────────────────
@@ -15208,7 +15212,7 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
     # 그 구분 기준으로 다시 계산한다(화면에서 바로, 새로고침 없음). 위 '구분' 선택이 전체일 때만 띄운다.
     _scopes_here = [x for x in ("자사몰", "외부몰", ZERO_SCOPE) if (view["구분"] == x).any()]
     _scope_bar = ""
-    if len(_scopes_here) >= 2:
+    if False and len(_scopes_here) >= 2:      # 표 위 Streamlit 버튼으로 대신한다
         _scope_bar = ('<div class="cp-scopebar">'
                       + '<button type="button" class="cp-scope on" data-scope="">TOTAL</button>'
                       + "".join(f'<button type="button" class="cp-scope" data-scope="{x}">{x}</button>'
@@ -15499,6 +15503,7 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
   setTimeout(fit, 80); setTimeout(fit, 400);
 })();
 </script>"""
+    _gc_choice("구분", _CP_SCOPES, key="cp_scope_seg")
     st.components.v1.html(html, height=_h, scrolling=False)
 
     if _n_warn or _n_info:
