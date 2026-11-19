@@ -553,6 +553,9 @@ def inject_theme():
             background-color: {THEME_COLORS["canvas"]};
         }}
         [data-testid="stHeader"] {{ background-color: transparent; }}
+        /* 투명 머리띠(높이 45px)가 화면 맨 위를 덮어 스크롤 후 위로 올라간 버튼 클릭을 가로챘다 — 클릭은 통과시키고 머리띠 안 버튼만 살린다 */
+        [data-testid="stHeader"], [data-testid="stHeader"] * {{ pointer-events: none; }}
+        [data-testid="stHeader"] button, [data-testid="stHeader"] button *, [data-testid="stHeader"] a, [data-testid="stHeader"] [role=button], [data-testid="stHeader"] [role=button] * {{ pointer-events: auto; }}
         .block-container {{ padding-top: 2rem; padding-left: 3rem; padding-right: 3rem; max-width: 100%; }}
 
         [data-testid="stSidebar"] {{
