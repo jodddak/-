@@ -22161,9 +22161,16 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
                                 if isinstance(_e, tuple) and len(_e) >= 2 and _e[0]:
                                     _cs[str(_e[0])] = _cs.get(str(_e[0]), False) or bool(_e[1])
                     _camp_off = {c for c in _target_options[1:] if c in _cs and not _cs[c]}
-                    if _camp_off:
-                        _target_options = (["전체"] + [c for c in _target_options[1:] if c not in _camp_off]
-                                           + [c for c in _target_options[1:] if c in _camp_off])
+                    # 캠페인 버튼 순서(2026-11-19 요청: 품목 '전체'일 때 뒤죽박죽) — 품목 버튼 순서대로
+                    # 수트 → 아우터 → 이너(셔츠) → 품목 없는 리타겟팅 → 행사(블프 v2 관심사 → 리타겟팅)
+                    # → 캠페인 미확인 → 꺼진 캠페인(- OFF).
+                    def _gcamp_key(c):
+                        _it = _gc_item_of_campaign(c)
+                        _rk = (GC_ITEMS.index(_it) if _it in (GC_ITEM_SUIT, GC_ITEM_OUTER, GC_ITEM_INNER, GC_ITEM_DAILY)
+                               else 10 if _it is None else 20 + GC_ITEMS.index(_it))
+                        return (c in _camp_off or " - OFF" in c, c == "캠페인 미확인", _rk,
+                                _gc_group_version(c), "리타겟팅" in c, c)
+                    _target_options = ["전체"] + sorted(_target_options[1:], key=_gcamp_key)
                 _detail_key = f"gc_detail_target_{ti}"
                 if st.session_state.get(_detail_key) not in _target_options:
                     st.session_state.pop(_detail_key, None)
