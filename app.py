@@ -17983,6 +17983,25 @@ _GC_ITEM_WORDS = [
 ]
 
 
+def _busy_pill():
+    """버튼을 누르면 화면 위쪽 가운데에 '바꾸는 중…'을 띄웠다가, 다시 그리기가 끝나면 지운다.
+    스크롤을 내린 채 위 버튼을 누르면 표가 몇 초 뒤에야 바뀌어 '안 눌린다'고 느꼈다(2026-11-19)."""
+    st.components.v1.html("""<script>
+(function(){var d=window.parent.document; if(d.__busyPill) return; d.__busyPill=1;
+ var p=d.createElement('div'); p.textContent='⏳ 화면 바꾸는 중…';
+ p.style.cssText='position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:99999;'
+  +'background:#14181F;color:#FFF;padding:9px 18px;border-radius:999px;font:700 14px Pretendard,sans-serif;'
+  +'box-shadow:0 6px 20px rgba(0,0,0,.25);display:none;pointer-events:none';
+ d.body.appendChild(p); var t0=0;
+ function running(){return !!d.querySelector('[data-testid="stStatusWidget"]');}
+ d.addEventListener('click',function(e){
+  if(e.target.closest('[data-testid="stButtonGroup"],[data-testid="stRadio"],[data-testid="stButton"],[data-testid="stSelectbox"]')){
+   t0=Date.now(); p.style.display='block';}},true);
+ setInterval(function(){ if(p.style.display==='block' && Date.now()-t0>800 && !running()) p.style.display='none';
+  if(p.style.display==='block' && Date.now()-t0>30000) p.style.display='none';},250);
+})();</script>""", height=0)
+
+
 def _gc_paint_off():
     """' - OFF'가 붙은 선택 버튼을 회색·점선으로 칠한다(버튼이 Streamlit 부품이라 글자로 골라 칠함).
     화면이 바뀌어도 다시 칠하도록 감시를 붙인다."""
@@ -20415,6 +20434,7 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         cre = load_table("ga_creative_daily")
     elif _cre_note:
         st.caption("⚠️ " + _cre_note)
+    _busy_pill()
     _mnote = _auto_resync_creative_media(ad_creative, ad_spend)
     if _mnote:
         ad_creative = load_table("ad_creative_daily")
@@ -20813,12 +20833,42 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     except Exception:
         pass
     d = d[~_google_rows | _online_pmax].copy()
-    ad_creative = _gc_latest_gfa_snapshots(ad_creative)
-    _pm("GFA 스냅샷")
-    ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
-    _pm("구글 캠페인명")
-    ad_creative = _gc_merge_renamed_adsets(ad_creative, _status_map)
-    _pm("이름 바뀐 광고세트")
+    # 속도: 필터 버튼 하나 누를 때마다 아래 세 단계(약 2초)를 처음부터 다시 했다. 입력(소재 실적·GA·
+    # 광고 상태)이 그대로면 직전 결과를 다시 쓴다 — 버튼 반응이 5~6초 걸려 '안 눌린다'고 느꼈다(2026-11-19).
+    def _fp_df(df, cols):
+        if df is None or getattr(df, "empty", True):
+            return (0,)
+        out = [len(df)]
+        for c in cols:
+            if c in df.columns:
+                try:
+                    out.append(str(df[c].max()) if c == "uploaded_at"
+                               else round(float(pd.to_numeric(df[c], errors="coerce").fillna(0).sum()), 2))
+                except Exception:
+                    out.append(None)
+        return tuple(out)
+    try:
+        _sm_fp = (len(_status_map or {}), sum(len(v) for v in (_status_map or {}).values()
+                                               if isinstance(v, (list, tuple, dict))))
+    except Exception:
+        _sm_fp = (0,)
+    _prep_key = (_fp_df(ad_creative, ("uploaded_at", "cost_incl_vat", "impressions")),
+                 _fp_df(d, ("revenue", "sessions")), _sm_fp)
+    _prep = st.session_state.get("_gc_prep_memo")
+    if _prep and _prep[0] == _prep_key:
+        ad_creative, d = _prep[1].copy(), _prep[2].copy()
+        _pm("소재 준비(재사용)")
+    else:
+        ad_creative = _gc_latest_gfa_snapshots(ad_creative)
+        _pm("GFA 스냅샷")
+        ad_creative, d = _gc_current_google_campaign_names(ad_creative, d, _status_map)
+        _pm("구글 캠페인명")
+        ad_creative = _gc_merge_renamed_adsets(ad_creative, _status_map)
+        _pm("이름 바뀐 광고세트")
+        try:
+            st.session_state["_gc_prep_memo"] = (_prep_key, ad_creative.copy(), d.copy())
+        except Exception:
+            pass
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
     # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
