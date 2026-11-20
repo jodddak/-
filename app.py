@@ -10521,6 +10521,64 @@ def fetch_naver_shopping_purchase(start: date, end: date) -> dict:
     return out
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_naver_shopping_device(start: date, end: date) -> dict:
+    """네이버 쇼핑검색광고를 **PC / MO** 캠페인('000. STCO 쇼핑검색 - MO' · '001. STCO 쇼핑검색 - PC')으로
+    나눈 기간 합계. {"PC": {imp, clk, cost, conv, rev}, "MO": {...}} — 채널 성과 'PC/MO 보기'용(2026-11-20).
+    cost는 salesAmt(VAT 포함), conv·rev는 구매완료 전환수·전환매출액(합계 줄과 같은 기준)."""
+    cfg = _secrets_section("naver_searchad")
+    if not cfg or any(not cfg.get(k) for k in ("api_key", "secret_key", "customer_id")):
+        return {}
+    import requests, json as _json
+    path = "/ncc/campaigns"
+    r = requests.get(NAVER_API_BASE + path, headers=_naver_headers("GET", path, cfg), timeout=60)
+    if r.status_code >= 400:
+        return {}
+    dev_by_id = {}
+    for c in r.json() or []:
+        if str(c.get("campaignTp", "")).upper() != "SHOPPING" or not c.get("nccCampaignId"):
+            continue
+        nm = str(c.get("name") or "").upper().replace(" ", "")
+        dev_by_id[c["nccCampaignId"]] = "PC" if nm.endswith("-PC") or nm.endswith("PC") else "MO"
+    out = {}
+    for cid, dev in dev_by_id.items():
+        path = "/stats"
+        r = requests.get(NAVER_API_BASE + path, headers=_naver_headers("GET", path, cfg), params={
+            "id": cid,
+            "fields": _json.dumps(["impCnt", "clkCnt", "salesAmt", "purchaseCcnt", "purchaseConvAmt"]),
+            "timeRange": _json.dumps({"since": str(start), "until": str(end)}),
+        }, timeout=60)
+        if r.status_code >= 400:
+            continue
+        o = out.setdefault(dev, {"imp": 0.0, "clk": 0.0, "cost": 0.0, "conv": 0.0, "rev": 0.0})
+        for it in (r.json() or {}).get("data", []):
+            o["imp"] += float(it.get("impCnt") or 0)
+            o["clk"] += float(it.get("clkCnt") or 0)
+            o["cost"] += float(it.get("salesAmt") or 0)
+            o["conv"] += float(it.get("purchaseCcnt") or 0)
+            o["rev"] += float(it.get("purchaseConvAmt") or 0)
+    return out
+
+
+def _cp_shopping_device_split(parent: dict, start: date, end: date) -> list:
+    """채널 성과 '네이버 쇼핑검색광고' 줄을 PC / MO 하위 줄로 — API 기기별 캠페인 **비중**으로
+    합계 줄을 나눈다(하위 줄 합 = 합계 줄). 회원가입은 스마트스토어라 없음."""
+    dev = fetch_naver_shopping_device(start, end) or {}
+    if not dev:
+        return []
+    out = []
+    for lbl in ("PC", "MO"):
+        d = dev.get(lbl) or {}
+        rec = {"매체": lbl, "_approx": False}
+        for k, key in (("imp", "노출"), ("clk", "클릭"), ("cost", "비용"), ("conv", "GA구매"), ("rev", "GA매출")):
+            tot = sum(float((dev.get(x) or {}).get(k) or 0) for x in ("PC", "MO"))
+            rec[key] = (float(parent.get(key) or 0) * float(d.get(k) or 0) / tot) if tot > 0 else 0.0
+        rec["회원가입"] = None
+        rec["GA ROAS"] = (rec["GA매출"] / rec["비용"] * 100) if rec["비용"] else None
+        out.append(rec)
+    return out
+
+
 def fetch_naver_search_spend(start: date, end: date) -> pd.DataFrame:
     """네이버 검색광고 일별 광고비.
 
@@ -15198,6 +15256,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 _gfa_approx = any(s.get("_approx") for s in _subs)
     except Exception as _e:
         st.caption(f"GFA PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
+    # 네이버 쇼핑검색광고도 PC/MO로 펼친다(검색광고 API 캠페인 '- PC'·'- MO', 2026-11-20 요청)
+    try:
+        _gs = view[view["매체"] == "네이버 쇼핑검색광고"]
+        if not _gs.empty:
+            _ss2 = _cp_shopping_device_split(_gs.iloc[0].to_dict(), start, min(end, kst_today()))
+            if _ss2:
+                _gfa_subs["네이버 쇼핑검색광고"] = _ss2
+    except Exception as _e:
+        st.caption(f"쇼핑검색 PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
     # GFA_외부몰도 자사몰처럼 PC/MO · 신규/리타겟으로 펼친다(업로드한 GFA 리포트 기준)
     try:
         _ge = view[view["매체"] == GFA_EXT_MEDIA]
@@ -15386,6 +15453,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
            '기기 표시가 없는 캠페인은 MO로 봅니다.'
            + (' <b>리포트가 이 기간 광고비와 달라(업로드 전 날짜 등) 기기별 광고비는 비중으로 나눈 값입니다.</b>'
               if _gfa_approx else '')
+           + (' 네이버 쇼핑검색광고의 PC / MO는 검색광고 API의 \'쇼핑검색 - PC\'·\'쇼핑검색 - MO\' 캠페인 비중으로 나눈 값입니다.'
+              if "네이버 쇼핑검색광고" in _gfa_subs else '')
            if _gfa_subs else '')
         + '</div>'
     )
