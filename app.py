@@ -15199,6 +15199,7 @@ def _cp_period_bar(prefix: str, src_label: str):
 def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None, budget=None):
     """채널 성과 — 매체별 노출·클릭·광고비(API) × 구매·매출(GA4) × 월예산(채널믹스)."""
     st.markdown(CP_CSS, unsafe_allow_html=True)
+    _busy_pill()
     _cre_note = _auto_sync_ga_creative()
     if _cre_note and "실패" in _cre_note:
         st.caption("⚠️ " + _cre_note)
@@ -18484,8 +18485,14 @@ def _busy_pill():
  d.addEventListener('click',function(e){
   if(e.target.closest('[data-testid="stButtonGroup"],[data-testid="stRadio"],[data-testid="stButton"],[data-testid="stSelectbox"]')){
    t0=Date.now(); p.style.display='block';}},true);
- setInterval(function(){ if(p.style.display==='block' && Date.now()-t0>800 && !running()) p.style.display='none';
-  if(p.style.display==='block' && Date.now()-t0>30000) p.style.display='none';},250);
+ // 조회 기간·날짜처럼 드롭다운/달력으로 바꾸는 값은 클릭 대상이 위 목록에 안 걸려 표시가 안 떴다.
+ // 그래서 다시 그리기가 0.4초 넘게 이어지면 어떤 원인이든 띄운다(2026-11-23).
+ var r0=0;
+ setInterval(function(){ var on=running();
+  if(on){ if(!r0) r0=Date.now(); if(Date.now()-r0>400){ p.style.display='block'; t0=t0||Date.now(); } }
+  else r0=0;
+  if(p.style.display==='block' && Date.now()-t0>800 && !on) { p.style.display='none'; t0=0; }
+  if(p.style.display==='block' && t0 && Date.now()-t0>60000) { p.style.display='none'; t0=0; } },200);
 })();</script>""", height=0)
 
 
