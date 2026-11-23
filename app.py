@@ -21555,17 +21555,51 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     # 탭을 눌러도 이미 다 그려져 있어 빨라 보였지만, 화면을 열거나 필터를 바꿀 때마다 14개를
     # 다 다시 계산해서 몇십 초씩 걸렸다. 이제 **고른 매체 하나만** 계산·표시한다.
     # (엑셀 내보내기를 누를 때만 전체 매체를 한 번 계산한다)
-    _GC_TAB_KEY = "gc_media_tab"
-    if st.session_state.get(_GC_TAB_KEY) not in tab_labels:
-        st.session_state[_GC_TAB_KEY] = tab_labels[0]
+    # GFA는 PC/MO가 따로 도는 매체라 안에서는 탭 두 개로 계산하지만, 화면 버튼은 하나로 합치고
+    # 그 아래 '디바이스' 줄(PC / MO)로 고르게 한다(2026-11-23 요청). 엑셀은 그대로 PC·MO 시트 따로.
+    _GC_TAB_KEY = "gc_media_tab_v2"
+    _dev_groups = {"네이버 GFA (자사몰)": [(GFA_PC_OWN, "PC"), (GFA_MO_OWN, "MO")],
+                   "네이버 GFA (외부몰)": [(GFA_PC_EXT, "PC"), (GFA_MO_EXT, "MO"),
+                                         ("네이버 GFA (외부몰)", "기기 미구분")]}
+    _dev_of = {}                           # 실제 탭 → (화면 버튼, 디바이스)
+    for _g, _ms in _dev_groups.items():
+        for _t, _dv in _ms:
+            if _t in tab_labels:
+                _dev_of[_t] = (_g, _dv)
+    disp_labels = []
+    for _t in tab_labels:
+        _lb = _dev_of[_t][0] if _t in _dev_of else _t
+        if _lb not in disp_labels:
+            disp_labels.append(_lb)
+    _old_tab = st.session_state.get("gc_media_tab")          # 예전 키(PC/MO 따로)에서 옮겨 온다
+    if _GC_TAB_KEY not in st.session_state and _old_tab in _dev_of:
+        st.session_state[_GC_TAB_KEY] = _dev_of[_old_tab][0]
+        st.session_state[f"gc_device_{_dev_of[_old_tab][0]}"] = _dev_of[_old_tab][1]
+    elif _GC_TAB_KEY not in st.session_state and _old_tab in disp_labels:
+        st.session_state[_GC_TAB_KEY] = _old_tab
+    if st.session_state.get(_GC_TAB_KEY) not in disp_labels:
+        st.session_state[_GC_TAB_KEY] = disp_labels[0]
     if hasattr(st, "segmented_control"):
-        _sel_tab = st.segmented_control("매체", tab_labels, key=_GC_TAB_KEY,
-                                        selection_mode="single", label_visibility="collapsed")
+        _sel_disp = st.segmented_control("매체", disp_labels, key=_GC_TAB_KEY,
+                                         selection_mode="single", label_visibility="collapsed")
     else:
-        _sel_tab = st.radio("매체", tab_labels, key=_GC_TAB_KEY, horizontal=True,
-                            label_visibility="collapsed")
-    if _sel_tab not in tab_labels:          # 같은 버튼을 다시 눌러 선택이 풀린 경우
-        _sel_tab = tab_labels[0]
+        _sel_disp = st.radio("매체", disp_labels, key=_GC_TAB_KEY, horizontal=True,
+                             label_visibility="collapsed")
+    if _sel_disp not in disp_labels:        # 같은 버튼을 다시 눌러 선택이 풀린 경우
+        _sel_disp = disp_labels[0]
+    _members = [(t, dv) for t, (g, dv) in _dev_of.items() if g == _sel_disp]
+    _members.sort(key=lambda x: ["PC", "MO", "기기 미구분"].index(x[1]))
+    if _members:
+        _dvs = [dv for _, dv in _members]
+        _sel_dev = _dvs[0]
+        if len(_dvs) >= 2:
+            _dc1, _dc2 = st.columns([0.09, 0.91])
+            _dc1.markdown('<div class="gc-flt-lbl">디바이스</div>', unsafe_allow_html=True)
+            with _dc2:
+                _sel_dev = _gc_choice("디바이스", _dvs, key=f"gc_device_{_sel_disp}")
+        _sel_tab = dict((dv, t) for t, dv in _members).get(_sel_dev, _members[0][0])
+    else:
+        _sel_tab = _sel_disp if _sel_disp in tab_labels else tab_labels[0]
     _gc_render_all = st.session_state.get("gc_xlsx_full_pending") is not None
 
     from contextlib import contextmanager as _ctxmgr
