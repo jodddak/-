@@ -12446,6 +12446,170 @@ def fetch_kakao_moment_creative(start: date, end: date) -> pd.DataFrame:
     return _creative_frame(rows)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_kakao_moment_creative_device(start: date, end: date) -> dict:
+    """카카오모먼트 **소재명별** 기간 합계를 PC / MO로. {소재명: {"PC": [imp, clk, cost], "MO": [...]}}.
+    소재 보고서(creatives/report)에 dimension=DEVICE_TYPE를 걸어 받는다(소재별 성과 '디바이스' 줄용,
+    2026-11-23). PC가 아닌 값(ANDROID·IOS 등)은 전부 MO."""
+    cfg = _secrets_section("kakao_moment")
+    if not cfg or not cfg.get("ad_account_id"):
+        return {}
+    import requests, time
+    acct = str(cfg["ad_account_id"]).strip()
+    sess = requests.Session()
+    sess.headers.update({"Authorization": f"Bearer {_kakao_access_token(cfg)}", "adAccountId": acct})
+    info = {}
+    for cp in _kakao_list(sess, "campaigns"):
+        if cp.get("id") is None:
+            continue
+        time.sleep(0.4)
+        for ag in _kakao_list(sess, "adGroups", {"campaignId": cp["id"]}):
+            if ag.get("id") is None:
+                continue
+            time.sleep(0.4)
+            for cr in _kakao_list(sess, "creatives", {"adGroupId": ag["id"]}):
+                if cr.get("id") is not None:
+                    info[str(cr["id"])] = str(cr.get("name") or cr["id"]).strip()
+    out = {}
+    ids, first = list(info), True
+    for i in range(0, len(ids), 100):
+        cs = start
+        while cs <= end:
+            ce = min(cs + timedelta(days=KAKAO_MAX_RANGE_DAYS - 1), end)
+            if not first:
+                time.sleep(KAKAO_RATE_LIMIT_SEC)
+            first = False
+            r = sess.get(f"{KAKAO_API_BASE}/creatives/report", params={
+                "creativeId": ",".join(ids[i:i + 100]),
+                "start": cs.strftime("%Y%m%d"), "end": ce.strftime("%Y%m%d"),
+                "dimension": "DEVICE_TYPE", "metricsGroup": "BASIC"}, timeout=90)
+            if r.status_code >= 400:
+                raise RuntimeError(f"카카오 소재 디바이스 보고서 실패({r.status_code}): {r.text[:200]}")
+            for d0 in (r.json().get("data") or []):
+                dims = d0.get("dimensions") or {}
+                crid = str(dims.get("creative_id") or dims.get("creativeId") or d0.get("creativeId") or "")
+                if crid not in info:
+                    continue
+                dv = str(dims.get("device_type") or dims.get("deviceType") or "").upper()
+                k = "PC" if "PC" in dv else "MO"
+                m = d0.get("metrics") or {}
+                o = out.setdefault(info[crid], {"PC": [0.0, 0.0, 0.0], "MO": [0.0, 0.0, 0.0]})[k]
+                o[0] += float(m.get("imp") or 0)
+                o[1] += float(m.get("click") or 0)
+                o[2] += float(m.get("cost") or 0)
+            cs = ce + timedelta(days=1)
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga4_creative_device(start: date, end: date, source_word: str) -> dict:
+    """GA4 [캠페인 × utm_content × 기기] 기간 합계(소스/매체에 source_word가 든 줄만).
+    {(campaign, content): {"PC": [세션, 구매, 매출, 가입], "MO": [...]}}."""
+    client, err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return {}
+    from google.analytics.data_v1beta.types import (DateRange, Dimension, Metric, RunReportRequest,
+                                                    Filter, FilterExpression, FilterExpressionList)
+    dims = [Dimension(name=x) for x in ("sessionCampaignName", "sessionManualAdContent", "deviceCategory")]
+    src = FilterExpression(filter=Filter(field_name="sessionSourceMedium", string_filter=Filter.StringFilter(
+        value=source_word, match_type=Filter.StringFilter.MatchType.CONTAINS, case_sensitive=False)))
+    rng = [DateRange(start_date=str(start), end_date=str(end))]
+    out = {}
+
+    def _add(resp, idxs):
+        for r in resp.rows:
+            dv = [x.value for x in r.dimension_values]
+            k = "PC" if dv[2].lower() == "desktop" else "MO"
+            o = out.setdefault((dv[0], dv[1]), {"PC": [0.0] * 4, "MO": [0.0] * 4})[k]
+            for j, mi in zip(idxs, range(len(idxs))):
+                o[j] += float(r.metric_values[mi].value or 0)
+
+    _add(client.run_report(RunReportRequest(
+        property=f"properties/{prop}", date_ranges=rng, dimensions=dims, dimension_filter=src,
+        metrics=[Metric(name="sessions"), Metric(name="transactions"), Metric(name="purchaseRevenue")],
+        limit=100_000)), [0, 1, 2])
+    try:
+        both = FilterExpression(and_group=FilterExpressionList(expressions=[src, _ga4_signup_filter()]))
+        _add(client.run_report(RunReportRequest(
+            property=f"properties/{prop}", date_ranges=rng, dimensions=dims, dimension_filter=both,
+            metrics=[Metric(name="eventCount")], limit=100_000)), [3])
+    except Exception:
+        pass
+    return out
+
+
+def _gc_kakao_device_scale(ad_creative: pd.DataFrame, d: pd.DataFrame, start: date, end: date, dev: str):
+    """소재별 성과 카카오모먼트를 한 기기(PC/MO)만 남게 줄인다 — 소재마다 그 기기 몫(비중)만 곱한다.
+    매체 쪽은 카카오 소재 디바이스 보고서, GA 쪽은 GA4 기기(데스크톱=PC, 모바일·태블릿=MO) 비중.
+    소재 비중을 못 찾으면 계정 전체 기기 비중을 쓴다. 돌려주는 값: (ad_creative, d, 메모)."""
+    note = []
+    acct = {}
+    try:
+        acct = fetch_kakao_moment_device(start, end) or {}
+    except Exception as e:
+        note.append(f"계정 디바이스 비중 실패: {str(e)[:80]}")
+
+    def _acct_share(k):
+        tot = sum(float((acct.get(x) or {}).get(k) or 0) for x in ("PC", "MO"))
+        return float((acct.get(dev) or {}).get(k) or 0) / tot if tot > 0 else 0.5
+
+    if ad_creative is not None and not ad_creative.empty and "channel" in ad_creative.columns:
+        try:
+            cdev = fetch_kakao_moment_creative_device(start, end) or {}
+        except Exception as e:
+            cdev = {}
+            note.append(f"소재 디바이스 보고서 실패 — 계정 비중으로 대신: {str(e)[:80]}")
+        a = ad_creative.copy()
+        _m = a["channel"].map(_gc_channel) == KAKAO_MOMENT_CHANNEL
+        if _m.any():
+            for j, (col, k) in enumerate((("impressions", "imp"), ("clicks", "clk"), ("cost_incl_vat", "cost"))):
+                if col not in a.columns:
+                    continue
+                def _sh(nm, j=j, k=k):
+                    v = cdev.get(str(nm).strip())
+                    if v:
+                        tot = v["PC"][j] + v["MO"][j]
+                        if tot > 0:
+                            return v[dev][j] / tot
+                    return _acct_share(k)
+                sh = a.loc[_m, "creative"].map(_sh)
+                a.loc[_m, col] = pd.to_numeric(a.loc[_m, col], errors="coerce").fillna(0) * sh
+            ad_creative = a
+    if d is not None and not d.empty and "source_medium" in d.columns:
+        try:
+            gdev = fetch_ga4_creative_device(start, end, "kakaomoment") or {}
+        except Exception as e:
+            gdev = {}
+            note.append(f"GA4 기기 조회 실패: {str(e)[:80]}")
+        g = d.copy()
+        _m = g["source_medium"].astype(str).str.lower().str.contains("kakaomoment", na=False)
+        if _m.any():
+            _tot = [0.0] * 4
+            _dv = [0.0] * 4
+            for v in gdev.values():
+                for j in range(4):
+                    _tot[j] += v["PC"][j] + v["MO"][j]
+                    _dv[j] += v[dev][j]
+            for j, col in enumerate(("sessions", "conversions", "revenue", "signups")):
+                if col not in g.columns:
+                    continue
+                fb = _dv[j] / _tot[j] if _tot[j] > 0 else (_dv[0] / _tot[0] if _tot[0] > 0 else 0.5)
+                def _gs(cp, ct, j=j, fb=fb):
+                    v = gdev.get((str(cp), str(ct)))
+                    if v:
+                        tot = v["PC"][j] + v["MO"][j]
+                        if tot > 0:
+                            return v[dev][j] / tot
+                        if j and (v["PC"][0] + v["MO"][0]) > 0:      # 구매가 없으면 세션 비중
+                            return v[dev][0] / (v["PC"][0] + v["MO"][0])
+                    return fb
+                sh = [_gs(cp, ct) for cp, ct in zip(g.loc[_m, "campaign"], g.loc[_m, "creative"])]
+                g.loc[_m, col] = pd.to_numeric(g.loc[_m, col], errors="coerce").fillna(0) * pd.Series(sh, index=g.index[_m])
+            d = g
+    return ad_creative, d, note
+
+
 # GFA는 API가 없어 빠져 있다(리포트 업로드로 채운다).
 AD_CREATIVE_FETCHERS = [
     ("카카오모먼트", fetch_kakao_moment_creative),
@@ -21179,6 +21343,19 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             st.session_state["_gc_prep_memo"] = (_prep_key, ad_creative.copy(), d.copy())
         except Exception:
             pass
+    # 카카오모먼트 '디바이스' 줄에서 PC/MO를 골랐으면 카카오 줄만 그 기기 몫으로 줄인다(2026-11-23).
+    # 버튼 값은 위젯이 그려지기 전에도 session_state에 남아 있어 여기서 먼저 읽는다.
+    _gc_kdev = (st.session_state.get(f"gc_device_{KAKAO_MOMENT_CHANNEL}")
+                if st.session_state.get("gc_media_tab_v2") == KAKAO_MOMENT_CHANNEL else None)
+    _gc_kdev = _gc_kdev if _gc_kdev in ("PC", "MO") else None
+    if _gc_kdev:
+        try:
+            ad_creative, d, _kd_note = _gc_kakao_device_scale(ad_creative, d, start, end, _gc_kdev)
+            for _n in _kd_note:
+                st.caption("⚠️ 카카오모먼트 디바이스: " + _n)
+        except Exception as _e:
+            st.caption(f"⚠️ 카카오모먼트 {_gc_kdev}만 나누지 못해 전체로 보여줍니다 — {str(_e)[:150]}")
+            _gc_kdev = None
     _in_period = d[(d["report_date"] >= start) & (d["report_date"] <= end)]
 
     # ── 소재별 실적(매체쪽) ── 탭 목록을 정하기 전에 먼저 읽는다.
@@ -21600,6 +21777,15 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
         _sel_tab = dict((dv, t) for t, dv in _members).get(_sel_dev, _members[0][0])
     else:
         _sel_tab = _sel_disp if _sel_disp in tab_labels else tab_labels[0]
+        if _sel_tab == KAKAO_MOMENT_CHANNEL:
+            # 카카오모먼트는 캠페인이 '모든 디바이스'라 탭을 못 나눈다 — 같은 탭에서 기기 몫만 남긴다
+            _dc1, _dc2 = st.columns([0.09, 0.91])
+            _dc1.markdown('<div class="gc-flt-lbl">디바이스</div>', unsafe_allow_html=True)
+            with _dc2:
+                _gc_choice("디바이스", ["전체", "PC", "MO"], key=f"gc_device_{KAKAO_MOMENT_CHANNEL}")
+            if _gc_kdev:
+                st.caption(f"📱 카카오모먼트 **{_gc_kdev}** 몫만 보는 중 — 노출·클릭·광고비는 카카오 소재 디바이스 보고서, "
+                           "GA 구매·매출·회원가입은 GA4 기기(데스크톱=PC, 모바일·태블릿=MO) 비중으로 소재마다 나눈 값입니다.")
     _gc_render_all = st.session_state.get("gc_xlsx_full_pending") is not None
 
     from contextlib import contextmanager as _ctxmgr
@@ -23050,7 +23236,8 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
             # 회원가입 TOTAL은 채널 성과와 같은 GA 채널 표 값으로(필터 없을 때, 매체가 1:1로 맞는 탭만).
             # 소재 GA 표는 차원이 많아 GA4가 일부를 (other)로 뭉쳐 몇 건씩 모자랐다.
             if (seg == GC_SEG_ALL and item == GC_ITEM_ALL and detail_target == "전체"
-                    and manager_campaign == "전체" and label in _GC_TAB_MEDIA):
+                    and manager_campaign == "전체" and label in _GC_TAB_MEDIA
+                    and not (_gc_kdev and label == KAKAO_MOMENT_CHANNEL)):
                 try:
                     if "_cp_ga_for_gc" not in locals() or _cp_ga_for_gc is None:
                         _cp_ga_for_gc = cp_ga_map_adjusted(load_table("ga_channel_daily"),
