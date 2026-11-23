@@ -10727,6 +10727,115 @@ def fetch_kakao_moment_spend(start: date, end: date) -> pd.DataFrame:
         impressions=("impressions", "sum"), clicks=("clicks", "sum"))
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_kakao_moment_device(start: date, end: date) -> dict:
+    """카카오모먼트 기간 합계를 **디바이스별**로. {"PC": {imp, clk, cost}, "MO": {...}, "_raw": {원래 값: cost}}.
+    캠페인이 '가능한 모든 디바이스'라 캠페인으로는 못 가르고, 보고서 API의 dimension=DEVICE_TYPE로 받는다
+    (2026-11-23 요청). PC가 아닌 값(ANDROID·IOS·MOBILE 등)은 전부 MO. cost는 VAT 제외라 1.1을 곱한다."""
+    cfg = _secrets_section("kakao_moment")
+    if not cfg or not cfg.get("ad_account_id"):
+        return {}
+    import requests, time
+    token = _kakao_access_token(cfg)
+    acct = str(cfg["ad_account_id"]).strip()
+    headers = {"Authorization": f"Bearer {token}", "adAccountId": acct}
+    out, raw = {}, {}
+    cs, first = start, True
+    while cs <= end:
+        ce = min(cs + timedelta(days=KAKAO_MAX_RANGE_DAYS - 1), end)
+        if not first:
+            time.sleep(KAKAO_RATE_LIMIT_SEC)
+        first = False
+        r = requests.get(KAKAO_REPORT_URL, headers=headers, params={
+            "adAccountId": acct, "start": cs.strftime("%Y%m%d"), "end": ce.strftime("%Y%m%d"),
+            "level": "AD_ACCOUNT", "dimension": "DEVICE_TYPE", "metricsGroup": "BASIC",
+        }, timeout=90)
+        if r.status_code >= 400:
+            raise RuntimeError(f"카카오 디바이스 조회 실패({r.status_code}): {r.text[:300]}")
+        payload = r.json()
+        if payload.get("code") not in (200, None):
+            raise RuntimeError(f"카카오 오류({payload.get('code')}): {payload.get('message')}")
+        for d in payload.get("data", []):
+            m = d.get("metrics") or {}
+            dims = d.get("dimensions") or {}
+            dv = str(dims.get("device_type") or dims.get("deviceType") or d.get("deviceType")
+                     or d.get("dimension") or "").upper()
+            raw[dv] = raw.get(dv, 0.0) + float(m.get("cost") or 0) * 1.1
+            k = "PC" if "PC" in dv else "MO"
+            o = out.setdefault(k, {"imp": 0.0, "clk": 0.0, "cost": 0.0})
+            o["imp"] += float(m.get("imp") or 0)
+            o["clk"] += float(m.get("click") or 0)
+            o["cost"] += float(m.get("cost") or 0) * 1.1
+        cs = ce + timedelta(days=1)
+    if out:
+        out["_raw"] = raw
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ga4_device_by_source(start: date, end: date) -> pd.DataFrame:
+    """GA4 [세션 소스/매체 × 기기] 구매·매출·회원가입 기간 합계 — 채널 성과 PC/MO 하위 줄용."""
+    client, err = get_ga4_client()
+    prop = _ga4_property_id()
+    if client is None or not prop:
+        return pd.DataFrame()
+    from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest
+    dims = [Dimension(name="sessionSourceMedium"), Dimension(name="deviceCategory")]
+    rng = [DateRange(start_date=str(start), end_date=str(end))]
+    resp = client.run_report(RunReportRequest(
+        property=f"properties/{prop}", date_ranges=rng, dimensions=dims,
+        metrics=[Metric(name="transactions"), Metric(name="purchaseRevenue")], limit=100_000))
+    rows = [{"source_medium": r.dimension_values[0].value, "device": r.dimension_values[1].value,
+             "conversions": float(r.metric_values[0].value or 0),
+             "revenue": float(r.metric_values[1].value or 0), "signups": 0.0} for r in resp.rows]
+    try:
+        resp = client.run_report(RunReportRequest(
+            property=f"properties/{prop}", date_ranges=rng, dimensions=dims,
+            metrics=[Metric(name="eventCount")], dimension_filter=_ga4_signup_filter(), limit=100_000))
+        rows += [{"source_medium": r.dimension_values[0].value, "device": r.dimension_values[1].value,
+                  "conversions": 0.0, "revenue": 0.0, "signups": float(r.metric_values[0].value or 0)}
+                 for r in resp.rows]
+    except Exception:
+        pass
+    return pd.DataFrame(rows)
+
+
+def _cp_kakao_device_split(master: pd.DataFrame, parent: dict, start: date, end: date) -> list:
+    """채널 성과 '카카오모먼트' 줄을 PC / MO로 — 광고비 쪽은 카카오 API 디바이스 비중,
+    GA 구매·매출·회원가입은 GA4 기기(desktop=PC, mobile·tablet=MO) 비중으로 합계 줄을 나눈다."""
+    dev = fetch_kakao_moment_device(start, end) or {}
+    ga = {"PC": [0.0, 0.0, 0.0], "MO": [0.0, 0.0, 0.0]}
+    ga_ok = False
+    try:
+        g = fetch_ga4_device_by_source(start, end)
+    except Exception:
+        g = pd.DataFrame()
+    if g is not None and not g.empty:
+        match = _cp_media_matcher(master)
+        g = g[g["source_medium"].map(match) == parent.get("매체")]
+        for _, r in g.iterrows():
+            k = "PC" if str(r["device"]).lower() == "desktop" else "MO"
+            ga[k][0] += r["conversions"]; ga[k][1] += r["revenue"]; ga[k][2] += r["signups"]
+            ga_ok = True
+    if not any(k in dev for k in ("PC", "MO")) and not ga_ok:
+        return []
+    out = []
+    for lbl in ("PC", "MO"):
+        rec = {"매체": lbl, "_approx": False}
+        for k, key in (("imp", "노출"), ("clk", "클릭"), ("cost", "비용")):
+            tot = sum(float((dev.get(x) or {}).get(k) or 0) for x in ("PC", "MO"))
+            rec[key] = (float(parent.get(key) or 0) * float((dev.get(lbl) or {}).get(k) or 0) / tot
+                        if tot > 0 else None)
+        for i, key in ((0, "GA구매"), (1, "GA매출"), (2, "회원가입")):
+            tot = ga["PC"][i] + ga["MO"][i]
+            rec[key] = (float(parent.get(key) or 0) * ga[lbl][i] / tot if tot > 0
+                        else (0.0 if ga_ok else None))
+        cost = rec["비용"]
+        rec["GA ROAS"] = (rec["GA매출"] / cost * 100) if (cost and rec["GA매출"] is not None) else None
+        out.append(rec)
+    return out
+
+
 # 크리테오 Marketing Solutions API — 일별 광고비.
 #   토큰: POST https://api.criteo.com/oauth2/token (grant_type=client_credentials)
 #   통계: POST https://api.criteo.com/{version}/statistics/report
@@ -15374,6 +15483,15 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
                 _gfa_approx = any(s.get("_approx") for s in _subs)
     except Exception as _e:
         st.caption(f"GFA PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:120]}")
+    # 카카오모먼트도 PC/MO로 펼친다(카카오 API DEVICE_TYPE + GA4 기기, 2026-11-23 요청)
+    try:
+        _gk = view[view["매체"] == KAKAO_MOMENT_CHANNEL]
+        if not _gk.empty:
+            _ks = _cp_kakao_device_split(mst, _gk.iloc[0].to_dict(), start, min(end, kst_today()))
+            if _ks:
+                _gfa_subs[KAKAO_MOMENT_CHANNEL] = _ks
+    except Exception as _e:
+        st.caption(f"카카오모먼트 PC/MO 하위 줄을 못 만들었습니다 — {str(_e)[:200]}")
     # 네이버 쇼핑검색광고도 PC/MO로 펼친다(검색광고 API 캠페인 '- PC'·'- MO', 2026-11-20 요청)
     try:
         _gs = view[view["매체"] == "네이버 쇼핑검색광고"]
@@ -15573,6 +15691,8 @@ def render_channel_performance_page(ad_spend, ga_daily, channel_mix, master=None
               if _gfa_approx else '')
            + (' 네이버 쇼핑검색광고의 PC / MO는 검색광고 API의 \'쇼핑검색 - PC\'·\'쇼핑검색 - MO\' 캠페인 비중으로 나눈 값입니다.'
               if "네이버 쇼핑검색광고" in _gfa_subs else '')
+           + (' 카카오모먼트의 PC / MO는 광고비를 카카오 API 디바이스(PC 외는 MO), GA 구매·매출을 GA4 기기(데스크톱=PC, 모바일·태블릿=MO) 비중으로 나눈 값입니다.'
+              if KAKAO_MOMENT_CHANNEL in _gfa_subs else '')
            if _gfa_subs else '')
         + '</div>'
     )
