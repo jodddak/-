@@ -26070,6 +26070,11 @@ def _inject_ui_zoom():
         # Plotly 차트·표(st.dataframe)도 '보이는 폭'으로 크기를 정해서 75% 폭으로 그려진다 →
         # 그 칸에만 배율을 되돌려(1/배율) 칸 폭을 꽉 채우게 한다.
         f'[data-testid="stPlotlyChart"],[data-testid="stDataFrame"]{{zoom:{1 / UI_ZOOM:.6f};}}'
+        # 드롭다운(조회 기간 등)·달력 팝업은 화면 좌표(px)로 위치를 잡는데, html 배율이 그 좌표에 한 번 더
+        # 곱해져 입력칸보다 왼쪽 위(75% 지점)에 떴다 → 칸을 덮어서 누르자마자 엉뚱한 항목이 골라지고
+        # 아래 탭 줄까지 가려 '잘 안 눌린다'(2026-11-23). 팝업 틀만 배율을 되돌리고 안쪽은 다시 줄인다.
+        f'[data-testid="stSelectboxVirtualDropdown"],[data-floating-ui-portal] > div{{zoom:{1 / UI_ZOOM:.6f};}}'
+        f'[data-testid="stSelectboxVirtualDropdown"] > div,[data-floating-ui-portal] > div > *{{zoom:{UI_ZOOM};}}'
         "</style>",
         unsafe_allow_html=True,
     )
