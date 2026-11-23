@@ -12446,7 +12446,7 @@ def fetch_kakao_moment_creative(start: date, end: date) -> pd.DataFrame:
     return _creative_frame(rows)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=21600, show_spinner=False)
 def fetch_kakao_moment_creative_device(start: date, end: date) -> dict:
     """카카오모먼트 **소재명별** 기간 합계를 PC / MO로. {소재명: {"PC": [imp, clk, cost], "MO": [...]}}.
     소재 보고서(creatives/report)에 dimension=DEVICE_TYPE를 걸어 받는다(소재별 성과 '디바이스' 줄용,
@@ -21352,7 +21352,9 @@ def render_ga_creative_page(cre: pd.DataFrame, ad_spend: pd.DataFrame = None,
     _gc_kdev = _gc_kdev if _gc_kdev in ("PC", "MO") else None
     if _gc_kdev:
         try:
-            ad_creative, d, _kd_note = _gc_kakao_device_scale(ad_creative, d, start, end, _gc_kdev)
+            with st.spinner(f"카카오모먼트 {_gc_kdev} 소재 디바이스 보고서를 받는 중… "
+                            "(카카오 API 호출 제한 때문에 처음 한 번은 1~3분, 이후 6시간은 바로 나옵니다)"):
+                ad_creative, d, _kd_note = _gc_kakao_device_scale(ad_creative, d, start, end, _gc_kdev)
             for _n in _kd_note:
                 st.caption("⚠️ 카카오모먼트 디바이스: " + _n)
         except Exception as _e:
