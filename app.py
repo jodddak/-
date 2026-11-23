@@ -15169,12 +15169,23 @@ def _cp_period_bar(prefix: str, src_label: str):
                                   ["이번 달", "오늘", "어제", "최근 7일", "최근 30일", "지난 달", "직접 지정"],
                                   key=f"{prefix}_preset")
         d0, d1 = _cp_range_for(preset)
+        # 날짜 칸은 프리셋마다 key를 따로 두면, 한 번 만든 칸이 세션에 남아 **날이 바뀌어도 옛 날짜**를
+        # 보여줬다(11/23에 '최근 7일'이 11/13~11/22). 이제 칸은 하나로 두고, 프리셋을 바꾸거나 날짜가
+        # 바뀌어 프리셋이 가리키는 기간이 달라지면 그때만 새로 채운다(손으로 고친 날짜는 그대로 둔다).
+        # '직접 지정'으로 바꿀 때는 보던 날짜를 그대로 둔다.
+        _sk, _ek, _gk = f"{prefix}_s_v3", f"{prefix}_e_v3", f"{prefix}_sig_v3"
+        _sig = (preset, d0, d1)
+        if st.session_state.get(_gk) != _sig:
+            _prev = st.session_state.get(_gk)
+            if not (preset == "직접 지정" and _prev and _sk in st.session_state):
+                st.session_state[_sk], st.session_state[_ek] = d0, d1
+            st.session_state[_gk] = _sig
         with b2:
-            start = st.date_input("시작일", d0, key=f"{prefix}_s_{preset}", format="YYYY-MM-DD")
+            start = st.date_input("시작일", key=_sk, format="YYYY-MM-DD")
         with b3:
             st.markdown('<div class="cp-arrow2">→</div>', unsafe_allow_html=True)
         with b4:
-            end = st.date_input("종료일", d1, key=f"{prefix}_e_{preset}", format="YYYY-MM-DD")
+            end = st.date_input("종료일", key=_ek, format="YYYY-MM-DD")
         with b5:
             if st.button("조회", key=f"{prefix}_apply", use_container_width=True):
                 st.cache_data.clear()
