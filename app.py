@@ -13984,6 +13984,19 @@ CP_STEP = 0.10                     # 증액·감액 제안은 한 번에 10%씩 
 CP_SPLIT_GAP = 1.15   # 두 쪽 ROAS가 이 배수 이상 벌어져야 '어느 쪽이 낫다'고 말한다
 
 
+def _ko_josa(word, pair):
+    """받침에 맞는 조사 — pair=('은','는') / ('으로','로') / ('이','가')."""
+    w = str(word or "").strip()
+    ch = w[-1] if w else ""
+    if "가" <= ch <= "힣":
+        jong = (ord(ch) - 0xAC00) % 28
+        if pair == ("으로", "로"):
+            return w + ("로" if jong in (0, 8) else "으로")
+        return w + (pair[0] if jong else pair[1])
+    # 영문(PC·MO) — 읽는 소리 기준: 피씨·엠오 → 받침 없음
+    return w + pair[1]
+
+
 def _cp_split_parts(subs):
     """하위 줄(PC/MO · 신규/리타겟) 중 비교할 수 있는 본 줄만 — '구분 없음'·'집계 대기' 등은 뺀다."""
     out = []
@@ -14016,9 +14029,12 @@ def _cp_split_compare(subs, what):
     txt += f' <span style="color:#6B7A3A">· 광고비 {big[0]} {big[1] / tot * 100:.0f}%</span>'
     warn = ""
     if gap and lo[3] < OPS_KPI_ROAS_LOW:
-        warn = f'{lo[0]}는 목표 하단({OPS_KPI_ROAS_LOW:.0f}%) 미달'
-    return {"txt": txt, "hi": hi[0], "lo": lo[0], "gap": gap, "warn": warn,
-            "lo_heavy": gap and big[0] == lo[0]}
+        warn = f'{_ko_josa(lo[0], ("은", "는"))} 목표 하단({OPS_KPI_ROAS_LOW:.0f}%) 미달'
+    # 신규 vs 리타겟 — 리타겟이 높은 건 당연하다(이미 방문한 사람). 신규를 ROAS로만 깎으면
+    # 리타겟 모수가 마른다. 그래서 '옮겨라' 대신 '리타겟 여유분 테스트 / 신규는 점검'으로 말한다.
+    nr = gap and {hi[0], lo[0]} >= {"신규"} and any("리타" in x for x in (hi[0], lo[0])) and "리타" in hi[0]
+    return {"txt": txt, "hi": hi[0], "lo": lo[0], "gap": gap, "warn": warn, "nr": nr,
+            "lo_heavy": gap and big[0] == lo[0] and not nr}
 
 
 def _cp_recommendations(df: pd.DataFrame, start: date, end: date,
@@ -14090,6 +14106,9 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date,
         sg = _cp_split_compare(seg_subs.get(m), "구성" if m in CP_SEG_CUSTOM else "타겟")
         wins = [x["hi"] for x in (dv, sg) if x and x["gap"]]
         loses = [x["lo"] for x in (dv, sg) if x and x["gap"]]
+        # 옮길 대상은 기기·구성(크리테오)만 — 신규→리타겟은 옮기지 않는다(위 _cp_split_compare 참고)
+        mv = [x for x in (dv, sg) if x and x["gap"] and not x["nr"]]
+        nr = sg if (sg and sg["nr"]) else None
         if kind == "up":
             tag, cls = "증액 검토", "up"
             act = (f"예산 <b>+{CP_STEP*100:.0f}%</b> (일 +{daily:,.0f}원)"
@@ -14101,14 +14120,18 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date,
                    + (f" — <b>{'·'.join(loses)}</b>부터 줄이세요" if loses else " 또는 소재·타겟 점검 먼저"))
         else:
             tag, cls = "유지", "keep"
-            if wins:
-                act = (f"총액은 유지하고 <b>{'·'.join(loses)} → {'·'.join(wins)}</b>로 비중 옮겨보기")
-            else:
-                act = "현 수준 유지"
+            _acts = []
+            for x in mv:
+                _acts.append(f"총액은 유지하고 <b>{x['lo']} → {_ko_josa(x['hi'], ('으로', '로'))}</b> 비중 옮겨보기")
+            if nr:
+                _acts.append("리타겟 노출 여유가 있으면 <b>리타겟 +10%</b> 테스트"
+                             + (" · 신규는 소재·타겟 점검" if nr["warn"] else
+                                " (신규는 모수 확보용이라 ROAS만 보고 줄이진 마세요)"))
+            act = " / ".join(_acts) if _acts else "현 수준 유지"
         small = ('  <span class="cp-tag hold">표본 작음</span>'
                  if 0 < cost < CP_SMALL_SAMPLE_SPEND else '')
         ext = (' <span style="color:#6B7A3A">(매체 신고 매출)</span>' if m in _ext_names else '')
-        detail = " · ".join(x["txt"] for x in (dv, sg) if x)
+        detail = " &nbsp;|&nbsp; ".join(x["txt"] for x in (dv, sg) if x)
         warns = [x["warn"] for x in (dv, sg) if x and x["warn"]]
         heavy = [x for x in (dv, sg) if x and x["lo_heavy"]]
         note = ""
