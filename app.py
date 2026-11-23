@@ -13981,7 +13981,48 @@ CP_SMALL_SAMPLE_SPEND = 100_000     # 이보다 적으면 판단은 하되 '표�
 CP_STEP = 0.10                     # 증액·감액 제안은 한 번에 10%씩 (급격한 이동 금지)
 
 
-def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
+CP_SPLIT_GAP = 1.15   # 두 쪽 ROAS가 이 배수 이상 벌어져야 '어느 쪽이 낫다'고 말한다
+
+
+def _cp_split_parts(subs):
+    """하위 줄(PC/MO · 신규/리타겟) 중 비교할 수 있는 본 줄만 — '구분 없음'·'집계 대기' 등은 뺀다."""
+    out = []
+    for x in subs or []:
+        nm = str(x.get("매체") or "")
+        if any(w in nm for w in ("구분 없음", "집계 대기", "기타")):
+            continue
+        cost = float(x.get("비용") or 0)
+        rev = x.get("GA매출")
+        if cost < CP_MIN_SPEND_FOR_JUDGE or rev is None:
+            continue
+        out.append((nm, cost, float(rev), float(rev) / cost * 100))
+    return out
+
+
+def _cp_split_compare(subs, what):
+    """두 쪽 이상을 ROAS로 비교한 문장과 (나은 쪽, 못한 쪽, 차이가 의미 있나)."""
+    parts = _cp_split_parts(subs)
+    if len(parts) < 2:
+        return None
+    parts.sort(key=lambda x: -x[3])
+    hi, lo = parts[0], parts[-1]
+    tot = sum(p[1] for p in parts) or 1.0
+    big = max(parts, key=lambda x: x[1])
+    gap = (hi[3] >= lo[3] * CP_SPLIT_GAP) if lo[3] > 0 else hi[3] > 0
+    if gap:
+        txt = (f'{what} <b>{hi[0]} {hi[3]:,.0f}%</b> &gt; {lo[0]} {lo[3]:,.0f}%')
+    else:
+        txt = f'{what} {hi[0]} {hi[3]:,.0f}% ≈ {lo[0]} {lo[3]:,.0f}% (비슷)'
+    txt += f' <span style="color:#6B7A3A">· 광고비 {big[0]} {big[1] / tot * 100:.0f}%</span>'
+    warn = ""
+    if gap and lo[3] < OPS_KPI_ROAS_LOW:
+        warn = f'{lo[0]}는 목표 하단({OPS_KPI_ROAS_LOW:.0f}%) 미달'
+    return {"txt": txt, "hi": hi[0], "lo": lo[0], "gap": gap, "warn": warn,
+            "lo_heavy": gap and big[0] == lo[0]}
+
+
+def _cp_recommendations(df: pd.DataFrame, start: date, end: date,
+                        dev_subs=None, seg_subs=None) -> str:
     """표 아래에 붙는 '그래서 뭘 하라는 건지' 코멘트를 만든다.
 
     판단에서 빼는 경우를 먼저 정리하는 게 핵심이다. 안 그러면 틀린 지시가 나간다.
@@ -13995,8 +14036,11 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
     for _, r in df.iterrows():
         m, cost, roas = r["매체"], float(r["비용"] or 0), r["GA ROAS"]
         rev = float(r["GA매출"] or 0)
-        if r["구분"] == "외부몰":
-            skip.append((m, "외부몰 — 매출이 GA에 안 잡혀 판단 불가 (스마트스토어 연동 필요)"))
+        if r["구분"] == "외부몰" and not (rev > 0 and cost > 0):
+            # 쇼핑검색·GFA 외부몰은 매체 신고 구매·매출로 판단한다(값이 있으면). 없을 때만 제외.
+            if cost <= 0:
+                continue
+            skip.append((m, "외부몰 — 이 기간 매체 신고 매출이 없어 판단 불가"))
         elif cost <= 0 and rev > 0:
             skip.append((m, f"광고비 미연동 — 매출 {rev:,.0f}원은 잡히는데 비용이 없어 ROAS 계산 불가"))
         elif cost <= 0:
@@ -14035,23 +14079,73 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
         head = "아직 판단할 만한 데이터가 없습니다."
         sub = "광고비가 연동된 매체가 없거나 집행액이 1만원도 안 됩니다."
 
+    dev_subs, seg_subs = dev_subs or {}, seg_subs or {}
+    _ext_names = set(df.loc[df["구분"] == "외부몰", "매체"]) if "구분" in df.columns else set()
+
     def line(m, cost, roas, kind):
         move = cost * CP_STEP
         daily = move / days if days else move
+        dv = _cp_split_compare(dev_subs.get(m), "기기")
+        _sl = (CP_SEG_CUSTOM.get(m) or ("타겟",))[0].split("/")[0] if m in CP_SEG_CUSTOM else "타겟"
+        sg = _cp_split_compare(seg_subs.get(m), "구성" if m in CP_SEG_CUSTOM else "타겟")
+        wins = [x["hi"] for x in (dv, sg) if x and x["gap"]]
+        loses = [x["lo"] for x in (dv, sg) if x and x["gap"]]
         if kind == "up":
-            act = (f"예산 <b>+{CP_STEP*100:.0f}%</b> (기간 기준 +{move:,.0f}원 · 일 +{daily:,.0f}원) 테스트 후 "
-                   f"48시간 관찰")
             tag, cls = "증액 검토", "up"
+            act = (f"예산 <b>+{CP_STEP*100:.0f}%</b> (일 +{daily:,.0f}원)"
+                   + (f" — <b>{'·'.join(wins)}</b> 쪽에 먼저 태우세요" if wins else "")
+                   + " · 48시간 관찰")
         elif kind == "down":
-            act = (f"예산 <b>-{CP_STEP*100:.0f}%</b> (기간 기준 -{move:,.0f}원) 또는 소재·타겟 점검 먼저")
             tag, cls = "감액·점검", "down"
+            act = (f"예산 <b>-{CP_STEP*100:.0f}%</b> (기간 기준 -{move:,.0f}원)"
+                   + (f" — <b>{'·'.join(loses)}</b>부터 줄이세요" if loses else " 또는 소재·타겟 점검 먼저"))
         else:
-            act = "현 수준 유지"
             tag, cls = "유지", "keep"
+            if wins:
+                act = (f"총액은 유지하고 <b>{'·'.join(loses)} → {'·'.join(wins)}</b>로 비중 옮겨보기")
+            else:
+                act = "현 수준 유지"
         small = ('  <span class="cp-tag hold">표본 작음</span>'
                  if 0 < cost < CP_SMALL_SAMPLE_SPEND else '')
+        ext = (' <span style="color:#6B7A3A">(매체 신고 매출)</span>' if m in _ext_names else '')
+        detail = " · ".join(x["txt"] for x in (dv, sg) if x)
+        warns = [x["warn"] for x in (dv, sg) if x and x["warn"]]
+        heavy = [x for x in (dv, sg) if x and x["lo_heavy"]]
+        note = ""
+        if warns:
+            note += " · ⚠️ " + ", ".join(warns)
+        if heavy:
+            note += " · 효율 낮은 쪽에 광고비가 더 많이 쓰이는 중"
         return (f'<li><span class="cp-tag {cls}">{tag}</span> <b>{m}</b>{small} — '
-                f'ROAS {roas:,.0f}% · 집행 {cost:,.0f}원 → {act}</li>')
+                f'ROAS {roas:,.0f}%{ext} · 집행 {cost:,.0f}원'
+                + (f'<div style="font-size:13.5px;color:#33402A;margin:3px 0 0 2px">↳ {detail}{note}</div>' if detail else '')
+                + f'<div style="margin:2px 0 0 2px">→ {act}</div></li>')
+
+    # 한눈에 — 나뉘는 매체만 합쳐서 기기·타겟 ROAS를 비교한다
+    def _agg(subs_map, norm):
+        acc = {}
+        for _m, _subs in subs_map.items():
+            if _m in CP_SEG_CUSTOM:
+                continue
+            for nm, c, rv, _ in _cp_split_parts(_subs):
+                k = norm(nm)
+                if not k:
+                    continue
+                a = acc.setdefault(k, [0.0, 0.0]); a[0] += c; a[1] += rv
+        return acc
+    _dv_all = _agg(dev_subs, lambda n: n if n in ("PC", "MO") else None)
+    _sg_all = _agg(seg_subs, lambda n: "리타겟" if "리타" in n else ("신규" if "신규" in n else None))
+    _ov = []
+    for _lbl, _acc in (("기기", _dv_all), ("타겟", _sg_all)):
+        if len(_acc) >= 2:
+            _rs = sorted(((k, v[0], v[1] / v[0] * 100) for k, v in _acc.items() if v[0] > 0), key=lambda x: -x[2])
+            if len(_rs) >= 2:
+                _ov.append(f'{_lbl} 합산 <b>{_rs[0][0]} {_rs[0][2]:,.0f}%</b> vs {_rs[1][0]} {_rs[1][2]:,.0f}% '
+                           f'(광고비 {_rs[0][0]} {_rs[0][1]:,.0f}원 · {_rs[1][0]} {_rs[1][1]:,.0f}원)')
+    overview = ('<div class="cp-rec-sub" style="background:rgba(255,255,255,.55);border-radius:10px;'
+                'padding:9px 12px;margin-top:-4px">📊 ' + ' &nbsp;|&nbsp; '.join(_ov)
+                + ' <span style="color:#6B7A3A;font-size:12.5px">— PC/MO·신규/리타겟이 나뉘는 매체만 합산</span></div>'
+                ) if _ov else ''
 
     items = []
     for m, c, r in up:
@@ -14073,8 +14167,9 @@ def _cp_recommendations(df: pd.DataFrame, start: date, end: date) -> str:
         '<div class="cp-rec-eyebrow">NEXT BEST ACTION</div>'
         f'<div class="cp-rec-head">{head}</div>'
         f'<div class="cp-rec-sub">{sub}</div>'
+        f'{overview}'
         f'<ul class="cp-rec-list">{"".join(items)}</ul>'
-        f'<div class="cp-rec-foot">기준: GA-ROAS 목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}% · '
+        f'<div class="cp-rec-foot">기기·타겟 비교는 두 쪽 ROAS가 {CP_SPLIT_GAP:.2f}배 이상 벌어질 때만 \'낫다\'고 씁니다 · 기준: GA-ROAS 목표 {OPS_KPI_ROAS_LOW:.0f}~{OPS_KPI_ROAS_HIGH:.0f}% · '
         f'집행 {CP_MIN_SPEND_FOR_JUDGE:,.0f}원 미만만 판단 보류 · '
         f'{CP_SMALL_SAMPLE_SPEND:,.0f}원 미만은 <b>표본 작음</b>으로 표시하되 판단은 합니다 · '
         f'예산 이동은 한 번에 {CP_STEP*100:.0f}%씩만 제안합니다 (조회 기간 {start} ~ {end}, {days}일)</div>'
@@ -15754,7 +15849,7 @@ tr.cp-selrow td{background:#EAF0FF;font-weight:800;color:#1E3A8A;border-top:2px 
                 use_container_width=True, hide_index=True,
             )
 
-    st.markdown(CP_CSS + _cp_recommendations(view, start, end), unsafe_allow_html=True)
+    st.markdown(CP_CSS + _cp_recommendations(view, start, end, _gfa_subs, _seg_subs), unsafe_allow_html=True)
 
     with st.expander("🔎 GA 매출이 안 맞을 때 — 매체별 UTM 구성 보기"):
         st.caption(
