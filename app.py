@@ -12574,6 +12574,7 @@ def _gc_kakao_device_scale(ad_creative: pd.DataFrame, d: pd.DataFrame, start: da
                             return v[dev][j] / tot
                     return _acct_share(k)
                 sh = a.loc[_m, "creative"].map(_sh)
+                a[col] = pd.to_numeric(a[col], errors="coerce").fillna(0).astype(float)
                 a.loc[_m, col] = pd.to_numeric(a.loc[_m, col], errors="coerce").fillna(0) * sh
             ad_creative = a
     if d is not None and not d.empty and "source_medium" in d.columns:
@@ -12605,6 +12606,7 @@ def _gc_kakao_device_scale(ad_creative: pd.DataFrame, d: pd.DataFrame, start: da
                             return v[dev][0] / (v["PC"][0] + v["MO"][0])
                     return fb
                 sh = [_gs(cp, ct) for cp, ct in zip(g.loc[_m, "campaign"], g.loc[_m, "creative"])]
+                g[col] = pd.to_numeric(g[col], errors="coerce").fillna(0).astype(float)
                 g.loc[_m, col] = pd.to_numeric(g.loc[_m, col], errors="coerce").fillna(0) * pd.Series(sh, index=g.index[_m])
             d = g
     return ad_creative, d, note
