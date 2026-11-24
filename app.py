@@ -1234,6 +1234,7 @@ TABLES = {
     "creative_alias": "creative_alias",
     "ad_creative_daily": "ad_creative_daily",
     "creative_status_manual": "creative_status_manual",
+    "budget_topup": "budget_topup",
 }
 
 # 채널 요약 시트로 취급하지 않을 시트들
@@ -16463,6 +16464,172 @@ def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰")
 
 
 
+BT_COLS = ["scope", "label", "year", "month", "spend_channel", "sort_order",
+           "budget", "charge1", "charge2", "base", "note"]
+
+
+def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: int):
+    """예산 관리 ① '월 예산 소진 현황' — 엑셀 '11월 예산 소진 현황' 시트를 그대로 옮긴 표(2026-11-24 요청).
+    예산·충전·잔액 기준(base)·메모는 budget_topup 표에 두고, 소진은 대시보드 광고비(ad_spend)로 매일 채운다.
+    잔액 = 잔액 기준 − 소진, 남은 일예산 = 잔액 ÷ 남은 날(오늘~말일). 잔액 기준은 엑셀 잔액 수식의 앞부분
+    (예: 메타 18,000,000 = 마크업 뺀 광고비, 구글 7,700,000 + 이월 351,042, 검색광고 이월 308,014 + 충전)."""
+    import html as _html
+    bt = load_table("budget_topup")
+    if bt is None or bt.empty or not set(BT_COLS) <= set(bt.columns):
+        bt = pd.DataFrame(columns=BT_COLS)
+    bt = bt.copy()
+    for c in ("year", "month", "sort_order"):
+        bt[c] = pd.to_numeric(bt[c], errors="coerce")
+    cur = bt[(bt["year"] == ref.year) & (bt["month"] == ref.month)].copy()
+    for c in ("budget", "charge1", "charge2", "base"):
+        cur[c] = pd.to_numeric(cur[c], errors="coerce")
+    daily = _spend_daily_resolved(ad_spend, ref, end)
+    sp = (daily.groupby("channel")["cost_incl_vat"].sum().to_dict() if not daily.empty else {})
+
+    st.markdown(f"#### {ref.month}월 예산 소진 현황 (충전 · 잔액)")
+    st.markdown(f'<div class="stco-daterange">📆 {ref.month}/1 ~ {end.month}/{end.day} 소진 · '
+                f'남은 일예산은 남은 {days_left}일(오늘~말일)로 나눈 값 · VAT+</div>', unsafe_allow_html=True)
+    if cur.empty:
+        st.info(f"{ref.year}년 {ref.month}월 예산·충전 내역이 아직 없습니다. 아래 '예산·충전 입력'에서 넣어주세요.")
+    W = _cp_won
+    body = []
+    for scope in ["자사몰", "직입점"]:
+        sub = cur[cur["scope"] == scope].sort_values("sort_order")
+        if sub.empty:
+            continue
+        recs = []
+        for _, r in sub.iterrows():
+            ch = str(r.get("spend_channel") or "").strip()
+            used = float(sp.get(ch, 0.0)) if ch else 0.0
+            base = r["base"]
+            bal = (float(base) - used) if pd.notna(base) else None
+            recs.append((r, used, bal))
+        t_bud = sum(float(r["budget"] or 0) for r, _, _ in recs)
+        t_used = sum(u for _, u, _ in recs)
+        t_bal = sum(b for _, _, b in recs if b is not None)
+        body.append(f'<tr class="br-sub"><td class="l">{scope}</td><td>{W(t_bud)}</td><td></td><td></td>'
+                    f'<td>{W(t_used)}</td><td>{W(t_bal)}</td>'
+                    f'<td>{W(t_bal / days_left) if days_left else "—"}</td><td></td><td class="l"></td></tr>')
+        for r, used, bal in recs:
+            def _n(v):
+                return '<span class="cp-mute">—</span>' if v is None or pd.isna(v) or float(v) == 0 else W(v)
+            dl = (bal / days_left) if (bal is not None and days_left) else None
+            low = bal is not None and bal < 0
+            body.append(
+                f'<tr><td class="l m"><span class="br-ind">{r["label"]}</span></td>'
+                f'<td>{_n(r["budget"])}</td><td>{_n(r["charge1"])}</td><td>{_n(r["charge2"])}</td>'
+                f'<td>{W(used) if used else "<span class=cp-mute>—</span>"}</td>'
+                f'<td style="{"color:#B0431A;font-weight:800" if low else ""}">'
+                f'{"<span class=cp-mute>—</span>" if bal is None else W(bal)}</td>'
+                f'<td>{"<span class=cp-mute>—</span>" if dl is None else W(dl)}</td>'
+                f'<td>{"<span class=cp-mute>—</span>" if dl is None else W(dl / 1.1)}</td>'
+                f'<td class="l" style="font-size:12.5px;color:#B0431A;white-space:normal;max-width:360px">'
+                f'{_html.escape(str(r.get("note") or ""))}</td></tr>')
+    heads = ["매체", f"{ref.month}월 예산", "1차충전", "2차충전", f"{ref.month}월 소진", "잔액",
+             "남은 일예산", "일예산(VAT-)", "충전·메모"]
+    th = "".join(f'<th class="{"l" if h in ("매체", "충전·메모") else ""}">{h}</th>' for h in heads)
+    if body:
+        st.markdown(f'<div class="cp-wrap br-scroll"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
+                    f'<tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
+
+    with st.expander(f"✏️ {ref.month}월 예산·충전 입력 (엑셀 '예산 소진 현황' 시트 대신 여기서 고치면 됩니다)"):
+        st.caption("잔액 기준 = 잔액을 계산할 출발 금액(이월 잔여금·마크업 제외 등 반영). 비워두면 잔액을 계산하지 않습니다. "
+                   "소진 연결 = 대시보드 광고비 매체 이름(비우면 소진 0). 줄을 추가하면 새 매체가 생깁니다.")
+        ed = cur[["scope", "label", "spend_channel", "sort_order", "budget", "charge1", "charge2", "base", "note"]] \
+            if not cur.empty else pd.DataFrame(columns=["scope", "label", "spend_channel", "sort_order",
+                                                        "budget", "charge1", "charge2", "base", "note"])
+        ed = ed.sort_values(["scope", "sort_order"]).reset_index(drop=True)
+        new = st.data_editor(
+            ed, key=f"bt_editor_{ref:%Y%m}", num_rows="dynamic", use_container_width=True, hide_index=True,
+            column_config={
+                "scope": st.column_config.SelectboxColumn("구분", options=["자사몰", "직입점"], required=True),
+                "label": st.column_config.TextColumn("매체(표시명)", required=True),
+                "spend_channel": st.column_config.TextColumn("소진 연결(광고비 매체)"),
+                "sort_order": st.column_config.NumberColumn("순서", step=1),
+                "budget": st.column_config.NumberColumn("월 예산", format="%d"),
+                "charge1": st.column_config.NumberColumn("1차충전", format="%d"),
+                "charge2": st.column_config.NumberColumn("2차충전", format="%d"),
+                "base": st.column_config.NumberColumn("잔액 기준", format="%d"),
+                "note": st.column_config.TextColumn("충전·메모", width="large"),
+            })
+        if st.button("💾 저장", key=f"bt_save_{ref:%Y%m}"):
+            out = new.dropna(subset=["label"]).copy()
+            out = out[out["label"].astype(str).str.strip() != ""]
+            out["year"], out["month"] = ref.year, ref.month
+            out["updated_at"] = str(kst_today())
+            for c in ("budget", "charge1", "charge2", "sort_order"):
+                out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+            out["spend_channel"] = out["spend_channel"].fillna("").astype(str)
+            out["note"] = out["note"].fillna("").astype(str)
+            n = save_table("budget_topup", out, "scope,label,year,month", "dashboard")
+            # 표에서 지운 줄은 저장소에서도 지운다
+            try:
+                keep = set(zip(out["scope"], out["label"]))
+                gone = [(a, b) for a, b in zip(cur["scope"], cur["label"]) if (a, b) not in keep]
+                client = get_supabase_client()
+                for a, b in gone:
+                    (client.table(TABLES["budget_topup"]).delete().eq("scope", a).eq("label", b)
+                     .eq("year", ref.year).eq("month", ref.month).execute())
+                _lt_memo().pop("budget_topup", None)
+            except Exception as e:
+                st.warning(f"지운 줄 정리 실패 — {str(e)[:120]}")
+            if n:
+                st.success(f"{n}줄 저장했습니다.")
+                st.rerun()
+
+
+def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
+    """예산 관리 ② '매체 일별 누적 소진' — 1일~1일, 1~2일, 1~3일 … 월 누적 광고비(2026-11-24 요청).
+    매체는 budget_topup(소진 연결)에 있는 순서대로, 없으면 광고비가 있는 매체 전부."""
+    daily = _spend_daily_resolved(ad_spend, ref, end)
+    st.markdown(f"#### {ref.month}월 매체 일별 누적 소진")
+    if daily.empty:
+        st.info("이 달 광고비 데이터가 없습니다.")
+        return
+    d = daily.copy()
+    d["report_date"] = pd.to_datetime(d["report_date"]).dt.date
+    pv = d.pivot_table(index="channel", columns="report_date", values="cost_incl_vat", aggfunc="sum").fillna(0)
+    days = [ref + timedelta(days=i) for i in range((end - ref).days + 1)]
+    pv = pv.reindex(columns=days, fill_value=0).cumsum(axis=1)
+    bt = load_table("budget_topup")
+    order = []
+    if bt is not None and not bt.empty and set(BT_COLS) <= set(bt.columns):
+        b = bt[(pd.to_numeric(bt["year"], errors="coerce") == ref.year)
+               & (pd.to_numeric(bt["month"], errors="coerce") == ref.month)].copy()
+        b["sort_order"] = pd.to_numeric(b["sort_order"], errors="coerce")
+        b["_s"] = b["scope"].map({"자사몰": 0, "직입점": 1}).fillna(2)
+        b = b.sort_values(["_s", "sort_order"])
+        for _, r in b.iterrows():
+            ch = str(r.get("spend_channel") or "").strip()
+            if ch and ch in pv.index and ch not in [o[1] for o in order]:
+                order.append((r["scope"], ch, r["label"]))
+    for ch in pv.index:
+        if ch not in [o[1] for o in order] and pv.loc[ch].iloc[-1] > 0:
+            order.append(("기타", ch, ch))
+    W = lambda v: f"{v:,.0f}"
+    heads = "".join(f'<th>{x.month}/{x.day}' + ("" if i == 0 else f'<br><span class="cp-mute" style="font-weight:600">1~{x.day}일</span>')
+                    + '</th>' for i, x in enumerate(days))
+    rows = []
+    for scope in ["자사몰", "직입점", "기타"]:
+        items = [o for o in order if o[0] == scope]
+        if not items:
+            continue
+        tot = pv.loc[[o[1] for o in items]].sum(axis=0)
+        rows.append(f'<tr class="br-sub"><td class="l" style="position:sticky;left:0;background:#EFEDE8">{scope}</td>'
+                    + "".join(f"<td>{W(v)}</td>" for v in tot) + "</tr>")
+        for _, ch, lbl in items:
+            rows.append(f'<tr><td class="l m" style="position:sticky;left:0;background:#FFF">'
+                        f'<span class="br-ind">{lbl}</span></td>'
+                        + "".join(f"<td>{W(v)}</td>" for v in pv.loc[ch]) + "</tr>")
+    allt = pv.loc[[o[1] for o in order]].sum(axis=0)
+    rows.append('<tr class="cp-tot"><td class="l" style="position:sticky;left:0;background:#14181F">전체 합계</td>'
+                + "".join(f"<td>{W(v)}</td>" for v in allt) + "</tr>")
+    st.markdown(f'<div class="cp-wrap br-scroll"><table class="cp-tbl br-matrix"><thead><tr>'
+                f'<th class="l" style="position:sticky;left:0;background:#F6F4EF;z-index:2">매체</th>{heads}</tr></thead>'
+                f'<tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
+    st.caption("각 칸 = 1일부터 그 날짜까지 누적 광고비(VAT+, 마크업 제외). 맨 오른쪽 칸이 '월 소진'과 같습니다.")
+
+
 def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
                                master=None, decisions=None):
     st.markdown(CP_CSS + BR_CSS, unsafe_allow_html=True)
@@ -16540,6 +16707,10 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
            if ratio is not None else '')
         + '</div></div>', unsafe_allow_html=True)
 
+
+    # ── ① 엑셀 '예산 소진 현황' 표 · ② 일별 누적 소진 (2026-11-24) ──
+    _br_topup_section(ad_spend, ref, end, days_left)
+    _br_cum_daily_section(ad_spend, ref, end)
 
     def verdict(r):
         """조정 대상인지, 어느 방향인지 정한다.
