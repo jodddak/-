@@ -14043,9 +14043,9 @@ EXT_BUDGET_MONTHLY = {
                            0, 0, 7_000_000, 0, 0, 0],
         "네이버 쇼핑검색광고": [2_163_590, 2_191_332, 3_494_133.5, 3_262_360.2, 3_257_952.5,
                           3_275_607.5, 2_282_035.8, 2_163_092.8, 3_192_412.3, 4_400_000,
-                          6_600_000, 3_300_000],    # 11월 6,600,000 (261103 예산 시트로 수정)
+                          8_800_000, 3_300_000],    # 11월 8,800,000 (261123 예산 소진 현황 엑셀)
         "GFA_외부몰": [0, 0, 852_684.8, 2_360_517.5, 2_289_694, 0, 0, 0, 1_045_523.6,
-                      3_300_000, 6_600_000, 2_224_264.4],   # 11월 6,600,000 (261103 예산 시트로 수정)
+                      3_300_000, 8_800_000, 2_224_264.4],   # 11월 8,800,000 (261123 예산 소진 현황 엑셀)
         "메타_외부몰": [2_436_213, 2_159_225.2, 0, 0, 0, 0, 0, 0, 930_310.3, 3_431_753.8,
                      0, 2_200_000],          # 11월 0원 — 운영 안 함(2026-11-09 담당자)
     },
@@ -16505,7 +16505,8 @@ def _bt_frame() -> tuple:
     return pd.DataFrame(BT_SEED, columns=BT_COLS), False
 
 
-def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: int):
+def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: int,
+                      budget: pd.DataFrame = None, scope_sel: str = "자사몰"):
     """예산 관리 ① '월 예산 소진 현황' — 엑셀 '11월 예산 소진 현황' 시트를 그대로 옮긴 표(2026-11-24 요청).
     예산·충전·잔액 기준(base)·메모는 budget_topup 표에 두고, 소진은 대시보드 광고비(ad_spend)로 매일 채운다.
     잔액 = 잔액 기준 − 소진, 남은 일예산 = 잔액 ÷ 남은 날(오늘~말일). 잔액 기준은 엑셀 잔액 수식의 앞부분
@@ -16527,7 +16528,7 @@ def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: i
         st.info(f"{ref.year}년 {ref.month}월 예산·충전 내역이 아직 없습니다. 아래 '예산·충전 입력'에서 넣어주세요.")
     W = _cp_won
     body = []
-    for scope in ["자사몰", "직입점"]:
+    for scope in [scope_sel]:
         sub = cur[cur["scope"] == scope].sort_values("sort_order")
         if sub.empty:
             continue
@@ -16565,6 +16566,8 @@ def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: i
     if body:
         st.markdown(f'<div class="cp-wrap br-scroll"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
                     f'<tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
+    if scope_sel == "자사몰":
+        _br_own_ratio_block(ad_spend, ref, cur, budget)
 
     if not _bt_live:
         st.caption("ℹ️ 지금은 엑셀(11/23 저장본) 값을 보여주는 중입니다 — 대시보드 저장소의 예산·충전 표(budget_topup)를 "
@@ -16615,7 +16618,71 @@ def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: i
                 st.rerun()
 
 
-def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
+BR_REV_KEY, BR_REV_DAY_KEY = "__자사몰매출MTD__", "__자사몰매출기준일__"
+
+
+def _br_own_ratio_block(ad_spend: pd.DataFrame, ref: date, cur: pd.DataFrame, budget: pd.DataFrame):
+    """표 밑 '자사몰 매출 · 자사몰 광고비 · 광고비 비율'(엑셀 F15~F17, 2026-11-24 요청).
+    매출은 관리자 매출이라 사람이 넣는다(channel_budget의 __자사몰매출MTD__/__자사몰매출기준일__ 줄).
+    광고비 = 자사몰 매체 소진(기준일까지) − 네이버 브랜드검색(정액 선지불이라 엑셀도 뺀다)."""
+    rev, day = None, None
+    if budget is not None and not budget.empty and "budget_cost" in budget.columns:
+        b = budget.copy()
+        b = b[(b.get("scope") == "자사몰") & (pd.to_numeric(b["year"], errors="coerce") == ref.year)
+              & (pd.to_numeric(b["month"], errors="coerce") == ref.month)]
+        _m = dict(zip(b["channel"].astype(str), pd.to_numeric(b["budget_cost"], errors="coerce")))
+        if pd.notna(_m.get(BR_REV_KEY)):
+            rev = float(_m[BR_REV_KEY])
+        try:
+            d = int(_m.get(BR_REV_DAY_KEY))
+            day = date(d // 10000, d // 100 % 100, d % 100)
+        except Exception:
+            day = None
+    own = cur[cur["scope"] == "자사몰"]
+    chans = [str(c).strip() for c in own["spend_channel"] if str(c).strip()
+             and str(c).strip() != "네이버 브랜드검색광고"]
+    spend = 0.0
+    if day:
+        dd = _spend_daily_resolved(ad_spend, ref, day)
+        if not dd.empty:
+            spend = float(dd[dd["channel"].isin(chans)]["cost_incl_vat"].sum())
+    ratio = (spend / rev * 100) if rev else None
+    per = f"{ref.month}/1~{day.month}/{day.day}" if day else "기간 미입력"
+    tgt = BR_AD_RATIO_TARGET * 100
+    st.markdown(
+        '<div class="cp-wrap"><div class="cp-kpis" style="margin-top:10px">'
+        f'<div class="cp-kpi"><div class="k">{per} 자사몰 매출</div>'
+        f'<div class="v">{_cp_won(rev) if rev else "—"}</div><div class="s">관리자 매출 · 직접 입력</div></div>'
+        f'<div class="cp-kpi"><div class="k">{per} 자사몰 광고비</div>'
+        f'<div class="v">{_cp_won(spend) if day else "—"}</div>'
+        f'<div class="s">자사몰 매체 소진 · 브랜드검색(정액) 제외</div></div>'
+        f'<div class="cp-kpi"><div class="k">광고비 비율</div>'
+        f'<div class="v" style="{"color:#B0431A" if ratio and ratio > tgt else ""}">'
+        f'{f"{ratio:.1f}%" if ratio is not None else "—"}</div>'
+        f'<div class="s">광고비 ÷ 매출 · 목표 {tgt:.0f}%</div></div>'
+        '</div></div>', unsafe_allow_html=True)
+    with st.expander("✏️ 자사몰 매출 입력"):
+        c1, c2, c3 = st.columns([1.2, 1, 0.6])
+        with c1:
+            v = st.number_input("자사몰 매출(원)", min_value=0, step=100000, value=int(rev or 0),
+                                key=f"br_rev_{ref:%Y%m}")
+        with c2:
+            dv = st.date_input("매출 기준일(이 날까지)", day or (kst_today() - timedelta(days=1)),
+                               key=f"br_revday_{ref:%Y%m}", format="YYYY-MM-DD")
+        with c3:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("💾 저장", key=f"br_revsave_{ref:%Y%m}", use_container_width=True):
+                rows = pd.DataFrame([
+                    {"scope": "자사몰", "channel": BR_REV_KEY, "year": ref.year, "month": ref.month,
+                     "budget_cost": float(v)},
+                    {"scope": "자사몰", "channel": BR_REV_DAY_KEY, "year": ref.year, "month": ref.month,
+                     "budget_cost": float(dv.year * 10000 + dv.month * 100 + dv.day)}])
+                if save_table("channel_budget", rows, "scope,channel,year,month", "dashboard"):
+                    st.cache_data.clear()
+                    st.rerun()
+
+
+def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date, scope_sel: str = "자사몰"):
     """예산 관리 ② '매체 일별 누적 소진' — 1일~1일, 1~2일, 1~3일 … 월 누적 광고비(2026-11-24 요청).
     매체는 budget_topup(소진 연결)에 있는 순서대로, 없으면 광고비가 있는 매체 전부."""
     daily = _spend_daily_resolved(ad_spend, ref, end)
@@ -16647,7 +16714,7 @@ def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
     heads = "".join(f'<th>{x.month}/{x.day}' + ("" if i == 0 else f'<br><span class="cp-mute" style="font-weight:600">1~{x.day}일</span>')
                     + '</th>' for i, x in enumerate(days))
     rows = []
-    for scope in ["자사몰", "직입점", "제로라운지", "기타"]:
+    for scope in [scope_sel]:
         items = [o for o in order if o[0] == scope]
         if not items:
             continue
@@ -16658,9 +16725,9 @@ def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
             rows.append(f'<tr><td class="l m" style="position:sticky;left:0;background:#FFF">'
                         f'<span class="br-ind">{lbl}</span></td>'
                         + "".join(f"<td>{W(v)}</td>" for v in pv.loc[ch]) + "</tr>")
-    allt = pv.loc[[o[1] for o in order]].sum(axis=0)
-    rows.append('<tr class="cp-tot"><td class="l" style="position:sticky;left:0;background:#14181F;color:#FFF">전체 합계</td>'
-                + "".join(f"<td>{W(v)}</td>" for v in allt) + "</tr>")
+    if not rows:
+        st.info(f"{scope_sel} 매체 광고비가 없습니다.")
+        return
     st.markdown(f'<div class="cp-wrap br-scroll"><table class="cp-tbl br-matrix"><thead><tr>'
                 f'<th class="l" style="position:sticky;left:0;background:#F6F4EF;z-index:2">매체</th>{heads}</tr></thead>'
                 f'<tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
@@ -16746,8 +16813,9 @@ def render_budget_realloc_page(ad_spend, ga_daily, channel_mix, budget=None,
 
 
     # ── ① 엑셀 '예산 소진 현황' 표 · ② 일별 누적 소진 (2026-11-24) ──
-    _br_topup_section(ad_spend, ref, end, days_left)
-    _br_cum_daily_section(ad_spend, ref, end)
+    _bsel = _gc_choice("구분", ["자사몰", "직입점"], key="br_scope_sel") or "자사몰"
+    _br_topup_section(ad_spend, ref, end, days_left, budget=budget, scope_sel=_bsel)
+    _br_cum_daily_section(ad_spend, ref, end, scope_sel=_bsel)
 
     def verdict(r):
         """조정 대상인지, 어느 방향인지 정한다.
