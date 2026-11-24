@@ -16467,6 +16467,43 @@ def _br_year_matrix(budget, year: int, ref_month: int, scope: str = "자사몰")
 BT_COLS = ["scope", "label", "year", "month", "spend_channel", "sort_order",
            "budget", "charge1", "charge2", "base", "note"]
 
+# 엑셀 '26년 예산 관리 … 11월 예산 소진 현황'(2026-11-23 저장본) — 저장소(budget_topup)를 못 읽을 때 쓰는 기본값
+BT_SEED = [
+    ("자사몰", "네이버 검색광고", 2026, 11, "네이버 검색광고", 1, 880000, 880000, 0, 1188014,
+     "11/2 880,000원 · 잔액 = 이월 잔여금 308,014원 + 충전 880,000원 − 소진"),
+    ("자사몰", "네이버 브검", 2026, 11, "네이버 브랜드검색광고", 2, 0, 0, 0, None, "정액 계약(일할) — 잔액 관리 안 함"),
+    ("자사몰", "네이버 GFA", 2026, 11, "네이버 GFA", 3, 18000000, 10000000, 0, 18000000,
+     "11/2 10,000,000원 충전 11/18 6,000,000원, 11/24 2,000,000원 충전"),
+    ("자사몰", "카카오톡 플친", 2026, 11, "카카오", 4, 7700000, 6600000, 0, 7700000, ""),
+    ("자사몰", "메타", 2026, 11, "메타", 5, 20700000, 0, 0, 18000000,
+     "예산 = 광고비 18,000,000원 + 마크업 15% 2,700,000원 · 잔액은 광고비 기준"),
+    ("자사몰", "구글", 2026, 11, "구글", 6, 8850000, 0, 0, 8051042,
+     "예산 = 광고비 7,700,000원 + 마크업 1,150,000원 · 잔액 = 7,700,000 + 이월 351,042 − 소진"),
+    ("자사몰", "크리테오", 2026, 11, "크리테오", 7, 6600000, 0, 0, 6600000, ""),
+    ("자사몰", "애드부스트", 2026, 11, "네이버 애드부스트", 8, 6600000, 5500000, 0, 6600000,
+     "11/2 5,500,000원, 11/24 1,100,000원 충전"),
+    ("자사몰", "카카오모먼트", 2026, 11, "카카오모먼트", 9, 6600000, 2200000, 0, 6600000,
+     "11/2 1,100,000원, 11/17 1,100,000원, 11/24 2,200,000원 충전"),
+    ("자사몰", "법인카드정산", 2026, 11, "", 10, 100000, 0, 0, None, ""),
+    ("직입점", "벤더 (웹뜰 등)", 2026, 11, "", 1, 0, 0, 0, 0, ""),
+    ("직입점", "직입점 (유료 광고 외)", 2026, 11, "", 2, 0, 0, 0, 0, ""),
+    ("직입점", "직입점 (네이버 브랜드검색)", 2026, 11, "", 3, 0, 0, 0, 0, ""),
+    ("직입점", "직입점 (네이버 쇼핑검색)", 2026, 11, "네이버 쇼핑검색광고", 4, 8800000, 0, 0, 8800000,
+     "11/2 6,600,000원, 11/20 2,200,000원 충전"),
+    ("직입점", "직입점 (네이버 GFA)", 2026, 11, "네이버 GFA_외부몰", 5, 8800000, 0, 0, 8800000,
+     "11/2 6,600,000원, 11/20 2,200,000원 충전"),
+    ("직입점", "직입점 (메타)", 2026, 11, "", 6, 0, 0, 0, 0, "9/14충전"),
+    ("직입점", "법인카드정산", 2026, 11, "", 7, 0, 0, 0, 0, ""),
+]
+
+
+def _bt_frame() -> tuple:
+    """budget_topup을 읽고, 못 읽으면(표가 비었거나 권한 없음) 엑셀 기본값을 쓴다. (표, 저장소에서 읽었나)"""
+    bt = load_table("budget_topup")
+    if bt is not None and not bt.empty and set(BT_COLS) <= set(bt.columns):
+        return bt.copy(), True
+    return pd.DataFrame(BT_SEED, columns=BT_COLS), False
+
 
 def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: int):
     """예산 관리 ① '월 예산 소진 현황' — 엑셀 '11월 예산 소진 현황' 시트를 그대로 옮긴 표(2026-11-24 요청).
@@ -16474,10 +16511,7 @@ def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: i
     잔액 = 잔액 기준 − 소진, 남은 일예산 = 잔액 ÷ 남은 날(오늘~말일). 잔액 기준은 엑셀 잔액 수식의 앞부분
     (예: 메타 18,000,000 = 마크업 뺀 광고비, 구글 7,700,000 + 이월 351,042, 검색광고 이월 308,014 + 충전)."""
     import html as _html
-    bt = load_table("budget_topup")
-    if bt is None or bt.empty or not set(BT_COLS) <= set(bt.columns):
-        bt = pd.DataFrame(columns=BT_COLS)
-    bt = bt.copy()
+    bt, _bt_live = _bt_frame()
     for c in ("year", "month", "sort_order"):
         bt[c] = pd.to_numeric(bt[c], errors="coerce")
     cur = bt[(bt["year"] == ref.year) & (bt["month"] == ref.month)].copy()
@@ -16532,6 +16566,9 @@ def _br_topup_section(ad_spend: pd.DataFrame, ref: date, end: date, days_left: i
         st.markdown(f'<div class="cp-wrap br-scroll"><table class="cp-tbl"><thead><tr>{th}</tr></thead>'
                     f'<tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
 
+    if not _bt_live:
+        st.caption("ℹ️ 지금은 엑셀(11/23 저장본) 값을 보여주는 중입니다 — 대시보드 저장소의 예산·충전 표(budget_topup)를 "
+                   "읽을 권한이 아직 없어 아래 입력칸에서 고쳐도 저장되지 않습니다.")
     with st.expander(f"✏️ {ref.month}월 예산·충전 입력 (엑셀 '예산 소진 현황' 시트 대신 여기서 고치면 됩니다)"):
         st.caption("잔액 기준 = 잔액을 계산할 출발 금액(이월 잔여금·마크업 제외 등 반영). 비워두면 잔액을 계산하지 않습니다. "
                    "소진 연결 = 대시보드 광고비 매체 이름(비우면 소진 0). 줄을 추가하면 새 매체가 생깁니다.")
@@ -16591,7 +16628,7 @@ def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
     pv = d.pivot_table(index="channel", columns="report_date", values="cost_incl_vat", aggfunc="sum").fillna(0)
     days = [ref + timedelta(days=i) for i in range((end - ref).days + 1)]
     pv = pv.reindex(columns=days, fill_value=0).cumsum(axis=1)
-    bt = load_table("budget_topup")
+    bt, _ = _bt_frame()
     order = []
     if bt is not None and not bt.empty and set(BT_COLS) <= set(bt.columns):
         b = bt[(pd.to_numeric(bt["year"], errors="coerce") == ref.year)
