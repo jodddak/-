@@ -16642,12 +16642,12 @@ def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
                 order.append((r["scope"], ch, r["label"]))
     for ch in pv.index:
         if ch not in [o[1] for o in order] and pv.loc[ch].iloc[-1] > 0:
-            order.append(("기타", ch, ch))
+            order.append(("제로라운지", ch, "메타 (제로라운지)") if "제로라운지" in ch else ("기타", ch, ch))
     W = lambda v: f"{v:,.0f}"
     heads = "".join(f'<th>{x.month}/{x.day}' + ("" if i == 0 else f'<br><span class="cp-mute" style="font-weight:600">1~{x.day}일</span>')
                     + '</th>' for i, x in enumerate(days))
     rows = []
-    for scope in ["자사몰", "직입점", "기타"]:
+    for scope in ["자사몰", "직입점", "제로라운지", "기타"]:
         items = [o for o in order if o[0] == scope]
         if not items:
             continue
@@ -16659,7 +16659,7 @@ def _br_cum_daily_section(ad_spend: pd.DataFrame, ref: date, end: date):
                         f'<span class="br-ind">{lbl}</span></td>'
                         + "".join(f"<td>{W(v)}</td>" for v in pv.loc[ch]) + "</tr>")
     allt = pv.loc[[o[1] for o in order]].sum(axis=0)
-    rows.append('<tr class="cp-tot"><td class="l" style="position:sticky;left:0;background:#14181F">전체 합계</td>'
+    rows.append('<tr class="cp-tot"><td class="l" style="position:sticky;left:0;background:#14181F;color:#FFF">전체 합계</td>'
                 + "".join(f"<td>{W(v)}</td>" for v in allt) + "</tr>")
     st.markdown(f'<div class="cp-wrap br-scroll"><table class="cp-tbl br-matrix"><thead><tr>'
                 f'<th class="l" style="position:sticky;left:0;background:#F6F4EF;z-index:2">매체</th>{heads}</tr></thead>'
